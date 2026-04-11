@@ -6,10 +6,12 @@ import streamlit as st
 import yfinance as yf
 import altair as alt
 import time
+import os
 import json
 from copy import deepcopy
 from pathlib import Path
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
+import streamlit.components.v1 as components
 
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
@@ -1107,6 +1109,19 @@ def render_inputs_tab(universe_map: dict):
         st.rerun()
 
 
+def render_tester_tab() -> None:
+    tester_url = st.secrets.get("TESTER_APP_URL", os.environ.get("TESTER_APP_URL", "")).strip()
+    if not tester_url:
+        st.info(
+            "Tester app URL is not configured. "
+            "Set `TESTER_APP_URL` in Streamlit app Secrets to embed Tester here."
+        )
+        st.code("TESTER_APP_URL = \"https://your-tester-app.streamlit.app\"")
+        return
+    st.caption(f"Tester mounted from {tester_url}")
+    components.iframe(tester_url, height=2100, scrolling=True)
+
+
 def extract_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if px is None or px.empty:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
@@ -1804,7 +1819,7 @@ def main():
     if flow_unavailable:
         st.warning("Fund flow data unavailable")
 
-    table_tab, charts_tab, graphs_tab, inputs_tab = st.tabs(["Table", "Charts", "Graphs", "Inputs"])
+    table_tab, charts_tab, graphs_tab, inputs_tab, tester_tab = st.tabs(["Table", "Charts", "Graphs", "Inputs", "Tester"])
     with table_tab:
         table_df = filtered_df.copy().reset_index(drop=True)
         table_df["__row_id__"] = np.arange(len(table_df))
@@ -1959,6 +1974,8 @@ def main():
         render_graphs_tab(graph_ordered_df.drop(columns=["__row_id__"], errors="ignore"), selected_universe, selected_universe_name)
     with inputs_tab:
         render_inputs_tab(universe_map)
+    with tester_tab:
+        render_tester_tab()
 
 
 if __name__ == "__main__":
