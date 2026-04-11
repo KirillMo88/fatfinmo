@@ -71,9 +71,27 @@ ETF_UNIVERSE_SHORT = {
     },
 }
 
+ETF_UNIVERSE_CRYPTO = {
+    "Crypto": {
+        "BTC": ["BTC-USD"],
+        "L1": [
+            "ETH-USD", "SOL-USD", "SUI-USD", "APT-USD", "NEAR-USD", "TRON-USD", "ADA-USD",
+            "AVAX-USD", "TON-USD", "HBAR-USD", "VET-USD", "INJ-USD", "TIA-USD", "DOT-USD",
+        ],
+        "CEX": ["BNB-USD", "BGB-USD", "OKB-USD", "CRO-USD"],
+        "PAYMENT": ["XRP-USDT", "XLM-USDT", "LTC-USD", "BCH-USD", "XMR-USD", "DASH-USD", "CELO-USD"],
+        "Oracles": ["LINK-USD", "PYTH-USD", "BAND-USD"],
+        "DEFI": ["AAVE-USD", "JUP-USD", "HYPE32196-USD", "UNI-USD", "RAY-USD"],
+        "L2": ["MATIC-USD", "ARB-USD", "OP-USD", "ZK-USD"],
+        "MEMES": ["DOGE-USD", "SHIB-USD", "TRUMP-USD"],
+        "SHARED COMPUTE": ["TAO-USD", "RENDER-USD", "FET-USD"],
+    }
+}
+
 ETF_UNIVERSE_MAP = {
     "Full list": ETF_UNIVERSE_FULL,
     "Short List": ETF_UNIVERSE_SHORT,
+    "Crypto list": ETF_UNIVERSE_CRYPTO,
 }
 UNIVERSE_STORAGE_PATH = Path(__file__).with_name("custom_universe_lists.json")
 
