@@ -2,6 +2,6 @@ streamlit>=1.43,<2
 pandas>=2.0,<3
 numpy>=1.24,<3
 yfinance>=0.2.40,<1
-altair>=5.0,<6
+altair==5.4.1
 streamlit-aggrid>=1.1.0,<2
 ta>=0.11,<1
