@@ -1,0 +1,172 @@
+{
+  "Full list": {
+    "Crypto": {
+      "BTC": [
+        "BTC-USD"
+      ],
+      "Other": [
+        "ETH-USD",
+        "SOL-USD"
+      ]
+    },
+    "Gold": {
+      "Gold": [
+        "GLD",
+        "SLV",
+        "GDX",
+        "GDXJ",
+        "SIL"
+      ]
+    },
+    "Equities": {
+      "US": [
+        "SPY",
+        "QQQ",
+        "IWM",
+        "MTUM",
+        "VLU",
+        "VUG",
+        "SPYD",
+        "XLK",
+        "ARKK",
+        "XLC",
+        "XLF",
+        "XLI",
+        "XLY",
+        "XLE",
+        "XLB",
+        "XLP",
+        "XLU",
+        "XLV",
+        "IBB"
+      ],
+      "DM": [
+        "VEA",
+        "EWG",
+        "EWI",
+        "EWU",
+        "EWJ",
+        "EPP",
+        "EWY"
+      ],
+      "EM": [
+        "EEM",
+        "MCHI",
+        "FXI",
+        "KWEB",
+        "INDA",
+        "ASEA",
+        "EWZ",
+        "ILF"
+      ]
+    },
+    "Bonds": {
+      "Bonds": [
+        "SGOV",
+        "SHY",
+        "IEF",
+        "TLT",
+        "TIP",
+        "EMB",
+        "HYG",
+        "JNK"
+      ]
+    },
+    "Commodities": {
+      "Energy": [
+        "DBO",
+        "URNM",
+        "UGA"
+      ],
+      "Commodities": [
+        "DBC",
+        "DBA",
+        "DBO",
+        "DBP",
+        "DBB",
+        "DBE"
+      ],
+      "Metals": [
+        "PALL",
+        "CPER",
+        "PPLT",
+        "COPX"
+      ]
+    },
+    "Real Estate": {
+      "US": [
+        "VNQ"
+      ],
+      "ex US": [
+        "VNQI"
+      ]
+    }
+  },
+  "Short List": {
+    "Crypto": {
+      "BTC": [
+        "BTC-USD"
+      ],
+      "Other": [
+        "ETH-USD",
+        "SOL-USD"
+      ]
+    },
+    "Gold": {
+      "Gold": [
+        "GLD",
+        "GDX",
+        "SLV"
+      ]
+    },
+    "Equities": {
+      "US": [
+        "SPY",
+        "QQQ",
+        "IWM",
+        "MTUM",
+        "VLUE"
+      ],
+      "DM": [
+        "VEA",
+        "EWG",
+        "EWI"
+      ],
+      "EM": [
+        "EEM",
+        "MCHI",
+        "FXI",
+        "KWEB",
+        "INDA",
+        "ASEA",
+        "EWZ",
+        "ILF"
+      ]
+    },
+    "Bonds": {
+      "Bonds": [
+        "TLT",
+        "TIP",
+        "EMB",
+        "HYG"
+      ]
+    },
+    "Commodities": {
+      "Commodities": [
+        "DBC",
+        "DBA",
+        "DBO",
+        "DBP",
+        "DBB"
+      ]
+    },
+    "Real Estate": {
+      "US": [
+        "VNQ"
+      ],
+      "ex US": [
+        "VNQI"
+      ]
+    }
+  }
+}
