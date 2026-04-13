@@ -1804,7 +1804,7 @@ def main():
         unsafe_allow_html=True,
     )
 
-    top_left, top_mid, top_refresh_col, top_hard_refresh_col, top_status_col = st.columns([2, 6, 1, 1.4, 2.6])
+    top_left, top_mid, top_refresh_col, top_hard_refresh_col = st.columns([2, 7.5, 1, 1.4])
     with top_left:
         selected_universe_name = st.selectbox("ETF Version", options=list(universe_map.keys()), index=0)
     with top_refresh_col:
@@ -1835,14 +1835,18 @@ def main():
             divergence_cfg,
             divergence_signature,
         )
-    with top_status_col:
-        refresh_text = "n/a"
-        try:
-            ts = pd.to_datetime(app_refresh_utc, utc=True)
-            refresh_text = ts.strftime("%Y-%m-%d %H:%M UTC")
-        except Exception:
-            pass
-        st.caption(f"App Refresh: {refresh_text}")
+    refresh_text = "n/a"
+    try:
+        ts = pd.to_datetime(app_refresh_utc, utc=True)
+        refresh_text = ts.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        pass
+    _, refresh_col = st.columns([8, 2])
+    with refresh_col:
+        st.markdown(
+            f"<div style='text-align:right; font-size:0.85rem; color:#cbd5e1;'>App Refresh: <b>{refresh_text}</b></div>",
+            unsafe_allow_html=True,
+        )
 
     filtered_df, flow_unavailable = apply_filters(df)
     graph_ordered_df = filtered_df.copy()
