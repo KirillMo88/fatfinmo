@@ -99,7 +99,7 @@ GRAPH_PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly", "Full history"]
 
 DISPLAY_COLUMNS = [
     "Group", "Subgroup", "Ticker",
-    "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%",
+    "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
     "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "ADX_14", "BB_Position",
     "SMA50w_vs_SMA200w_Spread_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
@@ -111,6 +111,7 @@ TABLE_HEADER_NAMES = {
     "Group": "Group",
     "Subgroup": "Sub\ngroup",
     "Ticker": "Ticker",
+    "Perf_1D_%": "Perf\n1D %",
     "Perf_1W_%": "Perf\n1W %",
     "Perf_1M_%": "Perf\n1M %",
     "Perf_3M_%": "Perf\n3M %",
@@ -118,6 +119,7 @@ TABLE_HEADER_NAMES = {
     "Perf_12M_%": "Perf\n12M %",
     "Perf_3Y_%": "Perf\n3Y %",
     "Perf_5Y_%": "Perf\n5Y %",
+    "Perf_10Y_%": "Perf\n10Y %",
     "FundFlows_1M_%": "FundFlows\n1M %",
     "FundFlows_3M_%": "FundFlows\n3M %",
     "Price_vs_52W_High_%": "Price vs\n52W High %",
@@ -149,7 +151,7 @@ TABLE_PERMANENTLY_HIDDEN_COLUMNS = {
 }
 
 NUMERIC_COLUMNS = [
-    "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%",
+    "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
     "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
     "BB_Position",
@@ -160,6 +162,7 @@ NUMERIC_COLUMNS = [
 ]
 
 PERFORMANCE_COLUMNS = [
+    "Perf_1D_%",
     "Perf_1W_%",
     "Perf_1M_%",
     "Perf_3M_%",
@@ -167,6 +170,7 @@ PERFORMANCE_COLUMNS = [
     "Perf_12M_%",
     "Perf_3Y_%",
     "Perf_5Y_%",
+    "Perf_10Y_%",
 ]
 
 PERF_TOP5_MAP = {
@@ -814,6 +818,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         cur_px = float(close.iloc[-1])
 
         # Performance (calendar-day approximations)
+        perf_1d = safe_perf(close, today, 1)
         perf_1w = safe_perf(close, today, 7)
         perf_1m = safe_perf(close, today, 30)
         perf_3m = safe_perf(close, today, 90)
@@ -821,6 +826,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         perf_12m = safe_perf(close, today, 365)
         perf_3y = safe_perf(close, today, 365 * 3)
         perf_5y = safe_perf(close, today, 365 * 5)
+        perf_10y = safe_perf(close, today, 365 * 10)
 
         # 52W high distance
         last_52w = close.loc[today - pd.Timedelta(days=365 * 1.1):]
@@ -900,8 +906,8 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         flows_3m = np.nan
 
         return [
-            perf_1w, perf_1m, perf_3m, perf_6m,
-            perf_12m, perf_3y, perf_5y,
+            perf_1d, perf_1w, perf_1m, perf_3m, perf_6m,
+            perf_12m, perf_3y, perf_5y, perf_10y,
             flows_1m, flows_3m,
             vs_52w, vs_ath, cur_rsi,
             spread_pct_now, spread_avg_36m, spread_pct_change_6m, sma_trend,
@@ -924,14 +930,14 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
             for ticker in tickers:
                 res = get_metrics(ticker, divergence_cfg)
                 if res is None:
-                    rows.append([group, subgroup, ticker] + [np.nan] * 35)
+                    rows.append([group, subgroup, ticker] + [np.nan] * 37)
                 else:
                     rows.append([group, subgroup, ticker] + res)
 
     columns = [
         "Group", "Subgroup", "Ticker",
-        "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%",
-        "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%",
+        "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%",
+        "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
         "FundFlows_1M_%", "FundFlows_3M_%",
         "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
         "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
