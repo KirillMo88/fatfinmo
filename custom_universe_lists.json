@@ -6,7 +6,8 @@
       ],
       "Other": [
         "ETH-USD",
-        "SOL-USD"
+        "SOL-USD",
+        "BITW"
       ]
     },
     "Gold": {
@@ -26,9 +27,10 @@
         "MTUM",
         "VLU",
         "VUG",
-        "SPYD",
+        "SPYD"
+      ],
+      "US Sectors": [
         "XLK",
-        "ARKK",
         "XLC",
         "XLF",
         "XLI",
@@ -41,28 +43,64 @@
         "IBB"
       ],
       "DM": [
-        "VEA",
-        "EWG",
-        "EWI",
-        "EWU",
-        "EWJ",
-        "EPP",
-        "EWY"
+        "VEA"
       ],
       "EM": [
-        "EEM",
-        "MCHI",
-        "FXI",
-        "KWEB",
+        "EEM"
+      ],
+      "EU": [
+        "EWG",
+        "EWQ",
+        "EWI",
+        "EWU"
+      ],
+      "Asia": [
+        "EWJ",
+        "EWY",
         "INDA",
-        "ASEA",
-        "EWZ",
-        "ILF"
+        "ASEA"
+      ],
+      "China": [
+        "MCHI",
+        "KWEB"
+      ],
+      "Pacific": [
+        "EPP"
+      ],
+      "LATAM": [
+        "ILF",
+        "EWZ"
+      ]
+    },
+    "Equity": {
+      "Asia": [
+        "EIDO",
+        "EPHE",
+        "EWM",
+        "EWT",
+        "THD",
+        "TUR",
+        "VNM"
+      ],
+      "LATAM": [
+        "ECH",
+        "EPU",
+        "EWW"
+      ],
+      "Tech": [
+        "BLOK",
+        "BUG",
+        "DTCR",
+        "SKYY",
+        "SOXX",
+        "TINY"
+      ],
+      "Transport": [
+        "BOAT"
       ]
     },
     "Bonds": {
       "Bonds": [
-        "SGOV",
         "SHY",
         "IEF",
         "TLT",
@@ -73,24 +111,29 @@
       ]
     },
     "Commodities": {
+      "Commodities": [
+        "DBC"
+      ],
       "Energy": [
         "DBO",
+        "DBE",
+        "FCG",
         "URNM",
-        "UGA"
+        "FAN",
+        "TAN"
       ],
-      "Commodities": [
-        "DBC",
-        "DBA",
-        "DBO",
-        "DBP",
-        "DBB",
-        "DBE"
+      "Agriculture": [
+        "DBA"
       ],
       "Metals": [
+        "DBP",
+        "DBB",
         "PALL",
-        "CPER",
         "PPLT",
-        "COPX"
+        "CPER",
+        "COPX",
+        "LIT",
+        "REMX"
       ]
     },
     "Real Estate": {

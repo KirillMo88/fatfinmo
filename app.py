@@ -21,30 +21,41 @@ from ta.trend import MACD
 # ============================================================
 ETF_UNIVERSE_FULL = {
     "Crypto": {
-        "Crypto": ["IBIT"],
+        "BTC": ["BTC-USD"],
+        "Other": ["ETH-USD", "SOL-USD", "BITW"],
     },
     "Gold": {
         "Gold": ["GLD", "SLV", "GDX", "GDXJ", "SIL"],
     },
     "Equities": {
-        "US": [
-            "SPY", "QQQ", "IWM", "MTUM", "VLU", "VUG", "SPYD",
-            "XLK", "ARKK", "XLC", "XLF", "XLI", "XLY", "XLE",
-            "XLB", "XLP", "XLU", "XLV", "IBB"
-        ],
-        "DM": ["VEA", "EWG", "EWI", "EWU", "EWJ", "EPP", "EWY"],
-        "EM": ["EEM", "MCHI", "FXI", "KWEB", "INDA", "ASEA", "EWZ", "ILF"],
+        "US": ["SPY", "QQQ", "IWM", "MTUM", "VLU", "VUG", "SPYD"],
+        "US Sectors": ["XLK", "XLC", "XLF", "XLI", "XLY", "XLE", "XLB", "XLP", "XLU", "XLV", "IBB"],
+        "DM": ["VEA"],
+        "EM": ["EEM"],
+        "EU": ["EWG", "EWQ", "EWI", "EWU"],
+        "Asia": ["EWJ", "EWY", "INDA", "ASEA"],
+        "China": ["MCHI", "KWEB"],
+        "Pacific": ["EWA"],
+        "LATAM": ["ILF", "EWZ"],
+    },
+    "Equity": {
+        "Asia": ["EIDO", "EPHE", "EWM", "EWT", "THD", "TUR", "VNM"],
+        "LATAM": ["ECH", "EPU", "EWW"],
+        "Tech": ["BLOK", "BUG", "DTCR", "SKYY", "SOXX", "TINY"],
+        "Transport": ["BOAT"],
     },
     "Bonds": {
-        "Bonds": ["SGOV", "SHY", "IEF", "TLT", "TIP", "EMB", "HYG", "JNK"],
+        "Bonds": ["SHY", "IEF", "TLT", "TIP", "EMB", "HYG", "JNK"],
     },
     "Commodities": {
-        "Energy": ["DBO", "URNM", "UGA"],
-        "Commodities": ["DBC", "DBA", "DBO", "DBP", "DBB", "DBE"],
-        "Metals": ["PALL", "CPER", "PPLT"],
+        "Commodities": ["DBC"],
+        "Energy": ["DBO", "DBE", "FCG", "URNM", "FAN", "TAN"],
+        "Agriculture": ["DBA"],
+        "Metals": ["DBP", "DBB", "PALL", "PPLT", "CPER", "COPX", "LIT", "REMX"],
     },
     "Real Estate": {
-        "RE": ["VNQ", "VNQI"]
+        "US": ["VNQ"],
+        "ex US": ["VNQI"]
     }
 }
 
