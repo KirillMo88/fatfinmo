@@ -94,6 +94,7 @@ ETF_UNIVERSE_MAP = {
     "Crypto list": ETF_UNIVERSE_CRYPTO,
 }
 UNIVERSE_STORAGE_PATH = Path(__file__).with_name("custom_universe_lists.json")
+AUTO_REFRESH_SECONDS = 600
 
 GRAPH_PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly", "Full history"]
 
@@ -920,7 +921,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         return None
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, ttl=AUTO_REFRESH_SECONDS)
 def compute_metrics_table(universe: dict, universe_signature: str, divergence_cfg: dict, divergence_signature: str) -> tuple[pd.DataFrame, str]:
     _ = universe_signature
     _ = divergence_signature
@@ -1182,7 +1183,7 @@ def extract_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=AUTO_REFRESH_SECONDS)
 def load_ohlcv_history(tickers: list, universe_signature: str) -> dict:
     _ = universe_signature
     data = {}
@@ -1719,6 +1720,17 @@ def render_divergence_settings() -> dict:
 
 def main():
     st.set_page_config(page_title="ETF Market Screener", layout="wide")
+    components.html(
+        f"""
+        <script>
+        setTimeout(function() {{
+            window.parent.location.reload();
+        }}, {AUTO_REFRESH_SECONDS * 1000});
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
     if "universe_map" not in st.session_state:
         st.session_state["universe_map"] = load_universe_map()
     universe_map = st.session_state["universe_map"]
