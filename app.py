@@ -921,7 +921,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
 
 
 @st.cache_data(show_spinner=True)
-def compute_metrics_table(universe: dict, universe_signature: str, divergence_cfg: dict, divergence_signature: str) -> pd.DataFrame:
+def compute_metrics_table(universe: dict, universe_signature: str, divergence_cfg: dict, divergence_signature: str) -> tuple[pd.DataFrame, str]:
     _ = universe_signature
     _ = divergence_signature
     rows = []
@@ -960,7 +960,8 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
         + (df["Div_6M_vs_ROC"] == "bear").astype(int)
     )
 
-    return df
+    fetched_at_utc = pd.Timestamp.now(tz="UTC").isoformat()
+    return df, fetched_at_utc
 
 
 def apply_filters(df: pd.DataFrame):
@@ -1803,7 +1804,7 @@ def main():
         unsafe_allow_html=True,
     )
 
-    top_left, top_mid, top_refresh_col, top_hard_refresh_col = st.columns([2, 8, 1, 1.4])
+    top_left, top_mid, top_refresh_col, top_hard_refresh_col, top_status_col = st.columns([2, 6, 1, 1.4, 2.6])
     with top_left:
         selected_universe_name = st.selectbox("ETF Version", options=list(universe_map.keys()), index=0)
     with top_refresh_col:
@@ -1828,12 +1829,20 @@ def main():
 
     with st.spinner("Computing ETF metrics..."):
         selected_universe = universe_map[selected_universe_name]
-        df = compute_metrics_table(
+        df, app_refresh_utc = compute_metrics_table(
             selected_universe,
             f"{selected_universe_name}:{str(selected_universe)}",
             divergence_cfg,
             divergence_signature,
         )
+    with top_status_col:
+        refresh_text = "n/a"
+        try:
+            ts = pd.to_datetime(app_refresh_utc, utc=True)
+            refresh_text = ts.strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            pass
+        st.caption(f"App Refresh: {refresh_text}")
 
     filtered_df, flow_unavailable = apply_filters(df)
     graph_ordered_df = filtered_df.copy()
