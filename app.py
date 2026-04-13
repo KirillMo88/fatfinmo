@@ -1924,14 +1924,19 @@ def main():
             col_label = table_col_labels.get(col, col.replace("_", " "))
             if col_label not in table_display_df.columns:
                 continue
-            vals = pd.to_numeric(table_display_df[col_label], errors="coerce").dropna()
+            vals_source = table_display_df
+            if col == "Perf_10Y_%" and "Ticker" in table_display_df.columns:
+                vals_source = table_display_df[table_display_df["Ticker"] != "BTC-USD"]
+            vals = pd.to_numeric(vals_source[col_label], errors="coerce").dropna()
             if vals.empty:
                 continue
             vmin = float(vals.min())
             vmax = float(vals.max())
+            btc_skip_rule = "if (params.data && params.data['Ticker'] === 'BTC-USD') { return {}; }" if col == "Perf_10Y_%" else ""
             perf_color_styles[col_label] = JsCode(
                 f"""
                 function(params) {{
+                    {btc_skip_rule}
                     if (params.value === null || params.value === undefined || isNaN(params.value)) {{
                         return {{}};
                     }}
