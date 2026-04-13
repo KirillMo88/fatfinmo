@@ -58,7 +58,14 @@
         "EWJ",
         "EWY",
         "INDA",
-        "ASEA"
+        "ASEA",
+        "EIDO",
+        "EPHE",
+        "EWM",
+        "EWT",
+        "THD",
+        "TUR",
+        "VNM"
       ],
       "China": [
         "MCHI",
@@ -69,20 +76,7 @@
       ],
       "LATAM": [
         "ILF",
-        "EWZ"
-      ]
-    },
-    "Equity": {
-      "Asia": [
-        "EIDO",
-        "EPHE",
-        "EWM",
-        "EWT",
-        "THD",
-        "TUR",
-        "VNM"
-      ],
-      "LATAM": [
+        "EWZ",
         "ECH",
         "EPU",
         "EWW"
