@@ -12,6 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 import streamlit.components.v1 as components
+from streamlit.errors import StreamlitSecretNotFoundError
 
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
@@ -1143,7 +1144,12 @@ def render_inputs_tab(universe_map: dict):
 
 
 def render_tester_tab() -> None:
-    tester_url = st.secrets.get("TESTER_APP_URL", os.environ.get("TESTER_APP_URL", "")).strip()
+    tester_url = os.environ.get("TESTER_APP_URL", "").strip()
+    if not tester_url:
+        try:
+            tester_url = str(st.secrets["TESTER_APP_URL"]).strip() if "TESTER_APP_URL" in st.secrets else ""
+        except StreamlitSecretNotFoundError:
+            tester_url = ""
     if not tester_url:
         st.info(
             "Tester app URL is not configured. "
@@ -1153,6 +1159,101 @@ def render_tester_tab() -> None:
         return
     st.caption(f"Tester mounted from {tester_url}")
     components.iframe(tester_url, height=2100, scrolling=True)
+
+
+def render_description_tab() -> None:
+    st.subheader("Metric Calculation Description")
+    st.markdown(
+        """
+### Performance Ratios
+- `Perf1D %`  
+  Formula: `(Close_now / Close_(now-1 calendar day on-or-before) - 1) * 100`
+- `Perf1W %`  
+  Formula: `(Close_now / Close_(now-7 calendar days on-or-before) - 1) * 100`
+- `Perf1M %`  
+  Formula: `(Close_now / Close_(now-30 calendar days on-or-before) - 1) * 100`
+- `Perf3M %`  
+  Formula: `(Close_now / Close_(now-90 calendar days on-or-before) - 1) * 100`
+- `Perf6M %`  
+  Formula: `(Close_now / Close_(now-182 calendar days on-or-before) - 1) * 100`
+- `Perf12M %`  
+  Formula: `(Close_now / Close_(now-365 calendar days on-or-before) - 1) * 100`
+- `Perf3Y %`  
+  Formula: `(Close_now / Close_(now-3*365 calendar days on-or-before) - 1) * 100`
+- `Perf5Y %`  
+  Formula: `(Close_now / Close_(now-5*365 calendar days on-or-before) - 1) * 100`
+- `Perf10Y %`  
+  Formula: `(Close_now / Close_(now-10*365 calendar days on-or-before) - 1) * 100`
+
+### `BBPosition`
+- Calculated on completed **weekly** bars.
+- Midline: `Mid = SMA(weekly close, 50)`
+- Bands: `Upper = Mid + 2*Std(50)`, `Lower = Mid - 2*Std(50)`
+- Score range: `-10..+10`
+  - `>= Upper` -> `+10`
+  - `<= Lower` -> `-10`
+  - Between `Mid` and `Upper` -> `+1..+9` (10 equal zones)
+  - Between `Lower` and `Mid` -> `-1..-9` (10 equal zones)
+  - At `Mid` -> `0`
+
+### `SMATrend`
+- Uses daily `SMA200`.
+- `spread_now = (Close_now / SMA200_now - 1) * 100`
+- `spread_6m_ago` computed on/just before ~182 days ago.
+- Trend:
+  - `bull` if `spread_now - spread_6m_ago > 0`
+  - `bear` otherwise
+
+### Divergences (`DivRSI`, `DivMACD`, `DivROC`)
+- Indicators:
+  - `DivRSI` uses `RSI(14)`
+  - `DivMACD` uses `MACD histogram (12,26,9)`
+  - `DivROC` uses `ROC(12)`
+- Pivot detection:
+  - Price pivots are found on `Low` (for bull checks) and `High` (for bear checks).
+  - Indicator pivots are found the same way (`low`/`high` mode).
+  - A pivot at index `i` is valid if it is min/max inside a symmetric window:
+    `i - pivot_window ... i + pivot_window`.
+- Pivot alignment:
+  - Each price pivot is matched to the nearest indicator pivot within
+    `± alignment_tolerance` bars.
+  - Unmatched pivots are ignored.
+- Candidate construction:
+  - Candidates are built from consecutive matched pivot pairs `(t1, t2)`.
+  - Hard filters:
+    - `t2` must be inside latest `lookback_bars`
+    - `(t2 - t1) <= max_span`
+    - `abs((p2-p1)/p1) >= min_price_move`
+    - `abs(i2-i1) >= min_ind_move`
+- `min_ind_move`:
+  - RSI: fixed threshold `min_ind_move_rsi`
+  - MACD/ROC: volatility-scaled threshold
+    `k * (rolling_std(indicator, rolling_std_n) + eps)`
+    where `k = min_ind_move_macd_std` or `min_ind_move_roc_std`
+- Divergence type rules:
+  - On price lows:
+    - `regular_bull`: `p2 < p1` and `i2 > i1`
+    - `hidden_bull`: `p2 > p1` and `i2 < i1`
+  - On price highs:
+    - `regular_bear`: `p2 > p1` and `i2 < i1`
+    - `hidden_bear`: `p2 < p1` and `i2 > i1`
+- Scoring:
+  - `mp = abs((p2-p1)/p1)` (price move magnitude)
+  - `mi = abs(i2-i1)/(std_here + eps)` (indicator move normalized by volatility)
+  - `ts = clamp((t2-t1)/max_span, 0..1)` (time-span contribution)
+  - `zone_bonus`:
+    - RSI: `1` if bull and RSI below 30, or bear and RSI above 70
+    - MACD/ROC: `1` if crossing zero or at strong extreme (`>= 1.5*std`)
+  - Final score:
+    `score = 100 * clamp(wp*mp + wi*mi + wt*ts + wz*zone_bonus, 0..1)`
+- Final output per indicator:
+  - Candidate with highest score is selected.
+  - Output column value is:
+    - `bull`
+    - `bear`
+    - `nothing` (if no candidate passes all filters)
+"""
+    )
 
 
 def extract_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -1875,7 +1976,7 @@ def main():
     if flow_unavailable:
         st.warning("Fund flow data unavailable")
 
-    table_tab, charts_tab, graphs_tab, inputs_tab, tester_tab = st.tabs(["Table", "Charts", "Graphs", "Inputs", "Tester"])
+    table_tab, charts_tab, graphs_tab, inputs_tab, description_tab, tester_tab = st.tabs(["Table", "Charts", "Graphs", "Inputs", "Description", "Tester"])
     with table_tab:
         table_df = filtered_df.copy().reset_index(drop=True)
         table_df["__row_id__"] = np.arange(len(table_df))
@@ -2035,6 +2136,8 @@ def main():
         render_graphs_tab(graph_ordered_df.drop(columns=["__row_id__"], errors="ignore"), selected_universe, selected_universe_name)
     with inputs_tab:
         render_inputs_tab(universe_map)
+    with description_tab:
+        render_description_tab()
     with tester_tab:
         render_tester_tab()
 
