@@ -16,6 +16,7 @@ from streamlit.errors import StreamlitSecretNotFoundError
 
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
+from finance_core import download_completed_ohlcv
 
 # ============================================================
 # 1) ETF Universe (exactly as provided)
@@ -767,42 +768,7 @@ def detect_divergence_for_indicator(
 # 4) Metrics function (same logic)
 # ============================================================
 def download_metrics_ohlcv(ticker: str) -> pd.DataFrame:
-    # yfinance can intermittently fail per-symbol; retry before giving up.
-    attempts = 3
-    for i in range(attempts):
-        try:
-            px = yf.download(
-                ticker,
-                period="10y",
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-                threads=False,
-            )
-            frame = extract_ohlcv_frame(px, ticker)
-            if not frame.empty:
-                return frame
-        except Exception:
-            pass
-        time.sleep(0.25 * (i + 1))
-
-    # Fallback on max history in case period-specific query fails.
-    try:
-        px = yf.download(
-            ticker,
-            period="max",
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-            threads=False,
-        )
-        frame = extract_ohlcv_frame(px, ticker)
-        if not frame.empty:
-            return frame
-    except Exception:
-        pass
-
-    return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    return download_completed_ohlcv(ticker)
 
 
 def get_metrics(ticker: str, divergence_cfg: dict):

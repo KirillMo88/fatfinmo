@@ -1,0 +1,11 @@
+:8080 {
+	encode zstd gzip
+
+	handle /tester* {
+		reverse_proxy tester:8501
+	}
+
+	handle {
+		reverse_proxy screener:8501
+	}
+}

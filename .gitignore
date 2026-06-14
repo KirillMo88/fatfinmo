@@ -4,4 +4,7 @@ __pycache__/
 .run/
 .DS_Store
 .streamlit/secrets.toml
+.env
+persistent/
+hermes/
 *.pyc

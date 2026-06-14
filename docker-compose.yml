@@ -1,0 +1,80 @@
+services:
+  screener:
+    build: .
+    restart: unless-stopped
+    command:
+      - streamlit
+      - run
+      - app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    environment:
+      TESTER_APP_URL: /tester
+    expose:
+      - "8501"
+    volumes:
+      - ./persistent/custom_universe_lists.json:/app/custom_universe_lists.json
+
+  tester:
+    build: .
+    restart: unless-stopped
+    command:
+      - streamlit
+      - run
+      - tester_app.py
+      - --server.baseUrlPath=tester
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    expose:
+      - "8501"
+    volumes:
+      - ./persistent/saved_strategies.json:/app/data/saved_strategies.json
+
+  finance-api:
+    build: .
+    restart: unless-stopped
+    command:
+      - uvicorn
+      - finance_api:app
+      - --host=0.0.0.0
+      - --port=9000
+    env_file:
+      - .env
+    environment:
+      FINANCE_CACHE_DIR: /app/persistent/finance_cache
+      FINANCE_UNIVERSE_PATH: /app/custom_universe_lists.json
+    expose:
+      - "9000"
+    volumes:
+      - ./persistent/custom_universe_lists.json:/app/custom_universe_lists.json:ro
+      - ./persistent/finance_cache:/app/persistent/finance_cache
+    networks:
+      - default
+      - finance_internal
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - screener
+      - tester
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      - caddy
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${CLOUDFLARE_TUNNEL_TOKEN}
+
+networks:
+  finance_internal:
+    external: true
