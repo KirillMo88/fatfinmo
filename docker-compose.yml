@@ -32,6 +32,49 @@ services:
     volumes:
       - ./persistent/saved_strategies.json:/app/data/saved_strategies.json
 
+  interviews:
+    build: .
+    restart: unless-stopped
+    command:
+      - streamlit
+      - run
+      - interviews_app.py
+      - --server.baseUrlPath=interviews
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    environment:
+      INTERVIEWS_DB_PATH: /app/persistent/interviews/interviews.db
+    expose:
+      - "8501"
+    volumes:
+      - ./persistent/interviews:/app/persistent/interviews
+
+  interviews-worker:
+    build: .
+    restart: unless-stopped
+    command:
+      - uvicorn
+      - interviews_worker:app
+      - --host=0.0.0.0
+      - --port=9100
+    env_file:
+      - .env
+    environment:
+      INTERVIEWS_DB_PATH: /app/persistent/interviews/interviews.db
+      INTERVIEWS_TIMEZONE: Europe/Moscow
+      INTERVIEWS_WEEKDAY: "4"
+      INTERVIEWS_HOUR: "8"
+      INTERVIEWS_INITIAL_LIMIT: "10"
+      OPENAI_MODEL: gpt-5.5-2026-04-23
+    expose:
+      - "9100"
+    volumes:
+      - ./persistent/interviews:/app/persistent/interviews
+    networks:
+      - default
+      - finance_internal
+
   finance-api:
     build: .
     restart: unless-stopped
@@ -60,6 +103,7 @@ services:
     depends_on:
       - screener
       - tester
+      - interviews
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
 

@@ -5,6 +5,10 @@
 		reverse_proxy tester:8501
 	}
 
+	handle /interviews* {
+		reverse_proxy interviews:8501
+	}
+
 	handle {
 		reverse_proxy screener:8501
 	}
