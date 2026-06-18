@@ -192,6 +192,88 @@ def summarize_interview(
     return summary
 
 
+def _interview_reference(item: dict) -> str:
+    speakers = ", ".join(item.get("speakers", []))
+    date_text = str(item.get("published_at", ""))[:10]
+    return (
+        f"Title: {item.get('title', '')}\n"
+        f"Date: {date_text}\n"
+        f"Experts: {speakers}\n"
+        f"URL: {item.get('url', '')}\n"
+        f"Summary:\n{item.get('summary', '')}"
+    )
+
+
+def _batch_interviews(items: list[dict], max_chars: int = 50000) -> list[list[dict]]:
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    size = 0
+    for item in items:
+        reference = _interview_reference(item)
+        if current and size + len(reference) > max_chars:
+            batches.append(current)
+            current, size = [], 0
+        current.append(item)
+        size += len(reference)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def analyze_topic_from_summaries(
+    items: list[dict],
+    topic: str,
+    client: OpenAI | None = None,
+    model: str | None = None,
+) -> str:
+    topic = normalize_space(topic)
+    if not topic:
+        raise ValueError("Topic is required")
+    if not items:
+        return "В архиве пока нет готовых саммари для анализа."
+    client = client or OpenAI()
+    model = model or os.getenv("OPENAI_MODEL", "gpt-5.5-2026-04-23")
+    batches = _batch_interviews(items)
+    extraction_instruction = (
+        "Ты анализируешь архив русских саммари интервью MacroVoices. "
+        "Найди все мнения, аргументы и прогнозы экспертов по заданной теме. "
+        "Обязательно сохраняй имя эксперта, дату интервью и название интервью. "
+        "Если в конкретном интервью нет содержательного мнения по теме, так и напиши. "
+        "Не добавляй факты, которых нет в саммари."
+    )
+    extracts = []
+    for index, batch in enumerate(batches, 1):
+        payload = "\n\n---\n\n".join(_interview_reference(item) for item in batch)
+        extracts.append(
+            _response_text(
+                client,
+                model,
+                extraction_instruction,
+                (
+                    f"Тема: {topic}\n"
+                    f"Пакет интервью {index} из {len(batches)}\n\n"
+                    f"{payload}"
+                ),
+            )
+        )
+
+    synthesis_instruction = (
+        "Сделай итоговый анализ на русском языке по теме пользователя на основе "
+        "извлечений из архива интервью. Используй Markdown. Структура: "
+        "Краткий вывод; Мнения экспертов; Согласие и расхождения; Как менялось "
+        "мнение во времени; Рыночные последствия; Что отслеживать дальше. "
+        "В разделе 'Мнения экспертов' указывай эксперта, дату интервью и название. "
+        "Если данных мало, явно скажи, что вывод ограничен архивом саммари. "
+        "Не придумывай мнения и не цитируй исходные транскрипты."
+    )
+    return _response_text(
+        client,
+        model,
+        synthesis_instruction,
+        f"Тема: {topic}\n\nИзвлечения:\n\n" + "\n\n---\n\n".join(extracts),
+    )
+
+
 def connect_db(path: str | Path) -> sqlite3.Connection:
     db_path = Path(path)
     db_path.parent.mkdir(parents=True, exist_ok=True)

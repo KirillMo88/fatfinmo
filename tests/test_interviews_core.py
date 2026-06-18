@@ -5,6 +5,8 @@ from pathlib import Path
 from interviews_core import (
     DISCLAIMER,
     InterviewSource,
+    _batch_interviews,
+    analyze_topic_from_summaries,
     connect_db,
     extract_speakers,
     init_db,
@@ -108,3 +110,62 @@ def test_database_archive_and_deduplication(tmp_path: Path) -> None:
     assert rows[0]["speakers"] == ["Larry McDonald"]
     assert rows[0]["status"] == "ready"
     connection.close()
+
+
+class FakeOpenAIResponse:
+    output_text = "Expert view"
+
+
+class FakeResponses:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return FakeOpenAIResponse()
+
+
+class FakeOpenAI:
+    def __init__(self) -> None:
+        self.responses = FakeResponses()
+
+
+def test_topic_analysis_uses_summaries_with_metadata() -> None:
+    client = FakeOpenAI()
+    result = analyze_topic_from_summaries(
+        [
+            {
+                "title": "Larry McDonald: Market Test",
+                "published_at": "2026-06-12T10:00:00-04:00",
+                "speakers": ["Larry McDonald"],
+                "url": "https://example.com/interview",
+                "summary": "Gold is discussed as a hard asset.",
+            }
+        ],
+        "золото",
+        client=client,  # type: ignore[arg-type]
+        model="test-model",
+    )
+    assert result == "Expert view"
+    joined_inputs = "\n".join(call["input"] for call in client.responses.calls)
+    assert "Larry McDonald" in joined_inputs
+    assert "2026-06-12" in joined_inputs
+    assert "Gold is discussed" in joined_inputs
+    assert "золото" in joined_inputs
+
+
+def test_topic_analysis_rejects_empty_topic() -> None:
+    try:
+        analyze_topic_from_summaries([], "   ", client=FakeOpenAI())  # type: ignore[arg-type]
+    except ValueError as exc:
+        assert "Topic is required" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
+
+
+def test_batch_interviews_splits_large_archive() -> None:
+    items = [
+        {"title": str(index), "summary": "x" * 80, "speakers": [], "url": ""}
+        for index in range(3)
+    ]
+    assert len(_batch_interviews(items, max_chars=120)) == 3

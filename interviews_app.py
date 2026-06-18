@@ -5,14 +5,19 @@ from pathlib import Path
 
 import streamlit as st
 
-from interviews_core import connect_db, init_db, list_ready
+from interviews_core import (
+    analyze_topic_from_summaries,
+    connect_db,
+    init_db,
+    list_ready,
+)
 
 
 DB_PATH = Path(
     os.getenv("INTERVIEWS_DB_PATH", "persistent/interviews/interviews.db")
 )
 
-st.set_page_config(page_title="FatFinMo Interviews", page_icon="🎙️", layout="wide")
+st.set_page_config(page_title="FatFinMo Interviews", layout="wide")
 st.title("MacroVoices Interviews")
 st.caption("Подробные инвестиционные саммари на русском языке")
 
@@ -20,6 +25,37 @@ connection = connect_db(DB_PATH)
 init_db(connection)
 items = list_ready(connection)
 connection.close()
+
+with st.container(border=True):
+    st.subheader("Анализ мнений экспертов по теме")
+    st.caption(
+        "OpenAI анализирует все готовые саммари в архиве и возвращает сводку "
+        "с указанием эксперта, даты и интервью."
+    )
+    with st.form("topic_analysis_form"):
+        topic = st.text_input(
+            "Тема",
+            placeholder="Например: золото, нефть, Китай, ставки ФРС",
+        )
+        submitted = st.form_submit_button("Проанализировать")
+    if submitted:
+        if not topic.strip():
+            st.warning("Введите тему для анализа.")
+        elif not os.getenv("OPENAI_API_KEY"):
+            st.error("OPENAI_API_KEY не настроен для приложения interviews.")
+        else:
+            with st.spinner("OpenAI анализирует архив саммари..."):
+                try:
+                    st.session_state["topic_analysis"] = (
+                        topic,
+                        analyze_topic_from_summaries(items, topic),
+                    )
+                except Exception as exc:
+                    st.error(f"Не удалось выполнить анализ: {exc}")
+    if "topic_analysis" in st.session_state:
+        analyzed_topic, analysis = st.session_state["topic_analysis"]
+        st.markdown(f"### Тема: {analyzed_topic}")
+        st.markdown(analysis)
 
 all_speakers = sorted(
     {speaker for item in items for speaker in item["speakers"]},
@@ -31,7 +67,10 @@ selected = st.multiselect(
     format_func=lambda value: f"@{value}",
     placeholder="Выберите одного или нескольких спикеров",
 )
-query = st.text_input("Поиск", placeholder="Название, спикер или текст саммари")
+query = st.text_input(
+    "Поиск по архиву",
+    placeholder="Название, спикер или текст саммари",
+)
 
 left, right = st.columns([1, 5])
 with left:
