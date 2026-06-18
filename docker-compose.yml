@@ -42,6 +42,8 @@ services:
       - --server.address=0.0.0.0
       - --server.port=8501
       - --server.headless=true
+    env_file:
+      - .env
     environment:
       INTERVIEWS_DB_PATH: /app/persistent/interviews/interviews.db
     expose:
