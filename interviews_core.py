@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import re
 import sqlite3
-from typing import Iterable
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -204,12 +203,67 @@ def _interview_reference(item: dict) -> str:
     )
 
 
-def _batch_interviews(items: list[dict], max_chars: int = 50000) -> list[list[dict]]:
+def _topic_terms(topic: str) -> set[str]:
+    aliases = {
+        "золото": {"золото", "gold", "precious metals", "gold miners", "miners"},
+        "нефть": {"нефть", "oil", "crude", "brent", "wti", "opec"},
+        "ставки": {"ставки", "rates", "fed", "fomc", "yields"},
+        "китай": {"китай", "china", "chinese"},
+        "биткоин": {"биткоин", "bitcoin", "btc", "crypto"},
+    }
+    words = {
+        word.casefold()
+        for word in re.findall(r"[\w-]+", topic, flags=re.UNICODE)
+        if len(word) >= 3
+    }
+    terms = set(words)
+    for word in words:
+        terms.update(aliases.get(word, set()))
+    return {term.casefold() for term in terms if term}
+
+
+def _score_topic_match(item: dict, terms: set[str]) -> int:
+    text = " ".join(
+        [
+            item.get("title", ""),
+            item.get("summary", ""),
+            " ".join(item.get("speakers", [])),
+        ]
+    ).casefold()
+    return sum(text.count(term) for term in terms)
+
+
+def relevant_topic_items(
+    items: list[dict], topic: str, limit: int = 8
+) -> list[dict]:
+    terms = _topic_terms(topic)
+    if not terms:
+        return []
+    scored = [
+        (_score_topic_match(item, terms), item)
+        for item in items
+    ]
+    matches = [pair for pair in scored if pair[0] > 0]
+    matches.sort(
+        key=lambda pair: (pair[0], str(pair[1].get("published_at", ""))),
+        reverse=True,
+    )
+    return [item for _, item in matches[:limit]]
+
+
+def _compact_summary(text: str, max_chars: int = 5000) -> str:
+    text = normalize_space(text)
+    return text if len(text) <= max_chars else text[:max_chars].rsplit(" ", 1)[0]
+
+
+def _batch_interviews(items: list[dict], max_chars: int = 20000) -> list[list[dict]]:
     batches: list[list[dict]] = []
     current: list[dict] = []
     size = 0
     for item in items:
-        reference = _interview_reference(item)
+        reference = _interview_reference(
+            {**item, "summary": _compact_summary(item.get("summary", ""))}
+        )
         if current and size + len(reference) > max_chars:
             batches.append(current)
             current, size = [], 0
@@ -233,44 +287,33 @@ def analyze_topic_from_summaries(
         return "В архиве пока нет готовых саммари для анализа."
     client = client or OpenAI()
     model = model or os.getenv("OPENAI_MODEL", "gpt-5.5-2026-04-23")
-    batches = _batch_interviews(items)
-    extraction_instruction = (
-        "Ты анализируешь архив русских саммари интервью MacroVoices. "
-        "Найди все мнения, аргументы и прогнозы экспертов по заданной теме. "
-        "Обязательно сохраняй имя эксперта, дату интервью и название интервью. "
-        "Если в конкретном интервью нет содержательного мнения по теме, так и напиши. "
-        "Не добавляй факты, которых нет в саммари."
-    )
-    extracts = []
-    for index, batch in enumerate(batches, 1):
-        payload = "\n\n---\n\n".join(_interview_reference(item) for item in batch)
-        extracts.append(
-            _response_text(
-                client,
-                model,
-                extraction_instruction,
-                (
-                    f"Тема: {topic}\n"
-                    f"Пакет интервью {index} из {len(batches)}\n\n"
-                    f"{payload}"
-                ),
-            )
+    relevant = relevant_topic_items(items, topic)
+    if not relevant:
+        return (
+            f"По теме «{topic}» в сохраненных саммари не найдено явных упоминаний. "
+            "Попробуйте другой термин или более широкий запрос."
         )
-
-    synthesis_instruction = (
-        "Сделай итоговый анализ на русском языке по теме пользователя на основе "
-        "извлечений из архива интервью. Используй Markdown. Структура: "
+    payload = "\n\n---\n\n".join(
+        _interview_reference(
+            {**item, "summary": _compact_summary(item.get("summary", ""))}
+        )
+        for item in relevant
+    )
+    instruction = (
+        "Ты анализируешь архив русских саммари интервью MacroVoices. "
+        "Сделай итоговый анализ на русском языке по теме пользователя. "
+        "Используй только переданные саммари, не придумывай мнения и не цитируй "
+        "исходные транскрипты. Структура Markdown: "
         "Краткий вывод; Мнения экспертов; Согласие и расхождения; Как менялось "
         "мнение во времени; Рыночные последствия; Что отслеживать дальше. "
         "В разделе 'Мнения экспертов' указывай эксперта, дату интервью и название. "
-        "Если данных мало, явно скажи, что вывод ограничен архивом саммари. "
-        "Не придумывай мнения и не цитируй исходные транскрипты."
+        "Если данных мало, явно скажи, что вывод ограничен архивом саммари."
     )
     return _response_text(
         client,
         model,
-        synthesis_instruction,
-        f"Тема: {topic}\n\nИзвлечения:\n\n" + "\n\n---\n\n".join(extracts),
+        instruction,
+        f"Тема: {topic}\n\nРелевантные интервью: {len(relevant)}\n\n{payload}",
     )
 
 

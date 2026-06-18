@@ -16,6 +16,7 @@ from interviews_core import (
     discover_sources,
     save_summary,
     split_text,
+    relevant_topic_items,
     transcript_hash,
     upsert_source,
 )
@@ -152,6 +153,7 @@ def test_topic_analysis_uses_summaries_with_metadata() -> None:
     assert "2026-06-12" in joined_inputs
     assert "Gold is discussed" in joined_inputs
     assert "золото" in joined_inputs
+    assert len(client.responses.calls) == 1
 
 
 def test_topic_analysis_rejects_empty_topic() -> None:
@@ -169,3 +171,37 @@ def test_batch_interviews_splits_large_archive() -> None:
         for index in range(3)
     ]
     assert len(_batch_interviews(items, max_chars=120)) == 3
+
+
+def test_topic_analysis_returns_fast_message_when_no_matches() -> None:
+    client = FakeOpenAI()
+    result = analyze_topic_from_summaries(
+        [
+            {
+                "title": "Rates",
+                "published_at": "2026-06-12",
+                "speakers": ["Expert"],
+                "url": "",
+                "summary": "Discussion about interest rates.",
+            }
+        ],
+        "золото",
+        client=client,  # type: ignore[arg-type]
+    )
+    assert "не найдено" in result
+    assert client.responses.calls == []
+
+
+def test_relevant_topic_items_uses_aliases_and_limits() -> None:
+    items = [
+        {
+            "title": f"Interview {index}",
+            "published_at": f"2026-06-{index:02d}",
+            "speakers": ["Expert"],
+            "summary": "Gold miners and precious metals.",
+        }
+        for index in range(12)
+    ]
+    result = relevant_topic_items(items, "золото", limit=5)
+    assert len(result) == 5
+    assert result[0]["published_at"] == "2026-06-11"

@@ -30,7 +30,7 @@ with st.container(border=True):
     st.subheader("Анализ мнений экспертов по теме")
     st.caption(
         "OpenAI анализирует все готовые саммари в архиве и возвращает сводку "
-        "с указанием эксперта, даты и интервью."
+        "с указанием эксперта, даты и интервью. Обычно это занимает 1-2 минуты."
     )
     with st.form("topic_analysis_form"):
         topic = st.text_input(
@@ -44,7 +44,7 @@ with st.container(border=True):
         elif not os.getenv("OPENAI_API_KEY"):
             st.error("OPENAI_API_KEY не настроен для приложения interviews.")
         else:
-            with st.spinner("OpenAI анализирует архив саммари..."):
+            with st.spinner("OpenAI анализирует релевантные саммари..."):
                 try:
                     st.session_state["topic_analysis"] = (
                         topic,
