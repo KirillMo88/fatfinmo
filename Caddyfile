@@ -5,7 +5,9 @@
 		reverse_proxy tester:8501
 	}
 
-	handle /interviews* {
+	redir /interviews /interviews/
+
+	handle_path /interviews/* {
 		reverse_proxy interviews:8501
 	}
 

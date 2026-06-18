@@ -39,7 +39,6 @@ services:
       - streamlit
       - run
       - interviews_app.py
-      - --server.baseUrlPath=interviews
       - --server.address=0.0.0.0
       - --server.port=8501
       - --server.headless=true
