@@ -15,6 +15,8 @@ import httpx
 from interviews_core import (
     connect_db,
     discover_sources,
+    get_record,
+    InterviewSource,
     init_db,
     list_ready,
     process_source,
@@ -31,6 +33,21 @@ HOUR = int(os.getenv("INTERVIEWS_HOUR", "8"))
 INITIAL_LIMIT = int(os.getenv("INTERVIEWS_INITIAL_LIMIT", "10"))
 
 
+def new_sources_only(
+    connection, sources: list[InterviewSource]
+) -> list[InterviewSource]:
+    existing_count = connection.execute(
+        "SELECT COUNT(*) FROM interviews"
+    ).fetchone()[0]
+    if existing_count == 0:
+        return sources
+    return [
+        source
+        for source in sources
+        if get_record(connection, source.slug) is None
+    ]
+
+
 def run_check() -> int:
     if not os.getenv("OPENAI_API_KEY", "").strip():
         logger.warning("OPENAI_API_KEY is not configured; interview check skipped")
@@ -39,11 +56,9 @@ def run_check() -> int:
     init_db(connection)
     try:
         with httpx.Client() as client:
-            existing_count = connection.execute(
-                "SELECT COUNT(*) FROM interviews"
-            ).fetchone()[0]
-            sources = discover_sources(
-                client, limit=INITIAL_LIMIT if existing_count == 0 else 50
+            sources = new_sources_only(
+                connection,
+                discover_sources(client, limit=INITIAL_LIMIT),
             )
             processed = 0
             for source in reversed(sources):
