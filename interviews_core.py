@@ -325,7 +325,25 @@ def fetch_text(client: httpx.Client, url: str) -> str:
 
 
 def discover_sources(client: httpx.Client, limit: int = 50) -> list[InterviewSource]:
-    return parse_listing(fetch_text(client, LIST_URL), limit=limit)
+    sources: list[InterviewSource] = []
+    seen: set[str] = set()
+    offset = 0
+    while len(sources) < limit:
+        page_url = f"{LIST_URL.rsplit('=', 1)[0]}={offset}"
+        page_sources = parse_listing(fetch_text(client, page_url))
+        added = 0
+        for source in page_sources:
+            if source.slug in seen:
+                continue
+            seen.add(source.slug)
+            sources.append(source)
+            added += 1
+            if len(sources) >= limit:
+                break
+        if added == 0 or len(page_sources) == 0:
+            break
+        offset += len(page_sources)
+    return sources
 
 
 def process_source(

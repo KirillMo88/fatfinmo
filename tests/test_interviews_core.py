@@ -11,6 +11,7 @@ from interviews_core import (
     list_ready,
     parse_listing,
     parse_transcript,
+    discover_sources,
     save_summary,
     split_text,
     transcript_hash,
@@ -46,6 +47,32 @@ def test_listing_and_speaker_parsing() -> None:
         "Alice Smith",
         "Bob Jones",
     )
+
+
+def test_discovery_follows_pagination() -> None:
+    class FakeResponse:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def get(self, url: str, **_: object) -> FakeResponse:
+            if url.endswith("start=0"):
+                return FakeResponse(LISTING)
+            if url.endswith("start=1"):
+                return FakeResponse(
+                    LISTING.replace("123-larry-mcdonald-test", "124-next")
+                    .replace("Larry McDonald: Market Test", "Jane Doe: Next")
+                )
+            return FakeResponse("")
+
+    items = discover_sources(FakeClient(), limit=2)  # type: ignore[arg-type]
+    assert [item.slug for item in items] == [
+        "123-larry-mcdonald-test",
+        "124-next",
+    ]
 
 
 def test_transcript_is_extracted_only_from_article_body() -> None:
