@@ -110,10 +110,11 @@ GRAPH_PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly", "Full history"]
 
 DISPLAY_COLUMNS = [
     "Group", "Subgroup", "Ticker",
-    "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
+    "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
+    "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
     "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "ADX_14", "BB_Position",
-    "SMA200W_Distance_Percentile", "SMA50w_vs_SMA200w_Spread_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
+    "SMA50w_vs_SMA200w_Spread_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
     "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
     "Divergence_Bull_Count", "Divergence_Bear_Count",
 ]
@@ -165,7 +166,8 @@ TABLE_PERMANENTLY_HIDDEN_COLUMNS = {
 }
 
 NUMERIC_COLUMNS = [
-    "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
+    "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
+    "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
     "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
     "BB_Position",
@@ -182,10 +184,15 @@ PERFORMANCE_COLUMNS = [
     "Perf_3M_%",
     "Perf_6M_%",
     "Perf_12M_%",
-    "Avg_Forward_Return_6M_%",
     "Perf_3Y_%",
     "Perf_5Y_%",
     "Perf_10Y_%",
+    "Avg_Forward_Return_6M_%",
+]
+
+INVERSE_PERFORMANCE_COLUMNS = [
+    "Perf_12M_Percentile",
+    "SMA200W_Distance_Percentile",
 ]
 
 PERF_TOP5_MAP = {
@@ -889,12 +896,13 @@ def get_metrics(ticker: str, divergence_cfg: dict):
 
         return [
             perf_1d, perf_1w, perf_1m, perf_3m, perf_6m,
-            perf_12m, perf_12m_percentile, avg_forward_return_6m, perf_3y, perf_5y, perf_10y,
+            perf_12m, perf_3y, perf_5y, perf_10y,
+            sma200w_percentile, perf_12m_percentile, avg_forward_return_6m,
             flows_1m, flows_3m,
             vs_52w, vs_ath, cur_rsi,
             spread_pct_now, spread_avg_36m, spread_pct_change_6m, sma_trend,
             cur_adx14, cur_di_plus14, cur_di_minus14, cur_di_plus14_delta2, cur_di_minus14_delta2,
-            bb_position, bb_mid, bb_upper, bb_lower, bb_step_up, bb_step_down, wk_close_last, sma200w_percentile,
+            bb_position, bb_mid, bb_upper, bb_lower, bb_step_up, bb_step_down, wk_close_last,
             int(golden_cross_d1), int(death_cross_d1), int(golden_cross_w1), int(death_cross_w1),
             div_rsi, div_macd, div_roc
         ]
@@ -919,12 +927,13 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
     columns = [
         "Group", "Subgroup", "Ticker",
         "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%",
-        "Perf_12M_%", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
+        "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
+        "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%",
         "FundFlows_1M_%", "FundFlows_3M_%",
         "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
         "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
         "ADX_14", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
-        "BB_Position", "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last", "SMA200W_Distance_Percentile",
+        "BB_Position", "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last",
         "GoldenCross_D1", "DeathCross_D1", "GoldenCross_W1", "DeathCross_W1",
         "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
     ]
@@ -2046,6 +2055,36 @@ def main():
                     const r = Math.round(248 + t * (74 - 248));
                     const g = Math.round(113 + t * (222 - 113));
                     const b = Math.round(113 + t * (128 - 113));
+                    return {{backgroundColor: `rgb(${{r}}, ${{g}}, ${{b}})`, color: "#111827"}};
+                }}
+                """
+            )
+            gb.configure_column(col_label, cellStyle=perf_color_styles[col_label])
+
+        for col in INVERSE_PERFORMANCE_COLUMNS:
+            col_label = table_col_labels.get(col, col.replace("_", " "))
+            if col_label not in table_display_df.columns:
+                continue
+            vals = pd.to_numeric(table_display_df[col_label], errors="coerce").dropna()
+            if vals.empty:
+                continue
+            vmin = float(vals.min())
+            vmax = float(vals.max())
+            perf_color_styles[col_label] = JsCode(
+                f"""
+                function(params) {{
+                    if (params.value === null || params.value === undefined || isNaN(params.value)) {{
+                        return {{}};
+                    }}
+                    const min = {vmin};
+                    const max = {vmax};
+                    if (max === min) {{
+                        return {{backgroundColor: "#fff3bf", color: "#111827"}};
+                    }}
+                    const t = (Number(params.value) - min) / (max - min);
+                    const r = Math.round(74 + t * (248 - 74));
+                    const g = Math.round(222 + t * (113 - 222));
+                    const b = Math.round(128 + t * (113 - 128));
                     return {{backgroundColor: `rgb(${{r}}, ${{g}}, ${{b}})`, color: "#111827"}};
                 }}
                 """
