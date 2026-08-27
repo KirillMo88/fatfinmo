@@ -17,6 +17,7 @@ from streamlit.errors import StreamlitSecretNotFoundError
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
 from finance_core import download_completed_ohlcv
+from screener_metrics import historical_momentum_52w_metrics, sma200w_distance_percentile
 
 # ============================================================
 # 1) ETF Universe (exactly as provided)
@@ -109,10 +110,10 @@ GRAPH_PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly", "Full history"]
 
 DISPLAY_COLUMNS = [
     "Group", "Subgroup", "Ticker",
-    "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
+    "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
     "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "ADX_14", "BB_Position",
-    "SMA50w_vs_SMA200w_Spread_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
+    "SMA200W_Distance_Percentile", "SMA50w_vs_SMA200w_Spread_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
     "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
     "Divergence_Bull_Count", "Divergence_Bear_Count",
 ]
@@ -127,6 +128,8 @@ TABLE_HEADER_NAMES = {
     "Perf_3M_%": "Perf\n3M %",
     "Perf_6M_%": "Perf\n6M %",
     "Perf_12M_%": "Perf\n12M %",
+    "Perf_12M_Percentile": "Perf 12M\nPercentile",
+    "Avg_Forward_Return_6M_%": "Avg forward\nreturn 6M %",
     "Perf_3Y_%": "Perf\n3Y %",
     "Perf_5Y_%": "Perf\n5Y %",
     "Perf_10Y_%": "Perf\n10Y %",
@@ -137,6 +140,7 @@ TABLE_HEADER_NAMES = {
     "RSI_14": "RSI\n14",
     "ADX_14": "ADX\n14",
     "BB_Position": "BB\nPosition",
+    "SMA200W_Distance_Percentile": "SMA200W\nPercentile",
     "SMA50w_vs_SMA200w_Spread_%": "Price vs\nSMA200d %",
     "SMA_Spread_%_Change_6M_%": "SMA Spread\nChange 6M %",
     "SMA_Trend": "SMA\nTrend",
@@ -161,12 +165,12 @@ TABLE_PERMANENTLY_HIDDEN_COLUMNS = {
 }
 
 NUMERIC_COLUMNS = [
-    "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
+    "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
     "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
     "BB_Position",
     "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last",
-    "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%",
+    "SMA200W_Distance_Percentile", "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%",
     "ADX_14", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
     "Divergence_Bull_Count", "Divergence_Bear_Count",
 ]
@@ -178,6 +182,7 @@ PERFORMANCE_COLUMNS = [
     "Perf_3M_%",
     "Perf_6M_%",
     "Perf_12M_%",
+    "Avg_Forward_Return_6M_%",
     "Perf_3Y_%",
     "Perf_5Y_%",
     "Perf_10Y_%",
@@ -376,7 +381,7 @@ def safe_last(series: pd.Series) -> float:
 
 
 def safe_perf(close: pd.Series, end_dt: pd.Timestamp, days: int) -> float:
-    start_dt = end_dt - pd.Timedelta(days=days)
+    start_dt = end_dt - pd.DateOffset(days=int(days))
     v0 = safe_value_on_or_before(close, start_dt)
     v1 = safe_value_on_or_before(close, end_dt)
     if np.isnan(v0) or np.isnan(v1) or v0 == 0.0:
@@ -799,12 +804,13 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         perf_3m = safe_perf(close, today, 90)
         perf_6m = safe_perf(close, today, 182)
         perf_12m = safe_perf(close, today, 365)
+        perf_12m_percentile, avg_forward_return_6m = historical_momentum_52w_metrics(close)
         perf_3y = safe_perf(close, today, 365 * 3)
         perf_5y = safe_perf(close, today, 365 * 5)
         perf_10y = safe_perf(close, today, 365 * 10)
 
         # 52W high distance
-        last_52w = close.loc[today - pd.Timedelta(days=365 * 1.1):]
+        last_52w = close.loc[today - pd.DateOffset(days=int(365 * 1.1)):]
         if last_52w.empty:
             vs_52w = np.nan
         else:
@@ -830,7 +836,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         div_roc, _, _ = detect_divergence_for_indicator(low, high, roc12, "ROC", divergence_cfg)
 
         # Price vs SMA200d (%) and 6M % change
-        cutoff_6m = today - pd.Timedelta(days=182)
+        cutoff_6m = today - pd.DateOffset(days=182)
         sma200d = close.rolling(window=200, min_periods=200).mean()
         sma200d_now = safe_last(sma200d)
         spread_pct_now = pct_spread(cur_px, sma200d_now)
@@ -871,6 +877,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
             bb_step_down,
             wk_close_last,
         ) = compute_weekly_bb_position(wk_close, period=50, std_mult=2.0)
+        sma200w_percentile = sma200w_distance_percentile(wk_close)
         if len(wk_close) >= 260:
             sma50w = wk_close.rolling(window=50, min_periods=50).mean()
             sma200w = wk_close.rolling(window=200, min_periods=200).mean()
@@ -882,12 +889,12 @@ def get_metrics(ticker: str, divergence_cfg: dict):
 
         return [
             perf_1d, perf_1w, perf_1m, perf_3m, perf_6m,
-            perf_12m, perf_3y, perf_5y, perf_10y,
+            perf_12m, perf_12m_percentile, avg_forward_return_6m, perf_3y, perf_5y, perf_10y,
             flows_1m, flows_3m,
             vs_52w, vs_ath, cur_rsi,
             spread_pct_now, spread_avg_36m, spread_pct_change_6m, sma_trend,
             cur_adx14, cur_di_plus14, cur_di_minus14, cur_di_plus14_delta2, cur_di_minus14_delta2,
-            bb_position, bb_mid, bb_upper, bb_lower, bb_step_up, bb_step_down, wk_close_last,
+            bb_position, bb_mid, bb_upper, bb_lower, bb_step_up, bb_step_down, wk_close_last, sma200w_percentile,
             int(golden_cross_d1), int(death_cross_d1), int(golden_cross_w1), int(death_cross_w1),
             div_rsi, div_macd, div_roc
         ]
@@ -905,19 +912,19 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
             for ticker in tickers:
                 res = get_metrics(ticker, divergence_cfg)
                 if res is None:
-                    rows.append([group, subgroup, ticker] + [np.nan] * 37)
+                    rows.append([group, subgroup, ticker] + [np.nan] * 40)
                 else:
                     rows.append([group, subgroup, ticker] + res)
 
     columns = [
         "Group", "Subgroup", "Ticker",
         "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%",
-        "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
+        "Perf_12M_%", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
         "FundFlows_1M_%", "FundFlows_3M_%",
         "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
         "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
         "ADX_14", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
-        "BB_Position", "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last",
+        "BB_Position", "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last", "SMA200W_Distance_Percentile",
         "GoldenCross_D1", "DeathCross_D1", "GoldenCross_W1", "DeathCross_W1",
         "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
     ]
