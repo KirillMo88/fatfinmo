@@ -17,7 +17,11 @@ from streamlit.errors import StreamlitSecretNotFoundError
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
 from finance_core import download_completed_ohlcv
-from screener_metrics import historical_momentum_52w_metrics, sma200w_distance_percentile
+from screener_metrics import (
+    correction_risk_from_percentile_analogs,
+    historical_momentum_52w_metrics,
+    sma200w_distance_percentile,
+)
 
 # ============================================================
 # 1) ETF Universe (exactly as provided)
@@ -111,7 +115,7 @@ GRAPH_PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly", "Full history"]
 DISPLAY_COLUMNS = [
     "Group", "Subgroup", "Ticker",
     "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
-    "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%",
+    "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
     "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "ADX_14", "BB_Position",
     "SMA50w_vs_SMA200w_Spread_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
@@ -131,6 +135,7 @@ TABLE_HEADER_NAMES = {
     "Perf_12M_%": "Perf\n12M %",
     "Perf_12M_Percentile": "Perf 12M\nPercentile",
     "Avg_Forward_Return_6M_%": "Avg forward\nreturn 6M %",
+    "Correction_Risk_%": "Correction\nrisk %",
     "Perf_3Y_%": "Perf\n3Y %",
     "Perf_5Y_%": "Perf\n5Y %",
     "Perf_10Y_%": "Perf\n10Y %",
@@ -167,12 +172,12 @@ TABLE_PERMANENTLY_HIDDEN_COLUMNS = {
 
 NUMERIC_COLUMNS = [
     "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
-    "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%",
+    "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
     "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
     "BB_Position",
     "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last",
-    "SMA200W_Distance_Percentile", "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%",
+    "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%",
     "ADX_14", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
     "Divergence_Bull_Count", "Divergence_Bear_Count",
 ]
@@ -193,6 +198,7 @@ PERFORMANCE_COLUMNS = [
 INVERSE_PERFORMANCE_COLUMNS = [
     "Perf_12M_Percentile",
     "SMA200W_Distance_Percentile",
+    "Correction_Risk_%",
 ]
 
 PERF_TOP5_MAP = {
@@ -885,6 +891,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
             wk_close_last,
         ) = compute_weekly_bb_position(wk_close, period=50, std_mult=2.0)
         sma200w_percentile = sma200w_distance_percentile(wk_close)
+        correction_risk, _, _ = correction_risk_from_percentile_analogs(close, wk_close)
         if len(wk_close) >= 260:
             sma50w = wk_close.rolling(window=50, min_periods=50).mean()
             sma200w = wk_close.rolling(window=200, min_periods=200).mean()
@@ -897,7 +904,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         return [
             perf_1d, perf_1w, perf_1m, perf_3m, perf_6m,
             perf_12m, perf_3y, perf_5y, perf_10y,
-            sma200w_percentile, perf_12m_percentile, avg_forward_return_6m,
+            sma200w_percentile, perf_12m_percentile, avg_forward_return_6m, correction_risk,
             flows_1m, flows_3m,
             vs_52w, vs_ath, cur_rsi,
             spread_pct_now, spread_avg_36m, spread_pct_change_6m, sma_trend,
@@ -920,7 +927,7 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
             for ticker in tickers:
                 res = get_metrics(ticker, divergence_cfg)
                 if res is None:
-                    rows.append([group, subgroup, ticker] + [np.nan] * 40)
+                    rows.append([group, subgroup, ticker] + [np.nan] * 41)
                 else:
                     rows.append([group, subgroup, ticker] + res)
 
@@ -928,7 +935,7 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
         "Group", "Subgroup", "Ticker",
         "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%",
         "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
-        "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%",
+        "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
         "FundFlows_1M_%", "FundFlows_3M_%",
         "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
         "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
