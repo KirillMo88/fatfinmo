@@ -1732,6 +1732,102 @@ def _render_rsi_chart(chart_df: pd.DataFrame, height: int = 250) -> None:
     st.altair_chart(chart, use_container_width=True)
 
 
+PERFORMANCE_BUBBLE_X_OPTIONS = {
+    "Performance 1W": "Perf_1W_%",
+    "Performance 1M": "Perf_1M_%",
+    "Performance 3M": "Perf_3M_%",
+}
+
+
+def _prepare_performance_sma200w_bubble_frame(df: pd.DataFrame, x_metric: str) -> pd.DataFrame:
+    required_cols = ["Ticker", x_metric, "SMA200W_Distance_Percentile", "Avg_Forward_Return_6M_%"]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        return pd.DataFrame()
+
+    d = df[required_cols].copy()
+    d[x_metric] = pd.to_numeric(d[x_metric], errors="coerce")
+    d["SMA200W_Distance_Percentile"] = pd.to_numeric(d["SMA200W_Distance_Percentile"], errors="coerce")
+    d["Avg_Forward_Return_6M_%"] = pd.to_numeric(d["Avg_Forward_Return_6M_%"], errors="coerce")
+    d = d.dropna(subset=[x_metric, "SMA200W_Distance_Percentile", "Avg_Forward_Return_6M_%"])
+    d = d[d[x_metric] >= 0.0].copy()
+    if d.empty:
+        return d
+
+    d["Selected_Performance"] = d[x_metric]
+    d["SMA200W_Percentile"] = d["SMA200W_Distance_Percentile"].clip(lower=0.0, upper=100.0)
+    d["Avg_Forward_Return_6M"] = d["Avg_Forward_Return_6M_%"]
+    d["Forward_Return_Sign"] = np.where(d["Avg_Forward_Return_6M"] >= 0.0, "Positive", "Negative")
+    d["Bubble_Size_Value"] = d["Avg_Forward_Return_6M"].abs()
+    size_cap = float(d["Bubble_Size_Value"].quantile(0.95))
+    if not np.isfinite(size_cap) or size_cap <= 0.0:
+        size_cap = 1.0
+    d["Bubble_Size"] = d["Bubble_Size_Value"].clip(lower=0.0, upper=size_cap)
+    return d
+
+
+def _render_performance_sma200w_bubble_chart(chart_df: pd.DataFrame) -> None:
+    st.subheader("Performance vs SMA200W Percentile")
+    x_label = st.radio(
+        "X-axis metric",
+        options=list(PERFORMANCE_BUBBLE_X_OPTIONS.keys()),
+        index=1,
+        horizontal=True,
+        key="performance_sma200w_bubble_x_metric",
+    )
+    x_metric = PERFORMANCE_BUBBLE_X_OPTIONS[x_label]
+    d = _prepare_performance_sma200w_bubble_frame(chart_df, x_metric)
+    if d.empty:
+        st.info(f"No assets with non-negative {x_label} and complete SMA200W / forward return data.")
+        return
+
+    x_max = float(d["Selected_Performance"].max())
+    x_domain_max = max(1.0, x_max * 1.12)
+
+    base = alt.Chart(d).encode(
+        x=alt.X(
+            "Selected_Performance:Q",
+            scale=alt.Scale(domain=[0.0, x_domain_max], zero=True),
+            axis=alt.Axis(title=f"{x_label} %", format=".0f"),
+        ),
+        y=alt.Y(
+            "SMA200W_Percentile:Q",
+            scale=alt.Scale(domain=[100.0, 0.0]),
+            axis=alt.Axis(title="SMA200W Percentile", format=".0f"),
+        ),
+        tooltip=[
+            alt.Tooltip("Ticker:N", title="Asset / Ticker"),
+            alt.Tooltip("Selected_Performance:Q", title=f"{x_label} %", format="+.2f"),
+            alt.Tooltip("SMA200W_Percentile:Q", title="SMA200W Percentile", format=".0f"),
+            alt.Tooltip("Avg_Forward_Return_6M:Q", title="Avg Forward Return 6M %", format="+.2f"),
+        ],
+    )
+
+    bubbles = base.mark_circle(opacity=0.72, stroke="#111827", strokeWidth=0.6).encode(
+        color=alt.Color(
+            "Forward_Return_Sign:N",
+            scale=alt.Scale(domain=["Positive", "Negative"], range=["#22c55e", "#ef4444"]),
+            legend=alt.Legend(title="Bubble color", labelExpr="datum.label === 'Positive' ? 'Positive Avg Forward Return 6M' : 'Negative Avg Forward Return 6M'"),
+        ),
+        size=alt.Size(
+            "Bubble_Size:Q",
+            scale=alt.Scale(range=[80, 850], zero=True),
+            legend=alt.Legend(title="Bubble size: |Avg Forward Return 6M|"),
+        ),
+    )
+    labels = base.mark_text(dx=9, dy=0, align="left", baseline="middle", fontSize=10, color="#e5e7eb").encode(
+        text="Ticker:N"
+    )
+
+    chart = (bubbles + labels).properties(height=520)
+    st.altair_chart(chart, use_container_width=True)
+    st.caption(
+        "Green = positive Avg Forward Return 6M, red = negative. "
+        "Larger bubble = larger absolute Avg Forward Return 6M. "
+        "Assets with negative selected performance are excluded."
+    )
+
+
 def render_charts(df: pd.DataFrame) -> None:
     if df.empty:
         st.info("No rows to chart for current filters.")
@@ -1739,6 +1835,7 @@ def render_charts(df: pd.DataFrame) -> None:
 
     chart_df = _build_chart_frame(df)
 
+    _render_performance_sma200w_bubble_chart(chart_df)
     _render_rsi_chart(chart_df)
     _render_bar_chart(
         chart_df,
