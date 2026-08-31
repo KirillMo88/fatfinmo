@@ -995,7 +995,7 @@ def apply_filters(df: pd.DataFrame):
         )
 
     with c6:
-        perf_top5_label = st.selectbox("Top 5 performing ETFs", options=list(PERF_TOP5_MAP.keys()), index=0)
+        perf_top5_label = st.selectbox("Top 10 performing ETFs", options=list(PERF_TOP5_MAP.keys()), index=0)
 
     with c7:
         flow_top5_enabled = st.selectbox("Top 5 by Fund Flows (3M)", options=["Off", "On"], index=0) == "On"
@@ -1025,7 +1025,7 @@ def apply_filters(df: pd.DataFrame):
             index=0,
         )
 
-    # Apply non-top-5 filters next
+    # Apply non-top performance filters next
     if rsi_option == "RSI < 30":
         filtered = filtered[filtered["RSI_14"] < 30]
     elif rsi_option == "RSI > 70":
@@ -1068,10 +1068,10 @@ def apply_filters(df: pd.DataFrame):
     elif bb_filter == "Oversold (<= -5)":
         filtered = filtered[filtered["BB_Position"] <= -5]
 
-    # Top-5 filters last
+    # Top performance filters last
     if perf_top5_label != "Off":
         metric = PERF_TOP5_MAP[perf_top5_label]
-        filtered = filtered.sort_values(by=metric, ascending=False, na_position="last").head(5)
+        filtered = filtered.sort_values(by=metric, ascending=False, na_position="last").head(10)
 
     flow_unavailable = False
     if flow_top5_enabled:
