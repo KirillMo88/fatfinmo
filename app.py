@@ -127,10 +127,8 @@ ALPHA_CORE_COLUMNS = [
     "Momentum_Score",
     "Trend_Quality_Score",
     "Persistence_Score",
-    "Market_Regime",
     "Alpha_Confidence",
     "Entry_Risk_Score",
-    "Entry_Risk",
     "Opportunity_State",
     "Opportunity_Score",
 ]
@@ -1446,6 +1444,65 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
         )
 
 
+def render_top_alpha_status(market_slot, entry_risk_slot, df: pd.DataFrame, filtered_df: pd.DataFrame) -> None:
+    market_source = df.dropna(subset=["Market_Regime"]) if "Market_Regime" in df.columns else pd.DataFrame()
+    if market_source.empty:
+        regime = "n/a"
+        confidence = "n/a"
+    else:
+        regime = str(market_source["Market_Regime"].iloc[0])
+        confidence_value = pd.to_numeric(market_source["Alpha_Confidence"], errors="coerce").dropna()
+        confidence = "n/a" if confidence_value.empty else f"{confidence_value.iloc[0]:.0f}"
+
+    entry_scores = pd.to_numeric(filtered_df.get("Entry_Risk_Score", pd.Series(dtype="float64")), errors="coerce").dropna()
+    if entry_scores.empty:
+        entry_summary = "n/a"
+        entry_detail = "No scored assets"
+    else:
+        avg_risk = float(entry_scores.mean())
+        high_count = int((entry_scores > 60.0).sum())
+        entry_summary = f"{avg_risk:.1f}"
+        entry_detail = f"{entry_risk_category(avg_risk)} avg | {high_count} high+"
+
+    with market_slot.container():
+        st.markdown(
+            f"""
+<div style="padding-top: 1.35rem; line-height: 1.1;">
+  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Market Regime</div>
+  <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{regime}</div>
+  <div style="font-size: 0.68rem; color: #cbd5e1;">Confidence: <b>{confidence}</b></div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    with entry_risk_slot.container():
+        st.markdown(
+            f"""
+<div style="padding-top: 1.35rem; line-height: 1.1;">
+  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Entry Risk</div>
+  <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{entry_summary}</div>
+  <div style="font-size: 0.68rem; color: #cbd5e1;">{entry_detail}</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+
+def entry_risk_category(score: float) -> str:
+    if not np.isfinite(score):
+        return "n/a"
+    if score <= 20.0:
+        return "Low"
+    if score <= 40.0:
+        return "Moderate"
+    if score <= 60.0:
+        return "Elevated"
+    if score <= 80.0:
+        return "High"
+    return "Extreme"
+
+
 def extract_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if px is None or px.empty:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
@@ -2211,11 +2268,17 @@ def main():
         unsafe_allow_html=True,
     )
 
-    top_left, top_export_col, top_mid, top_refresh_col, top_hard_refresh_col = st.columns([2, 1.25, 6.25, 1, 1.4])
+    top_left, top_export_col, top_market_col, top_entry_col, top_mid, top_refresh_col, top_hard_refresh_col = st.columns(
+        [2, 1.25, 1.35, 1.55, 3.35, 1, 1.4]
+    )
     with top_left:
         selected_universe_name = st.selectbox("ETF Version", options=list(universe_map.keys()), index=0)
     with top_export_col:
         table_export_slot = st.empty()
+    with top_market_col:
+        market_status_slot = st.empty()
+    with top_entry_col:
+        entry_risk_status_slot = st.empty()
     with top_refresh_col:
         refresh = st.button("Refresh", use_container_width=True)
     with top_hard_refresh_col:
@@ -2258,6 +2321,7 @@ def main():
         )
 
     filtered_df, flow_unavailable = apply_filters(df)
+    render_top_alpha_status(market_status_slot, entry_risk_status_slot, df, filtered_df)
     graph_ordered_df = filtered_df.copy()
     table_df = filtered_df.copy().reset_index(drop=True)
     table_df["__row_id__"] = np.arange(len(table_df))
