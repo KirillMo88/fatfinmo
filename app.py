@@ -119,7 +119,6 @@ AUTO_REFRESH_SECONDS = 600
 GRAPH_PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly", "Full history"]
 
 ALPHA_CORE_COLUMNS = [
-    "Alpha_Rank",
     "Alpha_Score",
     "Alpha_State",
     "Momentum_Score",
@@ -1335,8 +1334,8 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Alpha_Rank": st.column_config.NumberColumn(format="%.0f"),
             "Alpha_Score": st.column_config.ProgressColumn(min_value=0.0, max_value=100.0, format="%.1f"),
+            "Alpha_State": st.column_config.TextColumn(width="large"),
             "Momentum_Score": st.column_config.NumberColumn(format="%.1f"),
             "Trend_Quality_Score": st.column_config.NumberColumn(format="%.1f"),
             "Persistence_Score": st.column_config.NumberColumn(format="%.1f"),
@@ -2271,9 +2270,8 @@ def main():
             "Group": 120,
             "Subgroup": 140,
             "Ticker": 95,
-            "Alpha_Rank": 70,
             "Alpha_Score": 82,
-            "Alpha_State": 132,
+            "Alpha_State": 264,
             "Momentum_Score": 92,
             "Trend_Quality_Score": 108,
             "Persistence_Score": 100,
