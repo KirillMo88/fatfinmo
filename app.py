@@ -17,6 +17,7 @@ from streamlit.errors import StreamlitSecretNotFoundError
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
 from finance_core import download_completed_ohlcv
+from table_export import dataframe_to_excel_xls_bytes
 from screener_metrics import (
     correction_risk_from_percentile_analogs,
     historical_momentum_52w_metrics,
@@ -2200,6 +2201,13 @@ def main():
         # The Streamlit component wrapper still needs an explicit height.
         # Size it to all rows to keep a single-page scroll (no nested grid scroll).
         table_height = max(520, 96 + (len(table_display_df) * 24))
+        st.download_button(
+            "Download Table .xls",
+            data=dataframe_to_excel_xls_bytes(table_display_df),
+            file_name="screener_table.xls",
+            mime="application/vnd.ms-excel",
+            key="table_xls_download",
+        )
 
         grid_response = AgGrid(
             table_display_df,
