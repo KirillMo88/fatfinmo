@@ -16,6 +16,11 @@ from streamlit.errors import StreamlitSecretNotFoundError
 
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
+from alpha_engine import (
+    calculate_alpha_engine,
+    calculate_sma200d_robust_z_36m,
+    sort_by_alpha,
+)
 from finance_core import download_completed_ohlcv
 from table_export import dataframe_to_excel_xls_bytes
 from screener_metrics import (
@@ -113,8 +118,37 @@ AUTO_REFRESH_SECONDS = 600
 
 GRAPH_PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly", "Full history"]
 
+ALPHA_CORE_COLUMNS = [
+    "Alpha_Rank",
+    "Alpha_Score",
+    "Alpha_State",
+    "Momentum_Score",
+    "Trend_Quality_Score",
+    "Persistence_Score",
+    "Overextension_Penalty",
+]
+
+ALPHA_TECHNICAL_COLUMNS = [
+    "ADX_DI_Trend_Score",
+    "DI_Balance",
+    "DI_Plus_14",
+    "DI_Minus_14",
+    "SMA_Regime_Score",
+    "Absolute_SMA_Score",
+    "Relative_SMA_Score",
+    "SMA200d_Robust_Z_36M",
+    "SMA200W_Penalty",
+    "Perf12M_Penalty",
+    "SMA_Z_Penalty",
+    "RSI_Penalty",
+    "Base_Alpha",
+    "Alpha_Data_Complete",
+]
+
 DISPLAY_COLUMNS = [
     "Group", "Subgroup", "Ticker",
+    *ALPHA_CORE_COLUMNS,
+    *ALPHA_TECHNICAL_COLUMNS,
     "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
     "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
@@ -128,6 +162,27 @@ TABLE_HEADER_NAMES = {
     "Group": "Group",
     "Subgroup": "Sub\ngroup",
     "Ticker": "Ticker",
+    "Alpha_Rank": "Alpha\nRank",
+    "Alpha_Score": "Alpha\nScore",
+    "Alpha_State": "Alpha\nState",
+    "Momentum_Score": "Momentum\nScore",
+    "Trend_Quality_Score": "Trend Quality\nScore",
+    "Persistence_Score": "Persistence\nScore",
+    "Overextension_Penalty": "Overextension\nPenalty",
+    "ADX_DI_Trend_Score": "ADX DI\nTrend Score",
+    "DI_Balance": "DI\nBalance",
+    "DI_Plus_14": "+DI\n14",
+    "DI_Minus_14": "-DI\n14",
+    "SMA_Regime_Score": "SMA Regime\nScore",
+    "Absolute_SMA_Score": "Absolute SMA\nScore",
+    "Relative_SMA_Score": "Relative SMA\nScore",
+    "SMA200d_Robust_Z_36M": "SMA200d Robust\nZ 36M",
+    "SMA200W_Penalty": "SMA200W\nPenalty",
+    "Perf12M_Penalty": "Perf12M\nPenalty",
+    "SMA_Z_Penalty": "SMA Z\nPenalty",
+    "RSI_Penalty": "RSI\nPenalty",
+    "Base_Alpha": "Base\nAlpha",
+    "Alpha_Data_Complete": "Alpha Data\nComplete",
     "Perf_1D_%": "Perf\n1D %",
     "Perf_1W_%": "Perf\n1W %",
     "Perf_1M_%": "Perf\n1M %",
@@ -161,6 +216,7 @@ TABLE_HEADER_NAMES = {
 TABLE_PERMANENTLY_HIDDEN_COLUMNS = {
     "FundFlows_1M_%",
     "FundFlows_3M_%",
+    *ALPHA_TECHNICAL_COLUMNS,
     "SMA50w_vs_SMA200w_Spread_%",
     "SMA_Spread_%_Change_6M_%",
     "BB_Mid",
@@ -181,6 +237,10 @@ NUMERIC_COLUMNS = [
     "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%",
     "ADX_14", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
     "Divergence_Bull_Count", "Divergence_Bear_Count",
+    "Alpha_Rank", "Alpha_Score", "Momentum_Score", "Trend_Quality_Score", "Persistence_Score",
+    "Overextension_Penalty", "ADX_DI_Trend_Score", "DI_Balance", "SMA_Regime_Score",
+    "Absolute_SMA_Score", "Relative_SMA_Score", "SMA200d_Robust_Z_36M",
+    "SMA200W_Penalty", "Perf12M_Penalty", "SMA_Z_Penalty", "RSI_Penalty", "Base_Alpha",
 ]
 
 PERFORMANCE_COLUMNS = [
@@ -860,6 +920,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         if not spread_valid.empty:
             # 36 months ~= 756 trading days; use shorter available history when needed.
             spread_avg_36m = float(spread_valid.tail(756).mean())
+        sma200d_robust_z_36m = calculate_sma200d_robust_z_36m(close)
 
         spread_pct_6m_ago = safe_value_on_or_before(spread_series_pct, cutoff_6m)
 
@@ -908,7 +969,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
             sma200w_percentile, perf_12m_percentile, avg_forward_return_6m, correction_risk,
             flows_1m, flows_3m,
             vs_52w, vs_ath, cur_rsi,
-            spread_pct_now, spread_avg_36m, spread_pct_change_6m, sma_trend,
+            spread_pct_now, spread_avg_36m, spread_pct_change_6m, sma200d_robust_z_36m, sma_trend,
             cur_adx14, cur_di_plus14, cur_di_minus14, cur_di_plus14_delta2, cur_di_minus14_delta2,
             bb_position, bb_mid, bb_upper, bb_lower, bb_step_up, bb_step_down, wk_close_last,
             int(golden_cross_d1), int(death_cross_d1), int(golden_cross_w1), int(death_cross_w1),
@@ -922,16 +983,6 @@ def get_metrics(ticker: str, divergence_cfg: dict):
 def compute_metrics_table(universe: dict, universe_signature: str, divergence_cfg: dict, divergence_signature: str) -> tuple[pd.DataFrame, str]:
     _ = universe_signature
     _ = divergence_signature
-    rows = []
-    for group, subgroups in universe.items():
-        for subgroup, tickers in subgroups.items():
-            for ticker in tickers:
-                res = get_metrics(ticker, divergence_cfg)
-                if res is None:
-                    rows.append([group, subgroup, ticker] + [np.nan] * 41)
-                else:
-                    rows.append([group, subgroup, ticker] + res)
-
     columns = [
         "Group", "Subgroup", "Ticker",
         "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%",
@@ -939,12 +990,22 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
         "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
         "FundFlows_1M_%", "FundFlows_3M_%",
         "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
-        "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
+        "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%",
+        "SMA200d_Robust_Z_36M", "SMA_Trend",
         "ADX_14", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
         "BB_Position", "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last",
         "GoldenCross_D1", "DeathCross_D1", "GoldenCross_W1", "DeathCross_W1",
         "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
     ]
+    rows = []
+    for group, subgroups in universe.items():
+        for subgroup, tickers in subgroups.items():
+            for ticker in tickers:
+                res = get_metrics(ticker, divergence_cfg)
+                if res is None:
+                    rows.append([group, subgroup, ticker] + [np.nan] * (len(columns) - 3))
+                else:
+                    rows.append([group, subgroup, ticker] + res)
 
     df = pd.DataFrame(rows, columns=columns)
 
@@ -958,6 +1019,7 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
         + (df["Div_6M_vs_MACD"] == "bear").astype(int)
         + (df["Div_6M_vs_ROC"] == "bear").astype(int)
     )
+    df = calculate_alpha_engine(df)
 
     fetched_at_utc = pd.Timestamp.now(tz="UTC").isoformat()
     return df, fetched_at_utc
@@ -965,7 +1027,9 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
 
 def apply_filters(df: pd.DataFrame):
     groups_all = sorted(df["Group"].dropna().unique().tolist())
-    c1, c2, c3, c4, c5, c6, c7, c8, c9, c10 = st.columns([1.1, 1.1, 1.1, 0.9, 1.0, 1.2, 1.2, 1.3, 1.3, 1.1])
+    c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = st.columns(
+        [1.05, 1.05, 1.0, 0.85, 1.0, 1.1, 1.1, 1.2, 1.2, 1.0, 0.95, 0.9]
+    )
 
     with c1:
         selected_group = st.selectbox("Group", options=["All"] + groups_all, index=0)
@@ -1025,6 +1089,10 @@ def apply_filters(df: pd.DataFrame):
             options=["Off", "Overbought (>= +5)", "Oversold (<= -5)"],
             index=0,
         )
+    with c11:
+        alpha_sort_enabled = st.selectbox("Sort by Alpha", options=["On", "Off"], index=0) == "On"
+    with c12:
+        alpha_top = st.selectbox("Top Alpha", options=["All", "Top 5", "Top 10", "Top 20"], index=0)
 
     # Apply non-top performance filters next
     if rsi_option == "RSI < 30":
@@ -1082,6 +1150,12 @@ def apply_filters(df: pd.DataFrame):
             flow_unavailable = True
         else:
             filtered = flow_df.sort_values(by="FundFlows_3M_%", ascending=False).head(5)
+
+    if alpha_sort_enabled or alpha_top != "All":
+        filtered = sort_by_alpha(filtered)
+    if alpha_top != "All":
+        top_n = int(alpha_top.split()[-1])
+        filtered = filtered.dropna(subset=["Alpha_Score"]).head(top_n)
 
     return filtered, flow_unavailable
 
@@ -1244,6 +1318,98 @@ def render_description_tab() -> None:
     - `nothing` (if no candidate passes all filters)
 """
     )
+
+
+def render_alpha_engine_tab(df: pd.DataFrame) -> None:
+    available = df.dropna(subset=["Alpha_Score"]).copy()
+    if available.empty:
+        st.info("Alpha data unavailable")
+        return
+
+    available = sort_by_alpha(available).reset_index(drop=True)
+    alpha_columns = ["Group", "Subgroup", "Ticker", *ALPHA_CORE_COLUMNS]
+    alpha_view = available[[col for col in alpha_columns if col in available.columns]].copy()
+
+    st.dataframe(
+        alpha_view,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Alpha_Rank": st.column_config.NumberColumn(format="%.0f"),
+            "Alpha_Score": st.column_config.ProgressColumn(min_value=0.0, max_value=100.0, format="%.1f"),
+            "Momentum_Score": st.column_config.NumberColumn(format="%.1f"),
+            "Trend_Quality_Score": st.column_config.NumberColumn(format="%.1f"),
+            "Persistence_Score": st.column_config.NumberColumn(format="%.1f"),
+            "Overextension_Penalty": st.column_config.NumberColumn(format="%.1f"),
+        },
+    )
+
+    detail_left, detail_right = st.columns([1.1, 1.4])
+    with detail_left:
+        tickers = available["Ticker"].astype(str).tolist()
+        selected_ticker = st.selectbox("Ticker", options=tickers, key="alpha_engine_ticker")
+    row = available[available["Ticker"].astype(str) == selected_ticker].iloc[0]
+
+    with detail_right:
+        st.markdown(
+            f"""
+**Alpha Score:** {row["Alpha_Score"]:.1f}
+
+| Component | Value |
+| --- | ---: |
+| Base Alpha | {row["Base_Alpha"]:.1f} |
+| Momentum | {row["Momentum_Score"]:.1f} |
+| Trend Quality | {row["Trend_Quality_Score"]:.1f} |
+| Persistence | {row["Persistence_Score"]:.1f} |
+| Overextension Penalty | -{row["Overextension_Penalty"]:.1f} |
+| SMA200W Penalty | -{row["SMA200W_Penalty"]:.1f} |
+| Perf12M Penalty | -{row["Perf12M_Penalty"]:.1f} |
+| SMA Z Penalty | -{row["SMA_Z_Penalty"]:.1f} |
+| RSI Penalty | -{row["RSI_Penalty"]:.1f} |
+| Final Alpha | {row["Alpha_Score"]:.1f} |
+| Alpha Data Complete | {bool(row["Alpha_Data_Complete"])} |
+"""
+        )
+
+    technical_columns = [
+        "Ticker",
+        "ADX_DI_Trend_Score",
+        "DI_Balance",
+        "DI_Plus_14",
+        "DI_Minus_14",
+        "SMA_Regime_Score",
+        "Absolute_SMA_Score",
+        "Relative_SMA_Score",
+        "SMA200d_Robust_Z_36M",
+        "SMA200W_Penalty",
+        "Perf12M_Penalty",
+        "SMA_Z_Penalty",
+        "RSI_Penalty",
+        "Base_Alpha",
+        "Alpha_Data_Complete",
+    ]
+    technical_view = available[[col for col in technical_columns if col in available.columns]].copy()
+    with st.expander("Technical Alpha Fields", expanded=False):
+        st.dataframe(
+            technical_view,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "ADX_DI_Trend_Score": st.column_config.NumberColumn(format="%.1f"),
+                "DI_Balance": st.column_config.NumberColumn(format="%.2f"),
+                "DI_Plus_14": st.column_config.NumberColumn(format="%.1f"),
+                "DI_Minus_14": st.column_config.NumberColumn(format="%.1f"),
+                "SMA_Regime_Score": st.column_config.NumberColumn(format="%.1f"),
+                "Absolute_SMA_Score": st.column_config.NumberColumn(format="%.1f"),
+                "Relative_SMA_Score": st.column_config.NumberColumn(format="%.1f"),
+                "SMA200d_Robust_Z_36M": st.column_config.NumberColumn(format="%.2f"),
+                "SMA200W_Penalty": st.column_config.NumberColumn(format="%.1f"),
+                "Perf12M_Penalty": st.column_config.NumberColumn(format="%.1f"),
+                "SMA_Z_Penalty": st.column_config.NumberColumn(format="%.1f"),
+                "RSI_Penalty": st.column_config.NumberColumn(format="%.1f"),
+                "Base_Alpha": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
 
 
 def extract_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -2083,7 +2249,9 @@ def main():
     if flow_unavailable:
         st.warning("Fund flow data unavailable")
 
-    table_tab, charts_tab, graphs_tab, inputs_tab, description_tab, tester_tab = st.tabs(["Table", "Charts", "Graphs", "Inputs", "Description", "Tester"])
+    table_tab, charts_tab, graphs_tab, alpha_tab, inputs_tab, description_tab, tester_tab = st.tabs(
+        ["Table", "Charts", "Graphs", "Alpha Engine", "Inputs", "Description", "Tester"]
+    )
     with table_tab:
         gb = GridOptionsBuilder.from_dataframe(table_display_df)
         gb.configure_default_column(
@@ -2103,6 +2271,13 @@ def main():
             "Group": 120,
             "Subgroup": 140,
             "Ticker": 95,
+            "Alpha_Rank": 70,
+            "Alpha_Score": 82,
+            "Alpha_State": 132,
+            "Momentum_Score": 92,
+            "Trend_Quality_Score": 108,
+            "Persistence_Score": 100,
+            "Overextension_Penalty": 112,
             "Price_vs_52W_High_%": 130,
             "Price_vs_ATH_%": 110,
             "RSI_14": 39,
@@ -2207,6 +2382,28 @@ def main():
             )
             gb.configure_column(col_label, cellStyle=perf_color_styles[col_label])
 
+        alpha_score_label = table_col_labels.get("Alpha_Score")
+        if alpha_score_label in table_display_df.columns:
+            gb.configure_column(
+                alpha_score_label,
+                cellStyle=JsCode(
+                    """
+                    function(params) {
+                        if (params.value === null || params.value === undefined || isNaN(params.value)) {
+                            return {};
+                        }
+                        const v = Number(params.value);
+                        if (v >= 80) { return {backgroundColor: "#16a34a", color: "#ffffff"}; }
+                        if (v >= 70) { return {backgroundColor: "#4ade80", color: "#111827"}; }
+                        if (v >= 60) { return {backgroundColor: "#86efac", color: "#111827"}; }
+                        if (v >= 50) { return {backgroundColor: "#fef3c7", color: "#111827"}; }
+                        if (v >= 40) { return {backgroundColor: "#fdba74", color: "#111827"}; }
+                        return {backgroundColor: "#f87171", color: "#111827"};
+                    }
+                    """
+                ),
+            )
+
         grid_options = gb.build()
 
         # The Streamlit component wrapper still needs an explicit height.
@@ -2261,6 +2458,8 @@ def main():
         else:
             graph_ordered_df = base_df
         render_graphs_tab(graph_ordered_df.drop(columns=["__row_id__"], errors="ignore"), selected_universe, selected_universe_name)
+    with alpha_tab:
+        render_alpha_engine_tab(table_df.drop(columns=["__row_id__"], errors="ignore"))
     with inputs_tab:
         render_inputs_tab(universe_map)
     with description_tab:
