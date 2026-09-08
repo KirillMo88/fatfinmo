@@ -2011,9 +2011,11 @@ def main():
         unsafe_allow_html=True,
     )
 
-    top_left, top_mid, top_refresh_col, top_hard_refresh_col = st.columns([2, 7.5, 1, 1.4])
+    top_left, top_export_col, top_mid, top_refresh_col, top_hard_refresh_col = st.columns([2, 1.25, 6.25, 1, 1.4])
     with top_left:
         selected_universe_name = st.selectbox("ETF Version", options=list(universe_map.keys()), index=0)
+    with top_export_col:
+        table_export_slot = st.empty()
     with top_refresh_col:
         refresh = st.button("Refresh", use_container_width=True)
     with top_hard_refresh_col:
@@ -2057,6 +2059,24 @@ def main():
 
     filtered_df, flow_unavailable = apply_filters(df)
     graph_ordered_df = filtered_df.copy()
+    table_df = filtered_df.copy().reset_index(drop=True)
+    table_df["__row_id__"] = np.arange(len(table_df))
+    table_display_df = table_df[["__row_id__"] + DISPLAY_COLUMNS].copy()
+    table_col_labels = {
+        col: TABLE_HEADER_NAMES.get(col, col.replace("_", " "))
+        for col in DISPLAY_COLUMNS
+    }
+    table_display_df = table_display_df.rename(columns=table_col_labels)
+
+    with table_export_slot:
+        st.download_button(
+            "Download .xls",
+            data=dataframe_to_excel_xls_bytes(table_display_df),
+            file_name="screener_table.xls",
+            mime="application/vnd.ms-excel",
+            key="table_xls_download",
+            use_container_width=True,
+        )
 
     st.caption(f"Rows: {len(filtered_df)}/{len(df)}")
 
@@ -2065,15 +2085,6 @@ def main():
 
     table_tab, charts_tab, graphs_tab, inputs_tab, description_tab, tester_tab = st.tabs(["Table", "Charts", "Graphs", "Inputs", "Description", "Tester"])
     with table_tab:
-        table_df = filtered_df.copy().reset_index(drop=True)
-        table_df["__row_id__"] = np.arange(len(table_df))
-        table_display_df = table_df[["__row_id__"] + DISPLAY_COLUMNS].copy()
-        table_col_labels = {
-            col: TABLE_HEADER_NAMES.get(col, col.replace("_", " "))
-            for col in DISPLAY_COLUMNS
-        }
-        table_display_df = table_display_df.rename(columns=table_col_labels)
-
         gb = GridOptionsBuilder.from_dataframe(table_display_df)
         gb.configure_default_column(
             sortable=True,
@@ -2201,14 +2212,6 @@ def main():
         # The Streamlit component wrapper still needs an explicit height.
         # Size it to all rows to keep a single-page scroll (no nested grid scroll).
         table_height = max(520, 96 + (len(table_display_df) * 24))
-        st.download_button(
-            "Download Table .xls",
-            data=dataframe_to_excel_xls_bytes(table_display_df),
-            file_name="screener_table.xls",
-            mime="application/vnd.ms-excel",
-            key="table_xls_download",
-        )
-
         grid_response = AgGrid(
             table_display_df,
             gridOptions=grid_options,
