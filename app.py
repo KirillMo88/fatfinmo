@@ -17,11 +17,13 @@ from streamlit.errors import StreamlitSecretNotFoundError
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
 from alpha_engine import (
+    alpha_config,
     calculate_alpha_engine,
     calculate_sma200d_robust_z_36m,
     sort_by_alpha,
 )
 from finance_core import download_completed_ohlcv
+from market_regime import calculate_market_regime
 from table_export import dataframe_to_excel_xls_bytes
 from screener_metrics import (
     correction_risk_from_percentile_analogs,
@@ -119,12 +121,18 @@ AUTO_REFRESH_SECONDS = 600
 GRAPH_PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly", "Full history"]
 
 ALPHA_CORE_COLUMNS = [
+    "Alpha_Rank",
     "Alpha_Score",
     "Alpha_State",
     "Momentum_Score",
     "Trend_Quality_Score",
     "Persistence_Score",
-    "Overextension_Penalty",
+    "Market_Regime",
+    "Alpha_Confidence",
+    "Entry_Risk_Score",
+    "Entry_Risk",
+    "Opportunity_State",
+    "Opportunity_Score",
 ]
 
 ALPHA_TECHNICAL_COLUMNS = [
@@ -136,11 +144,13 @@ ALPHA_TECHNICAL_COLUMNS = [
     "Absolute_SMA_Score",
     "Relative_SMA_Score",
     "SMA200d_Robust_Z_36M",
-    "SMA200W_Penalty",
-    "Perf12M_Penalty",
-    "SMA_Z_Penalty",
-    "RSI_Penalty",
+    "Regime_Dependent_SMAZ_Risk",
+    "Perf12M_Extreme_Risk",
     "Base_Alpha",
+    "SPY_vs_SMA40W_%",
+    "SPY_Drawdown_52W_%",
+    "SPY_Volatility_13W_%",
+    "SPY_Volatility_Percentile",
     "Alpha_Data_Complete",
 ]
 
@@ -167,7 +177,12 @@ TABLE_HEADER_NAMES = {
     "Momentum_Score": "Momentum\nScore",
     "Trend_Quality_Score": "Trend Quality\nScore",
     "Persistence_Score": "Persistence\nScore",
-    "Overextension_Penalty": "Overextension\nPenalty",
+    "Market_Regime": "Market\nRegime",
+    "Alpha_Confidence": "Alpha\nConfidence",
+    "Entry_Risk_Score": "Entry Risk\nScore",
+    "Entry_Risk": "Entry\nRisk",
+    "Opportunity_State": "Opportunity\nState",
+    "Opportunity_Score": "Opportunity\nScore",
     "ADX_DI_Trend_Score": "ADX DI\nTrend Score",
     "DI_Balance": "DI\nBalance",
     "DI_Plus_14": "+DI\n14",
@@ -176,11 +191,13 @@ TABLE_HEADER_NAMES = {
     "Absolute_SMA_Score": "Absolute SMA\nScore",
     "Relative_SMA_Score": "Relative SMA\nScore",
     "SMA200d_Robust_Z_36M": "SMA200d Robust\nZ 36M",
-    "SMA200W_Penalty": "SMA200W\nPenalty",
-    "Perf12M_Penalty": "Perf12M\nPenalty",
-    "SMA_Z_Penalty": "SMA Z\nPenalty",
-    "RSI_Penalty": "RSI\nPenalty",
+    "Regime_Dependent_SMAZ_Risk": "Regime SMAZ\nRisk",
+    "Perf12M_Extreme_Risk": "Perf12M Extreme\nRisk",
     "Base_Alpha": "Base\nAlpha",
+    "SPY_vs_SMA40W_%": "SPY vs\nSMA40W %",
+    "SPY_Drawdown_52W_%": "SPY Drawdown\n52W %",
+    "SPY_Volatility_13W_%": "SPY Volatility\n13W %",
+    "SPY_Volatility_Percentile": "SPY Volatility\nPercentile",
     "Alpha_Data_Complete": "Alpha Data\nComplete",
     "Perf_1D_%": "Perf\n1D %",
     "Perf_1W_%": "Perf\n1W %",
@@ -237,9 +254,10 @@ NUMERIC_COLUMNS = [
     "ADX_14", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
     "Divergence_Bull_Count", "Divergence_Bear_Count",
     "Alpha_Rank", "Alpha_Score", "Momentum_Score", "Trend_Quality_Score", "Persistence_Score",
-    "Overextension_Penalty", "ADX_DI_Trend_Score", "DI_Balance", "SMA_Regime_Score",
+    "Alpha_Confidence", "Entry_Risk_Score", "Opportunity_Score", "ADX_DI_Trend_Score", "DI_Balance", "SMA_Regime_Score",
     "Absolute_SMA_Score", "Relative_SMA_Score", "SMA200d_Robust_Z_36M",
-    "SMA200W_Penalty", "Perf12M_Penalty", "SMA_Z_Penalty", "RSI_Penalty", "Base_Alpha",
+    "Regime_Dependent_SMAZ_Risk", "Perf12M_Extreme_Risk", "Base_Alpha",
+    "SPY_vs_SMA40W_%", "SPY_Drawdown_52W_%", "SPY_Volatility_13W_%", "SPY_Volatility_Percentile",
 ]
 
 PERFORMANCE_COLUMNS = [
@@ -1018,7 +1036,10 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
         + (df["Div_6M_vs_MACD"] == "bear").astype(int)
         + (df["Div_6M_vs_ROC"] == "bear").astype(int)
     )
-    df = calculate_alpha_engine(df)
+    spy_ohlcv = download_metrics_ohlcv("SPY")
+    spy_weekly = build_weekly_ohlcv_from_daily(spy_ohlcv[["Open", "High", "Low", "Close", "Volume"]])
+    market = calculate_market_regime(spy_weekly, config=alpha_config())
+    df = calculate_alpha_engine(df, market_regime=market)
 
     fetched_at_utc = pd.Timestamp.now(tz="UTC").isoformat()
     return df, fetched_at_utc
@@ -1089,7 +1110,11 @@ def apply_filters(df: pd.DataFrame):
             index=0,
         )
     with c11:
-        alpha_sort_enabled = st.selectbox("Sort by Alpha", options=["On", "Off"], index=0) == "On"
+        alpha_sort = st.selectbox(
+            "Sort by",
+            options=["Alpha Score", "Opportunity State", "Entry Risk", "Alpha Confidence", "Opportunity Score", "Off"],
+            index=0,
+        )
     with c12:
         alpha_top = st.selectbox("Top Alpha", options=["All", "Top 5", "Top 10", "Top 20"], index=0)
 
@@ -1150,8 +1175,8 @@ def apply_filters(df: pd.DataFrame):
         else:
             filtered = flow_df.sort_values(by="FundFlows_3M_%", ascending=False).head(5)
 
-    if alpha_sort_enabled or alpha_top != "All":
-        filtered = sort_by_alpha(filtered)
+    if alpha_sort != "Off" or alpha_top != "All":
+        filtered = sort_by_alpha(filtered, sort_by=alpha_sort)
     if alpha_top != "All":
         top_n = int(alpha_top.split()[-1])
         filtered = filtered.dropna(subset=["Alpha_Score"]).head(top_n)
@@ -1334,12 +1359,15 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
         use_container_width=True,
         hide_index=True,
         column_config={
+            "Alpha_Rank": st.column_config.NumberColumn(format="%.0f"),
             "Alpha_Score": st.column_config.ProgressColumn(min_value=0.0, max_value=100.0, format="%.1f"),
             "Alpha_State": st.column_config.TextColumn(width="large"),
             "Momentum_Score": st.column_config.NumberColumn(format="%.1f"),
             "Trend_Quality_Score": st.column_config.NumberColumn(format="%.1f"),
             "Persistence_Score": st.column_config.NumberColumn(format="%.1f"),
-            "Overextension_Penalty": st.column_config.NumberColumn(format="%.1f"),
+            "Alpha_Confidence": st.column_config.NumberColumn(format="%.0f"),
+            "Entry_Risk_Score": st.column_config.ProgressColumn(min_value=0.0, max_value=100.0, format="%.1f"),
+            "Opportunity_Score": st.column_config.ProgressColumn(min_value=0.0, max_value=100.0, format="%.1f"),
         },
     )
 
@@ -1360,12 +1388,14 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
 | Momentum | {row["Momentum_Score"]:.1f} |
 | Trend Quality | {row["Trend_Quality_Score"]:.1f} |
 | Persistence | {row["Persistence_Score"]:.1f} |
-| Overextension Penalty | -{row["Overextension_Penalty"]:.1f} |
-| SMA200W Penalty | -{row["SMA200W_Penalty"]:.1f} |
-| Perf12M Penalty | -{row["Perf12M_Penalty"]:.1f} |
-| SMA Z Penalty | -{row["SMA_Z_Penalty"]:.1f} |
-| RSI Penalty | -{row["RSI_Penalty"]:.1f} |
-| Final Alpha | {row["Alpha_Score"]:.1f} |
+| Market Regime | {row["Market_Regime"]} |
+| Alpha Confidence | {row["Alpha_Confidence"]:.0f} |
+| Entry Risk Score | {row["Entry_Risk_Score"]:.1f} |
+| Entry Risk | {row["Entry_Risk"]} |
+| Opportunity State | {row["Opportunity_State"]} |
+| Opportunity Score | {row["Opportunity_Score"]:.1f} |
+| SMA Z36M | {row["SMA200d_Robust_Z_36M"]:.2f} |
+| Perf12M Percentile | {row["Perf_12M_Percentile"]:.1f} |
 | Alpha Data Complete | {bool(row["Alpha_Data_Complete"])} |
 """
         )
@@ -1380,11 +1410,13 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
         "Absolute_SMA_Score",
         "Relative_SMA_Score",
         "SMA200d_Robust_Z_36M",
-        "SMA200W_Penalty",
-        "Perf12M_Penalty",
-        "SMA_Z_Penalty",
-        "RSI_Penalty",
+        "Regime_Dependent_SMAZ_Risk",
+        "Perf12M_Extreme_Risk",
         "Base_Alpha",
+        "SPY_vs_SMA40W_%",
+        "SPY_Drawdown_52W_%",
+        "SPY_Volatility_13W_%",
+        "SPY_Volatility_Percentile",
         "Alpha_Data_Complete",
     ]
     technical_view = available[[col for col in technical_columns if col in available.columns]].copy()
@@ -1402,11 +1434,14 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
                 "Absolute_SMA_Score": st.column_config.NumberColumn(format="%.1f"),
                 "Relative_SMA_Score": st.column_config.NumberColumn(format="%.1f"),
                 "SMA200d_Robust_Z_36M": st.column_config.NumberColumn(format="%.2f"),
-                "SMA200W_Penalty": st.column_config.NumberColumn(format="%.1f"),
-                "Perf12M_Penalty": st.column_config.NumberColumn(format="%.1f"),
-                "SMA_Z_Penalty": st.column_config.NumberColumn(format="%.1f"),
-                "RSI_Penalty": st.column_config.NumberColumn(format="%.1f"),
+                "Perf_12M_Percentile": st.column_config.NumberColumn(format="%.1f"),
+                "Regime_Dependent_SMAZ_Risk": st.column_config.NumberColumn(format="%.1f"),
+                "Perf12M_Extreme_Risk": st.column_config.NumberColumn(format="%.1f"),
                 "Base_Alpha": st.column_config.NumberColumn(format="%.1f"),
+                "SPY_vs_SMA40W_%": st.column_config.NumberColumn(format="%.1f"),
+                "SPY_Drawdown_52W_%": st.column_config.NumberColumn(format="%.1f"),
+                "SPY_Volatility_13W_%": st.column_config.NumberColumn(format="%.1f"),
+                "SPY_Volatility_Percentile": st.column_config.NumberColumn(format="%.1f"),
             },
         )
 
@@ -2270,12 +2305,18 @@ def main():
             "Group": 120,
             "Subgroup": 140,
             "Ticker": 95,
+            "Alpha_Rank": 70,
             "Alpha_Score": 82,
             "Alpha_State": 264,
             "Momentum_Score": 92,
             "Trend_Quality_Score": 108,
             "Persistence_Score": 100,
-            "Overextension_Penalty": 112,
+            "Market_Regime": 130,
+            "Alpha_Confidence": 96,
+            "Entry_Risk_Score": 94,
+            "Entry_Risk": 92,
+            "Opportunity_State": 190,
+            "Opportunity_Score": 104,
             "Price_vs_52W_High_%": 130,
             "Price_vs_ATH_%": 110,
             "RSI_14": 39,

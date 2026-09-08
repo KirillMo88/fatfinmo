@@ -5,6 +5,8 @@ from copy import deepcopy
 import numpy as np
 import pandas as pd
 
+from entry_risk import calculate_entry_risk
+
 
 ALPHA_CONFIG = {
     "weights": {
@@ -30,6 +32,7 @@ ALPHA_CONFIG = {
         "absolute": 0.65,
         "relative": 0.35,
         "absolute_points": [(-5.0, 0.0), (0.0, 50.0), (5.0, 100.0)],
+        "relative_points": [(-2.0, 0.0), (-1.0, 25.0), (0.0, 50.0), (1.0, 70.0), (2.0, 90.0), (3.0, 100.0)],
         "relative_window_months": 36,
         "relative_min_observations": 504,
         "relative_fallback_score": 50.0,
@@ -45,30 +48,32 @@ ALPHA_CONFIG = {
         "historical_12m": 0.20,
         "historical_12m_full_score_percentile": 85.0,
     },
-    "overextension": {
-        "sma200w_max_penalty": 12.0,
-        "perf12m_max_penalty": 10.0,
-        "smaz_max_penalty": 5.0,
-        "rsi_max_penalty": 5.0,
-        "sma200w_start_percentile": 90.0,
-        "perf12m_start_percentile": 90.0,
-        "smaz_start": 1.5,
-        "smaz_full_penalty": 3.0,
-        "rsi_points": [(65.0, 0.0), (70.0, 1.0), (75.0, 3.0), (80.0, 5.0)],
+    "market_regime": {
+        "spy_sma_weeks": 40,
+        "drawdown_threshold": -0.10,
+        "vol_window_weeks": 13,
+        "high_vol_percentile": 75.0,
+        "alpha_confidence": {
+            "BULL": 100.0,
+            "BULL_HIGH_VOL": 100.0,
+            "CORRECTION": 50.0,
+            "STRESS": 20.0,
+        },
+    },
+    "entry_risk": {
+        "perf12_soft_threshold": 98.0,
+        "perf12_extreme_threshold": 99.0,
+        "perf12_soft_risk": 5.0,
+        "perf12_extreme_risk": 10.0,
+        "stress_momentum_threshold": 70.0,
+        "stress_smaz_extreme": 3.0,
+        "stress_min_entry_risk": 80.0,
     },
     "state": {
-        "healthy_alpha": 70.0,
-        "healthy_component": 65.0,
-        "healthy_max_penalty": 10.0,
-        "emerging_momentum": 75.0,
-        "emerging_trend": 55.0,
-        "emerging_persistence": 65.0,
-        "extended_base_alpha": 70.0,
-        "extended_min_penalty": 10.0,
-        "deteriorating_persistence": 65.0,
-        "deteriorating_momentum": 50.0,
-        "deteriorating_adx_di": 35.0,
-        "bear_momentum": 50.0,
+        "strong_alpha": 80.0,
+        "positive_alpha": 70.0,
+        "moderate_alpha": 60.0,
+        "neutral_alpha": 50.0,
     },
 }
 
@@ -79,20 +84,30 @@ ALPHA_OUTPUT_COLUMNS = [
     "Momentum_Score",
     "Trend_Quality_Score",
     "Persistence_Score",
-    "Overextension_Penalty",
+    "Market_Regime",
+    "Alpha_Confidence",
+    "Entry_Risk_Score",
+    "Entry_Risk",
+    "Opportunity_State",
+    "Opportunity_Score",
     "ADX_DI_Trend_Score",
     "DI_Balance",
     "SMA_Regime_Score",
     "Absolute_SMA_Score",
     "Relative_SMA_Score",
     "SMA200d_Robust_Z_36M",
-    "SMA200W_Penalty",
-    "Perf12M_Penalty",
-    "SMA_Z_Penalty",
-    "RSI_Penalty",
+    "Regime_Dependent_SMAZ_Risk",
+    "Perf12M_Extreme_Risk",
     "Base_Alpha",
     "Alpha_Data_Complete",
 ]
+
+TEXT_OUTPUT_COLUMNS = {
+    "Alpha_State",
+    "Market_Regime",
+    "Entry_Risk",
+    "Opportunity_State",
+}
 
 
 def alpha_config() -> dict:
@@ -170,7 +185,7 @@ def calculate_sma_regime_score(df: pd.DataFrame, config: dict | None = None) -> 
     )
 
     smaz = pd.to_numeric(df["SMA200d_Robust_Z_36M"], errors="coerce")
-    out["Relative_SMA_Score"] = (50.0 + 25.0 * smaz).clip(0.0, 100.0)
+    out["Relative_SMA_Score"] = piecewise_score(smaz, cfg["relative_points"])
     relative_missing = out["Relative_SMA_Score"].isna()
     out.loc[relative_missing, "Relative_SMA_Score"] = float(cfg["relative_fallback_score"])
     out["SMA_Relative_Fallback_Used"] = relative_missing
@@ -179,6 +194,20 @@ def calculate_sma_regime_score(df: pd.DataFrame, config: dict | None = None) -> 
         + float(cfg["relative"]) * out["Relative_SMA_Score"]
     )
     return out
+
+
+def calculate_trend_quality_score(
+    adx_di: pd.DataFrame,
+    sma: pd.DataFrame,
+    high52w: pd.Series,
+    config: dict | None = None,
+) -> pd.Series:
+    cfg = (config or ALPHA_CONFIG)["trend"]
+    return (
+        float(cfg["adx_di"]) * adx_di["ADX_DI_Trend_Score"]
+        + float(cfg["sma_regime"]) * sma["SMA_Regime_Score"]
+        + float(cfg["high_52w"]) * high52w
+    ).rename("Trend_Quality_Score")
 
 
 def calculate_persistence_score(df: pd.DataFrame, ranks: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
@@ -207,39 +236,6 @@ def calculate_persistence_score(df: pd.DataFrame, ranks: pd.DataFrame, config: d
     return out
 
 
-def calculate_overextension_penalty(df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
-    cfg = (config or ALPHA_CONFIG)["overextension"]
-    out = pd.DataFrame(index=df.index)
-    sma200w = pd.to_numeric(df["SMA200W_Distance_Percentile"], errors="coerce")
-    perf12m = pd.to_numeric(df["Perf_12M_Percentile"], errors="coerce")
-    smaz = pd.to_numeric(df["SMA200d_Robust_Z_36M"], errors="coerce")
-    rsi = pd.to_numeric(df["RSI_14"], errors="coerce")
-
-    out["SMA200W_Penalty"] = quadratic_penalty(
-        sma200w,
-        start=float(cfg["sma200w_start_percentile"]),
-        end=100.0,
-        max_penalty=float(cfg["sma200w_max_penalty"]),
-    )
-    out["Perf12M_Penalty"] = quadratic_penalty(
-        perf12m,
-        start=float(cfg["perf12m_start_percentile"]),
-        end=100.0,
-        max_penalty=float(cfg["perf12m_max_penalty"]),
-    )
-    out["SMA_Z_Penalty"] = quadratic_penalty(
-        smaz,
-        start=float(cfg["smaz_start"]),
-        end=float(cfg["smaz_full_penalty"]),
-        max_penalty=float(cfg["smaz_max_penalty"]),
-    ).fillna(0.0)
-    out["RSI_Penalty"] = piecewise_score(rsi, cfg["rsi_points"])
-    out["Overextension_Penalty"] = out[
-        ["SMA200W_Penalty", "Perf12M_Penalty", "SMA_Z_Penalty", "RSI_Penalty"]
-    ].sum(axis=1, min_count=4)
-    return out
-
-
 def calculate_alpha_score(df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
     cfg = (config or ALPHA_CONFIG)["weights"]
     out = pd.DataFrame(index=df.index)
@@ -248,80 +244,44 @@ def calculate_alpha_score(df: pd.DataFrame, config: dict | None = None) -> pd.Da
         + float(cfg["trend"]) * df["Trend_Quality_Score"]
         + float(cfg["persistence"]) * df["Persistence_Score"]
     )
-    out["Alpha_Score"] = (out["Base_Alpha"] - df["Overextension_Penalty"]).clip(0.0, 100.0)
+    out["Alpha_Score"] = out["Base_Alpha"].clip(0.0, 100.0)
     return out
 
 
 def classify_alpha_state(row: pd.Series, config: dict | None = None) -> str:
     cfg = (config or ALPHA_CONFIG)["state"]
-    required = [
-        "Alpha_Score",
-        "Base_Alpha",
-        "Momentum_Score",
-        "Trend_Quality_Score",
-        "Persistence_Score",
-        "Overextension_Penalty",
-        "ADX_DI_Trend_Score",
-        "DI_Balance",
-        "SMA50w_vs_SMA200w_Spread_%",
-    ]
-    if any(not np.isfinite(row.get(col, np.nan)) for col in required):
+    alpha = row.get("Alpha_Score", np.nan)
+    if not np.isfinite(alpha):
         return "Missing Data"
-    if (
-        row["Base_Alpha"] >= cfg["extended_base_alpha"]
-        and row["Overextension_Penalty"] >= cfg["extended_min_penalty"]
-    ):
-        return "Extended Trend"
-    if (
-        row["Alpha_Score"] >= cfg["healthy_alpha"]
-        and row["Momentum_Score"] >= cfg["healthy_component"]
-        and row["Trend_Quality_Score"] >= cfg["healthy_component"]
-        and row["Persistence_Score"] >= cfg["healthy_component"]
-        and row["Overextension_Penalty"] < cfg["healthy_max_penalty"]
-    ):
-        return "Healthy Trend"
-    if (
-        row["Momentum_Score"] >= cfg["emerging_momentum"]
-        and row["Trend_Quality_Score"] >= cfg["emerging_trend"]
-        and row["Persistence_Score"] < cfg["emerging_persistence"]
-    ):
-        return "Emerging Momentum"
-    if (
-        row["Persistence_Score"] >= cfg["deteriorating_persistence"]
-        and (
-            row["Momentum_Score"] < cfg["deteriorating_momentum"]
-            or row["ADX_DI_Trend_Score"] < cfg["deteriorating_adx_di"]
-        )
-    ):
-        return "Deteriorating"
-    if (
-        row["SMA50w_vs_SMA200w_Spread_%"] < 0.0
-        and row["DI_Balance"] <= 0.0
-        and row["Momentum_Score"] < cfg["bear_momentum"]
-    ):
-        return "Bear / Broken Trend"
-    return "Neutral"
+    if alpha >= float(cfg["strong_alpha"]):
+        return "Strong Alpha"
+    if alpha >= float(cfg["positive_alpha"]):
+        return "Positive Alpha"
+    if alpha >= float(cfg["moderate_alpha"]):
+        return "Moderate Alpha"
+    if alpha >= float(cfg["neutral_alpha"]):
+        return "Neutral"
+    return "Weak"
 
 
-def calculate_alpha_engine(df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
+def calculate_alpha_engine(
+    df: pd.DataFrame,
+    market_regime: dict | pd.Series | None = None,
+    config: dict | None = None,
+) -> pd.DataFrame:
     config = config or ALPHA_CONFIG
     out = df.copy()
     if out.empty:
         for col in ALPHA_OUTPUT_COLUMNS:
-            out[col] = pd.Series(dtype="float64" if col != "Alpha_State" else "object")
+            out[col] = pd.Series(dtype="object" if col in TEXT_OUTPUT_COLUMNS else "float64")
         return out
 
     momentum = calculate_momentum_score(out, config)
     adx_di = calculate_adx_di_score(out["ADX_14"], out["DI_Plus_14"], out["DI_Minus_14"], config)
     sma = calculate_sma_regime_score(out, config)
     high52w = piecewise_score(out["Price_vs_52W_High_%"], config["high_52w"]["points"]).rename("High52W_Score")
-    trend_quality = (
-        float(config["trend"]["adx_di"]) * adx_di["ADX_DI_Trend_Score"]
-        + float(config["trend"]["sma_regime"]) * sma["SMA_Regime_Score"]
-        + float(config["trend"]["high_52w"]) * high52w
-    ).rename("Trend_Quality_Score")
+    trend_quality = calculate_trend_quality_score(adx_di, sma, high52w, config)
     persistence = calculate_persistence_score(out, momentum, config)
-    overextension = calculate_overextension_penalty(out, config)
 
     parts = pd.concat(
         [
@@ -331,7 +291,6 @@ def calculate_alpha_engine(df: pd.DataFrame, config: dict | None = None) -> pd.D
             high52w,
             trend_quality,
             persistence,
-            overextension,
         ],
         axis=1,
     )
@@ -339,44 +298,133 @@ def calculate_alpha_engine(df: pd.DataFrame, config: dict | None = None) -> pd.D
     scores = calculate_alpha_score(score_inputs, config)
     out = pd.concat([out, parts, scores], axis=1)
 
-    critical_cols = [
+    market = normalize_market_regime(market_regime, config)
+    for col, value in market.items():
+        out[col] = value
+
+    entry_risk = calculate_entry_risk(out, config)
+    out = pd.concat([out, entry_risk], axis=1)
+
+    core_cols = [
         "Momentum_Score",
         "ADX_DI_Trend_Score",
         "Absolute_SMA_Score",
         "High52W_Score",
         "Persistence_Score",
-        "SMA200W_Penalty",
-        "Perf12M_Penalty",
-        "RSI_Penalty",
-        "Overextension_Penalty",
     ]
-    out["Alpha_Data_Complete"] = out[critical_cols].notna().all(axis=1) & ~out["SMA_Relative_Fallback_Used"]
-    incomplete = out[critical_cols].isna().any(axis=1)
-    out.loc[incomplete, ["Base_Alpha", "Alpha_Score"]] = np.nan
+    out["Alpha_Data_Complete"] = out[core_cols].notna().all(axis=1) & ~out["SMA_Relative_Fallback_Used"]
+    incomplete = out[core_cols].isna().any(axis=1)
+    out.loc[incomplete, ["Base_Alpha", "Alpha_Score", "Opportunity_Score"]] = np.nan
     out["Alpha_State"] = out.apply(lambda row: classify_alpha_state(row, config), axis=1)
+    out["Opportunity_State"] = out.apply(classify_opportunity_state, axis=1)
     out["Alpha_Rank"] = alpha_rank(out)
     return out
 
 
-def sort_by_alpha(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_market_regime(market_regime: dict | pd.Series | None, config: dict | None = None) -> dict:
+    cfg = (config or ALPHA_CONFIG)["market_regime"]
+    if market_regime is None:
+        market_regime = {}
+    if isinstance(market_regime, pd.Series):
+        market_regime = market_regime.to_dict()
+
+    regime = market_regime.get("Market_Regime", "UNKNOWN")
+    confidence = market_regime.get("Alpha_Confidence")
+    if confidence is None:
+        confidence = cfg["alpha_confidence"].get(regime, np.nan)
+    return {
+        "Market_Regime": regime,
+        "Alpha_Confidence": confidence,
+        "SPY_vs_SMA40W_%": market_regime.get("SPY_vs_SMA40W_%", np.nan),
+        "SPY_Drawdown_52W_%": market_regime.get("SPY_Drawdown_52W_%", np.nan),
+        "SPY_Volatility_13W_%": market_regime.get("SPY_Volatility_13W_%", np.nan),
+        "SPY_Volatility_Percentile": market_regime.get("SPY_Volatility_Percentile", np.nan),
+    }
+
+
+def sort_by_alpha(df: pd.DataFrame, sort_by: str = "Alpha Score") -> pd.DataFrame:
+    sort_key = sort_by or "Alpha Score"
+    if sort_key == "Off":
+        return df
+    if sort_key == "Opportunity State":
+        return sort_by_opportunity_state(df)
+    if sort_key == "Entry Risk":
+        return df.sort_values(
+            by=["Entry_Risk_Score", "Alpha_Score", "Opportunity_Score"],
+            ascending=[True, False, False],
+            na_position="last",
+        )
+    if sort_key == "Alpha Confidence":
+        return df.sort_values(
+            by=["Alpha_Confidence", "Alpha_Score", "Entry_Risk_Score"],
+            ascending=[False, False, True],
+            na_position="last",
+        )
+    if sort_key == "Opportunity Score":
+        return df.sort_values(
+            by=["Opportunity_Score", "Alpha_Score", "Entry_Risk_Score"],
+            ascending=[False, False, True],
+            na_position="last",
+        )
     return df.sort_values(
         by=[
             "Alpha_Score",
             "Persistence_Score",
             "Trend_Quality_Score",
             "Momentum_Score",
-            "Overextension_Penalty",
+            "Entry_Risk_Score",
         ],
         ascending=[False, False, False, False, True],
         na_position="last",
     )
 
 
+def sort_by_opportunity_state(df: pd.DataFrame) -> pd.DataFrame:
+    order = {
+        "HIGH_CONVICTION": 0,
+        "ATTRACTIVE": 1,
+        "STRONG_BUT_EXTENDED": 2,
+        "LOW_CONFIDENCE": 3,
+        "STRESS_AVOID_CHASING": 4,
+        "NEUTRAL": 5,
+        "WEAK": 6,
+        "Missing Data": 7,
+    }
+    out = df.copy()
+    out["_Opportunity_State_Order"] = out["Opportunity_State"].map(order).fillna(99)
+    return out.sort_values(
+        by=["_Opportunity_State_Order", "Opportunity_Score", "Alpha_Score", "Entry_Risk_Score"],
+        ascending=[True, False, False, True],
+        na_position="last",
+    ).drop(columns=["_Opportunity_State_Order"], errors="ignore")
+
+
 def alpha_rank(df: pd.DataFrame) -> pd.Series:
-    sorted_valid = sort_by_alpha(df.dropna(subset=["Alpha_Score"]))
+    sorted_valid = sort_by_alpha(df.dropna(subset=["Alpha_Score"]), sort_by="Alpha Score")
     ranks = pd.Series(np.nan, index=df.index, dtype="float64")
     ranks.loc[sorted_valid.index] = np.arange(1, len(sorted_valid) + 1, dtype=float)
     return ranks
+
+
+def classify_opportunity_state(row: pd.Series) -> str:
+    alpha = row.get("Alpha_Score", np.nan)
+    entry = row.get("Entry_Risk_Score", np.nan)
+    regime = row.get("Market_Regime", "UNKNOWN")
+    if not np.isfinite(alpha) or not np.isfinite(entry) or regime == "UNKNOWN":
+        return "Missing Data"
+    if regime == "STRESS" and entry >= 60.0:
+        return "STRESS_AVOID_CHASING"
+    if alpha < 50.0:
+        return "WEAK"
+    if alpha >= 75.0 and entry <= 30.0 and regime in {"BULL", "BULL_HIGH_VOL"}:
+        return "HIGH_CONVICTION"
+    if alpha >= 65.0 and regime == "CORRECTION":
+        return "LOW_CONFIDENCE"
+    if alpha >= 70.0 and entry > 40.0:
+        return "STRONG_BUT_EXTENDED"
+    if alpha >= 65.0 and entry <= 40.0:
+        return "ATTRACTIVE"
+    return "NEUTRAL"
 
 
 def cross_sectional_percentile_rank(values: pd.Series) -> pd.Series:
@@ -402,9 +450,3 @@ def piecewise_score(values: pd.Series, points: list[tuple[float, float]] | list[
     if mask.any():
         out.loc[mask] = np.interp(numeric.loc[mask].astype(float), xp, fp)
     return out.clip(0.0, 100.0)
-
-
-def quadratic_penalty(values: pd.Series, start: float, end: float, max_penalty: float) -> pd.Series:
-    numeric = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan)
-    scaled = ((numeric - start) / (end - start)).clip(0.0, 1.0)
-    return max_penalty * (scaled**2)
