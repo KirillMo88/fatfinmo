@@ -132,6 +132,8 @@ ALPHA_CORE_COLUMNS = [
     "Opportunity_Score",
 ]
 
+TABLE_ALPHA_COLUMNS = [col for col in ALPHA_CORE_COLUMNS if col != "Alpha_Confidence"]
+
 ALPHA_TECHNICAL_COLUMNS = [
     "ADX_DI_Trend_Score",
     "DI_Balance",
@@ -153,12 +155,12 @@ ALPHA_TECHNICAL_COLUMNS = [
 
 DISPLAY_COLUMNS = [
     "Group", "Subgroup", "Ticker",
-    *ALPHA_CORE_COLUMNS,
+    *TABLE_ALPHA_COLUMNS,
     *ALPHA_TECHNICAL_COLUMNS,
     "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
     "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
-    "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "ADX_14", "BB_Position",
+    "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "RSI_14W", "ADX_14", "BB_Position",
     "SMA50w_vs_SMA200w_Spread_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
     "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
     "Divergence_Bull_Count", "Divergence_Bear_Count",
@@ -211,7 +213,8 @@ TABLE_HEADER_NAMES = {
     "FundFlows_3M_%": "FundFlows\n3M %",
     "Price_vs_52W_High_%": "Price vs\n52W High %",
     "Price_vs_ATH_%": "Price vs\nATH %",
-    "RSI_14": "RSI\n14",
+    "RSI_14": "RSI\n14D",
+    "RSI_14W": "RSI\n14W",
     "ADX_14": "ADX\n14",
     "BB_Position": "BB\nPosition",
     "SMA200W_Distance_Percentile": "SMA200W\nPercentile",
@@ -243,7 +246,7 @@ NUMERIC_COLUMNS = [
     "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
     "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
-    "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
+    "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "RSI_14W",
     "BB_Position",
     "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last",
     "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%",
@@ -859,8 +862,8 @@ def detect_divergence_for_indicator(
 # ============================================================
 # 4) Metrics function (same logic)
 # ============================================================
-def download_metrics_ohlcv(ticker: str) -> pd.DataFrame:
-    return download_completed_ohlcv(ticker)
+def download_metrics_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
+    return download_completed_ohlcv(ticker, period=period)
 
 
 def get_metrics(ticker: str, divergence_cfg: dict):
@@ -956,6 +959,8 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         golden_cross_w1 = False
         death_cross_w1 = False
         wk_close = pd.to_numeric(wk_ohlcv["Close"], errors="coerce").dropna()
+        rsi14w = RSIIndicator(close=wk_close, window=14).rsi() if len(wk_close) >= 14 else pd.Series(dtype="float64")
+        cur_rsi14w = safe_last(rsi14w)
         (
             bb_position,
             bb_mid,
@@ -981,7 +986,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
             perf_12m, perf_3y, perf_5y, perf_10y,
             sma200w_percentile, perf_12m_percentile, avg_forward_return_6m, correction_risk,
             flows_1m, flows_3m,
-            vs_52w, vs_ath, cur_rsi,
+            vs_52w, vs_ath, cur_rsi, cur_rsi14w,
             spread_pct_now, spread_avg_36m, spread_pct_change_6m, sma200d_robust_z_36m, sma_trend,
             cur_adx14, cur_di_plus14, cur_di_minus14, cur_di_plus14_delta2, cur_di_minus14_delta2,
             bb_position, bb_mid, bb_upper, bb_lower, bb_step_up, bb_step_down, wk_close_last,
@@ -1002,7 +1007,7 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
         "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
         "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
         "FundFlows_1M_%", "FundFlows_3M_%",
-        "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14",
+        "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "RSI_14W",
         "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%",
         "SMA200d_Robust_Z_36M", "SMA_Trend",
         "ADX_14", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
@@ -1415,6 +1420,10 @@ def render_description_tab() -> None:
   - Between `Mid` and `Upper` -> `+1..+9` (10 equal zones)
   - Between `Lower` and `Mid` -> `-1..-9` (10 equal zones)
   - At `Mid` -> `0`
+
+### RSI
+- `RSI 14D` is calculated on daily close prices with a 14-bar window.
+- `RSI 14W` is calculated on completed weekly close prices with a 14-bar window.
 
 ### `SMATrend`
 - Uses daily `SMA200`.
@@ -2230,6 +2239,162 @@ def _render_performance_sma200w_bubble_chart(chart_df: pd.DataFrame) -> None:
     )
 
 
+def _prepare_spy_weekly_regime_frame() -> pd.DataFrame:
+    ohlcv = download_metrics_ohlcv("SPY", period="max")
+    if ohlcv.empty:
+        return pd.DataFrame()
+
+    weekly = build_weekly_ohlcv_from_daily(
+        ohlcv[["Open", "High", "Low", "Close", "Volume"]],
+        include_partial_last_week=False,
+    )
+    if weekly.empty:
+        return pd.DataFrame()
+
+    cfg = alpha_config()["market_regime"]
+    weekly = weekly.sort_index().copy()
+    close = pd.to_numeric(weekly["Close"], errors="coerce")
+    high = pd.to_numeric(weekly["High"], errors="coerce").ffill()
+    sma40 = close.rolling(int(cfg["spy_sma_weeks"]), min_periods=int(cfg["spy_sma_weeks"])).mean()
+    high52w = high.rolling(52, min_periods=52).max()
+    vol13w = close.pct_change().rolling(
+        int(cfg["vol_window_weeks"]),
+        min_periods=int(cfg["vol_window_weeks"]),
+    ).std() * np.sqrt(52.0)
+
+    def expanding_percentile_rank(values: np.ndarray) -> float:
+        finite = values[np.isfinite(values)]
+        if len(finite) == 0:
+            return np.nan
+        current = finite[-1]
+        return float((finite <= current).sum() / len(finite) * 100.0)
+
+    vol_percentile = vol13w.expanding(min_periods=int(cfg["vol_window_weeks"])).apply(
+        expanding_percentile_rank,
+        raw=True,
+    )
+
+    frame = weekly.assign(
+        SPY_SMA40W=sma40,
+        SPY_Drawdown_52W=close / high52w - 1.0,
+        SPY_Volatility_13W=vol13w,
+        SPY_Volatility_Percentile=vol_percentile,
+    )
+    structural_bull = (close > frame["SPY_SMA40W"]) & (
+        frame["SPY_Drawdown_52W"] > float(cfg["drawdown_threshold"])
+    )
+    high_vol = frame["SPY_Volatility_Percentile"] >= float(cfg["high_vol_percentile"])
+    frame["Market_Regime"] = np.select(
+        [
+            structural_bull & ~high_vol,
+            structural_bull & high_vol,
+            ~structural_bull & ~high_vol,
+            ~structural_bull & high_vol,
+        ],
+        ["BULL", "BULL_HIGH_VOL", "CORRECTION", "STRESS"],
+        default="UNKNOWN",
+    )
+    frame = frame.loc["2016-01-01":"2026-12-31"].dropna(subset=["Open", "High", "Low", "Close"])
+    frame = frame[frame["Market_Regime"] != "UNKNOWN"]
+    if frame.empty:
+        return pd.DataFrame()
+
+    out = frame.reset_index().rename(columns={"index": "Date"})
+    out["Date"] = pd.to_datetime(out["Date"])
+    out["NextDate"] = out["Date"].shift(-1)
+    out.loc[out["NextDate"].isna(), "NextDate"] = out.loc[out["NextDate"].isna(), "Date"] + pd.Timedelta(days=7)
+    prev_close = pd.to_numeric(out["Close"], errors="coerce").shift(1)
+    out["Direction"] = np.where(pd.to_numeric(out["Close"], errors="coerce") >= prev_close, "up", "down")
+    if not out.empty:
+        out.loc[out.index[0], "Direction"] = "up"
+    return out
+
+
+def _render_spy_weekly_market_regime_chart() -> None:
+    st.subheader("SPY Weekly Market Regime")
+    d = _prepare_spy_weekly_regime_frame()
+    if d.empty:
+        st.info("No SPY weekly market regime data for 2016-2026.")
+        return
+
+    price_values = pd.concat(
+        [
+            pd.to_numeric(d["Low"], errors="coerce"),
+            pd.to_numeric(d["High"], errors="coerce"),
+            pd.to_numeric(d["SPY_SMA40W"], errors="coerce"),
+        ],
+        axis=1,
+    ).stack().dropna()
+    if price_values.empty:
+        st.info("No SPY price data for the market regime chart.")
+        return
+
+    ymin = float(price_values.min())
+    ymax = float(price_values.max())
+    span = ymax - ymin
+    pad = max(span * 0.06, max(abs(ymax), 1.0) * 0.01)
+    y_domain = [ymin - pad, ymax + pad]
+    d = d.copy()
+    d["YMin"] = y_domain[0]
+    d["YMax"] = y_domain[1]
+
+    price_scale = alt.Scale(zero=False, domain=y_domain)
+    x_axis = alt.Axis(title=None, format="%Y", labelFontSize=9)
+    regime_colors = alt.Scale(
+        domain=["BULL", "BULL_HIGH_VOL", "CORRECTION", "STRESS"],
+        range=["#16a34a", "#86efac", "#facc15", "#ef4444"],
+    )
+
+    base = alt.Chart(d).encode(x=alt.X("Date:T", axis=x_axis))
+    zones = alt.Chart(d).mark_rect(opacity=0.18).encode(
+        x=alt.X("Date:T", axis=x_axis),
+        x2="NextDate:T",
+        y=alt.Y("YMin:Q", scale=price_scale, axis=alt.Axis(title="SPY")),
+        y2="YMax:Q",
+        color=alt.Color("Market_Regime:N", scale=regime_colors, legend=alt.Legend(title="Market Regime")),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Week", format="%Y-%m-%d"),
+            alt.Tooltip("Market_Regime:N", title="Regime"),
+            alt.Tooltip("SPY_Volatility_Percentile:Q", title="Vol Percentile", format=".0f"),
+        ],
+    )
+    wick = base.mark_rule().encode(
+        y=alt.Y("Low:Q", scale=price_scale, axis=alt.Axis(title="SPY")),
+        y2="High:Q",
+        color=alt.Color(
+            "Direction:N",
+            scale=alt.Scale(domain=["up", "down"], range=["#22c55e", "#ef4444"]),
+            legend=None,
+        ),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Week", format="%Y-%m-%d"),
+            alt.Tooltip("Open:Q", format=".2f"),
+            alt.Tooltip("High:Q", format=".2f"),
+            alt.Tooltip("Low:Q", format=".2f"),
+            alt.Tooltip("Close:Q", format=".2f"),
+            alt.Tooltip("Market_Regime:N", title="Regime"),
+        ],
+    )
+    body = base.mark_bar(size=3).encode(
+        y=alt.Y("Open:Q", scale=price_scale),
+        y2="Close:Q",
+        color=alt.Color(
+            "Direction:N",
+            scale=alt.Scale(domain=["up", "down"], range=["#22c55e", "#ef4444"]),
+            legend=None,
+        ),
+    )
+    sma40 = base.mark_line(color="#e5e7eb", strokeWidth=1.1, opacity=0.8).encode(
+        y=alt.Y("SPY_SMA40W:Q", scale=price_scale),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Week", format="%Y-%m-%d"),
+            alt.Tooltip("SPY_SMA40W:Q", title="SMA40W", format=".2f"),
+        ],
+    )
+    chart = (zones + wick + body + sma40).properties(height=420, title="SPY Weekly Bars with Market Regime Zones")
+    st.altair_chart(chart, use_container_width=True)
+
+
 def render_charts(df: pd.DataFrame) -> None:
     if df.empty:
         st.info("No rows to chart for current filters.")
@@ -2237,6 +2402,7 @@ def render_charts(df: pd.DataFrame) -> None:
 
     chart_df = _build_chart_frame(df)
 
+    _render_spy_weekly_market_regime_chart()
     _render_performance_sma200w_bubble_chart(chart_df)
     _render_rsi_chart(chart_df)
     _render_bar_chart(
@@ -2521,7 +2687,6 @@ def main():
             "Trend_Quality_Score": 108,
             "Persistence_Score": 100,
             "Market_Regime": 130,
-            "Alpha_Confidence": 96,
             "Entry_Risk_Score": 94,
             "Entry_Risk": 92,
             "Opportunity_State": 190,
@@ -2529,6 +2694,7 @@ def main():
             "Price_vs_52W_High_%": 130,
             "Price_vs_ATH_%": 110,
             "RSI_14": 39,
+            "RSI_14W": 48,
             "Divergence_Bull_Count": 54,
             "Divergence_Bear_Count": 54,
         }
