@@ -25,9 +25,12 @@ from alpha_engine import (
 from finance_core import download_completed_ohlcv
 from market_model import (
     YAHOO_MARKET_TICKERS,
+    calculate_fast_transition_risk_history,
+    calculate_macro_transition_risk_history,
     calculate_market_model,
     download_fred_market_data,
     market_model_config,
+    weekly_close,
 )
 from table_export import dataframe_to_excel_xls_bytes
 from screener_metrics import (
@@ -1861,6 +1864,55 @@ def load_market_model_snapshot(cache_signature: str) -> dict:
     return calculate_market_model(weekly, fred_data, config=market_model_config())
 
 
+@st.cache_data(show_spinner=True, ttl=AUTO_REFRESH_SECONDS)
+def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
+    _ = cache_signature
+    try:
+        px = yf.download(
+            ["^VIX", "DX-Y.NYB"],
+            period="max",
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            group_by="ticker",
+            threads=True,
+        )
+    except Exception:
+        px = pd.DataFrame()
+
+    weekly = {}
+    for ticker in ["^VIX", "DX-Y.NYB"]:
+        daily = extract_market_ohlcv_frame(px, ticker)
+        weekly[ticker] = build_weekly_ohlcv_from_daily(
+            daily[["Open", "High", "Low", "Close", "Volume"]],
+            include_partial_last_week=False,
+        ) if not daily.empty else pd.DataFrame()
+
+    cfg = market_model_config()
+    fred_data = download_fred_market_data(api_key=get_fred_api_key_for_app())
+    fast = calculate_fast_transition_risk_history(
+        weekly_close(weekly.get("^VIX", pd.DataFrame())),
+        weekly_close(weekly.get("DX-Y.NYB", pd.DataFrame())),
+        cfg,
+    )
+    macro = calculate_macro_transition_risk_history(
+        weekly_close(weekly.get("DX-Y.NYB", pd.DataFrame())),
+        fred_data,
+        cfg,
+    )
+    if fast.empty and macro.empty:
+        return pd.DataFrame(columns=["Date", "Fast_Transition_Risk", "Fast_Transition_State", "Macro_Transition_Risk", "Macro_Transition_State"])
+
+    history = pd.merge(
+        fast[["Date", "Fast_Transition_Risk", "Fast_Transition_State"]] if not fast.empty else pd.DataFrame(columns=["Date"]),
+        macro[["Date", "Macro_Transition_Risk", "Macro_Transition_State"]] if not macro.empty else pd.DataFrame(columns=["Date"]),
+        on="Date",
+        how="outer",
+    ).sort_values("Date")
+    history["Date"] = pd.to_datetime(history["Date"])
+    return history.loc[(history["Date"] >= "2016-01-01") & (history["Date"] <= "2026-12-31")].reset_index(drop=True)
+
+
 def prepare_candle_data(ohlcv: pd.DataFrame, period_mode: str, max_candles: int) -> pd.DataFrame:
     if ohlcv is None or ohlcv.empty:
         return pd.DataFrame(
@@ -2514,7 +2566,48 @@ def _render_spy_weekly_market_regime_chart() -> None:
             alt.Tooltip("SPY_SMA40W:Q", title="SMA40W", format=".2f"),
         ],
     )
-    chart = (zones + wick + body + sma40).properties(height=420, title="SPY Weekly Bars with Market Regime Zones")
+    price_chart = (zones + wick + body + sma40).properties(height=360, title="SPY Weekly Bars with Market Regime Zones")
+
+    transition_history = load_market_transition_history("spy-weekly-transition-history")
+    transition_charts = []
+    if not transition_history.empty:
+        transition_history = transition_history.copy()
+        transition_history["NextDate"] = transition_history["Date"].shift(-1)
+        transition_history.loc[transition_history["NextDate"].isna(), "NextDate"] = (
+            transition_history.loc[transition_history["NextDate"].isna(), "Date"] + pd.Timedelta(days=7)
+        )
+        risk_color = alt.Scale(
+            domain=["LOW", "WATCH", "DETERIORATING", "HIGH_RISK", "TRANSITION_ALERT", "MACRO_ALERT", "DATA_INCOMPLETE"],
+            range=["#22c55e", "#facc15", "#fb923c", "#ef4444", "#be123c", "#be123c", "#64748b"],
+        )
+        for metric, state_col, title in [
+            ("Fast_Transition_Risk", "Fast_Transition_State", "Fast Transition Risk"),
+            ("Macro_Transition_Risk", "Macro_Transition_State", "Macro Transition Risk"),
+        ]:
+            risk_data = transition_history.dropna(subset=[metric]).copy()
+            if risk_data.empty:
+                continue
+            risk_bar = (
+                alt.Chart(risk_data)
+                .mark_bar(opacity=0.92)
+                .encode(
+                    x=alt.X("Date:T", axis=alt.Axis(title=None, labels=False, ticks=False)),
+                    x2="NextDate:T",
+                    y=alt.Y(f"{metric}:Q", scale=alt.Scale(domain=[0, 100]), axis=alt.Axis(title=title, format=".0f")),
+                    color=alt.Color(f"{state_col}:N", scale=risk_color, legend=None),
+                    tooltip=[
+                        alt.Tooltip("Date:T", title="Week", format="%Y-%m-%d"),
+                        alt.Tooltip(f"{metric}:Q", title=title, format=".0f"),
+                        alt.Tooltip(f"{state_col}:N", title="State"),
+                    ],
+                )
+                .properties(height=105, title=title)
+            )
+            threshold_60 = alt.Chart(risk_data).mark_rule(color="#f97316", strokeDash=[4, 3]).encode(y=alt.datum(60))
+            threshold_80 = alt.Chart(risk_data).mark_rule(color="#ef4444", strokeDash=[4, 3]).encode(y=alt.datum(80))
+            transition_charts.append(risk_bar + threshold_60 + threshold_80)
+
+    chart = alt.vconcat(price_chart, *transition_charts, spacing=8).resolve_scale(x="shared")
     st.altair_chart(chart, use_container_width=True)
 
 

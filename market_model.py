@@ -138,6 +138,38 @@ def calculate_fast_transition_risk(vix: pd.Series, dxy: pd.Series, config: dict 
     }
 
 
+def calculate_fast_transition_risk_history(vix: pd.Series, dxy: pd.Series, config: dict | None = None) -> pd.DataFrame:
+    cfg = (config or MARKET_MODEL_CONFIG)["fast_transition"]
+    index = union_series_index([vix, dxy])
+    if index.empty:
+        return pd.DataFrame(columns=["Date", "Fast_Transition_Risk", "Fast_Transition_State"])
+
+    vix_values = pd.to_numeric(vix, errors="coerce").sort_index().reindex(index).ffill()
+    dxy_values = pd.to_numeric(dxy, errors="coerce").sort_index().reindex(index).ffill()
+    vix_z = calculate_vix_z(vix_values, int(cfg["vix_z_window"]), float(cfg["robust_sigma_epsilon"])).reindex(index)
+    dxy_13w = dxy_values.pct_change(13)
+    dxy_26w = dxy_values.pct_change(int(cfg["dxy_window"]))
+    vix_risk = piecewise_score_series(vix_z, cfg["vix_risk_points"])
+    dxy_risk = piecewise_score_series(dxy_26w, cfg["dxy_risk_points"])
+    risk = (float(cfg["vix_weight"]) * vix_risk + float(cfg["dxy_weight"]) * dxy_risk).clip(0.0, 100.0)
+    incomplete = vix_risk.isna() | dxy_risk.isna()
+    state = risk.map(lambda value: transition_state(value, alert_label="TRANSITION_ALERT"))
+    state.loc[incomplete] = "DATA_INCOMPLETE"
+    risk.loc[incomplete] = np.nan
+    return pd.DataFrame(
+        {
+            "Date": index,
+            "Fast_Transition_Risk": risk.values,
+            "Fast_Transition_State": state.values,
+            "VIX_Z26": vix_z.values,
+            "VIX_Risk": vix_risk.values,
+            "DXY_Return_13W": dxy_13w.values,
+            "DXY_Return_26W": dxy_26w.values,
+            "DXY_Risk": dxy_risk.values,
+        }
+    )
+
+
 def calculate_vix_z(vix: pd.Series, window: int = 26, epsilon: float = 1e-9) -> pd.Series:
     values = pd.to_numeric(vix, errors="coerce").dropna().sort_index()
     if values.empty:
@@ -189,6 +221,57 @@ def calculate_macro_transition_risk(dxy: pd.Series, fred_data: pd.DataFrame | No
         "US2Y_Risk": us2y_risk,
         "Macro_DXY_Risk": dxy_risk,
     }
+
+
+def calculate_macro_transition_risk_history(dxy: pd.Series, fred_data: pd.DataFrame | None, config: dict | None = None) -> pd.DataFrame:
+    full_cfg = config or MARKET_MODEL_CONFIG
+    cfg = full_cfg["macro_transition"]
+    fred_weekly = fred_series_weekly(fred_data)
+    liquidity = fred_weekly.get(FED_LIQUIDITY_SERIES_ID, pd.Series(dtype="float64"))
+    us2y = fred_weekly.get("DGS2", pd.Series(dtype="float64"))
+    index = union_series_index([dxy, liquidity, us2y])
+    if index.empty:
+        return pd.DataFrame(columns=["Date", "Macro_Transition_Risk", "Macro_Transition_State"])
+
+    dxy_values = pd.to_numeric(dxy, errors="coerce").sort_index().reindex(index).ffill()
+    liquidity_values = pd.to_numeric(liquidity, errors="coerce").sort_index().reindex(index).ffill()
+    us2y_values = pd.to_numeric(us2y, errors="coerce").sort_index().reindex(index).ffill()
+
+    dxy_26w = dxy_values.pct_change(int(cfg["dxy_window"]))
+    dxy_risk = piecewise_score_series(dxy_26w, full_cfg["fast_transition"]["dxy_risk_points"])
+    fed_liquidity_13w = liquidity_values.pct_change(int(cfg["liquidity_short_window"]))
+    fed_liquidity_26w = liquidity_values.pct_change(int(cfg["liquidity_window"]))
+    fed_liquidity_risk = piecewise_score_series(fed_liquidity_26w, cfg["fed_liquidity_risk_points"])
+    us2y_change_13w_bp = (us2y_values - us2y_values.shift(int(cfg["us2y_window"]))) * 100.0
+    us2y_risk = piecewise_score_series(us2y_change_13w_bp, cfg["us2y_risk_points"])
+
+    components = pd.concat([dxy_risk, fed_liquidity_risk, us2y_risk], axis=1)
+    components.columns = ["DXY_Risk", "Fed_Liquidity_Risk", "US2Y_Risk"]
+    weights = pd.Series(
+        [float(cfg["dxy_weight"]), float(cfg["fed_liquidity_weight"]), float(cfg["us2y_weight"])],
+        index=components.columns,
+    )
+    finite_count = components.notna().sum(axis=1)
+    weighted_sum = components.mul(weights, axis=1).sum(axis=1, min_count=1)
+    active_weights = components.notna().mul(weights, axis=1).sum(axis=1)
+    risk = (weighted_sum / active_weights.replace(0.0, np.nan)).clip(0.0, 100.0)
+    risk.loc[finite_count < 2] = np.nan
+    state = risk.map(lambda value: transition_state(value, alert_label="MACRO_ALERT"))
+    state.loc[risk.isna()] = "DATA_INCOMPLETE"
+
+    return pd.DataFrame(
+        {
+            "Date": index,
+            "Macro_Transition_Risk": risk.values,
+            "Macro_Transition_State": state.values,
+            "Fed_Liquidity_13W": fed_liquidity_13w.values,
+            "Fed_Liquidity_26W": fed_liquidity_26w.values,
+            "Fed_Liquidity_Risk": fed_liquidity_risk.values,
+            "US2Y_Change_13W_bp": us2y_change_13w_bp.values,
+            "US2Y_Risk": us2y_risk.values,
+            "Macro_DXY_Risk": dxy_risk.values,
+        }
+    )
 
 
 def calculate_confirmations(yahoo_weekly: dict[str, pd.DataFrame], fred_data: pd.DataFrame | None, config: dict | None = None) -> dict:
@@ -406,9 +489,31 @@ def classify_ratio_confirmation(value: float) -> str:
 def scalar_piecewise_score(value: float, points: list[tuple[float, float]] | list[list[float]]) -> float:
     if not np.isfinite(value):
         return np.nan
-    xp = np.array([float(point[0]) for point in points], dtype="float64")
-    fp = np.array([float(point[1]) for point in points], dtype="float64")
+    sorted_points = sorted(points, key=lambda point: float(point[0]))
+    xp = np.array([float(point[0]) for point in sorted_points], dtype="float64")
+    fp = np.array([float(point[1]) for point in sorted_points], dtype="float64")
     return float(np.clip(np.interp(float(value), xp, fp), 0.0, 100.0))
+
+
+def piecewise_score_series(values: pd.Series, points: list[tuple[float, float]] | list[list[float]]) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    sorted_points = sorted(points, key=lambda point: float(point[0]))
+    xp = np.array([float(point[0]) for point in sorted_points], dtype="float64")
+    fp = np.array([float(point[1]) for point in sorted_points], dtype="float64")
+    out = pd.Series(np.nan, index=numeric.index, dtype="float64")
+    mask = numeric.notna()
+    if mask.any():
+        out.loc[mask] = np.interp(numeric.loc[mask].astype(float), xp, fp)
+    return out.clip(0.0, 100.0)
+
+
+def union_series_index(series_list: list[pd.Series]) -> pd.DatetimeIndex:
+    index = pd.DatetimeIndex([])
+    for series in series_list:
+        if series is None or series.empty:
+            continue
+        index = index.union(pd.DatetimeIndex(pd.to_datetime(series.dropna().index)))
+    return index.sort_values()
 
 
 def safe_last(series: pd.Series) -> float:
