@@ -11,6 +11,7 @@ services:
       - --server.headless=true
     environment:
       TESTER_APP_URL: /tester
+      FRED_API_KEY: ${FRED_API_KEY:-}
     expose:
       - "8501"
     volumes:

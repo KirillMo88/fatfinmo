@@ -23,7 +23,12 @@ from alpha_engine import (
     sort_by_alpha,
 )
 from finance_core import download_completed_ohlcv
-from market_regime import calculate_market_regime
+from market_model import (
+    YAHOO_MARKET_TICKERS,
+    calculate_market_model,
+    download_fred_market_data,
+    market_model_config,
+)
 from table_export import dataframe_to_excel_xls_bytes
 from screener_metrics import (
     correction_risk_from_percentile_analogs,
@@ -1037,9 +1042,7 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
         + (df["Div_6M_vs_MACD"] == "bear").astype(int)
         + (df["Div_6M_vs_ROC"] == "bear").astype(int)
     )
-    spy_ohlcv = download_metrics_ohlcv("SPY")
-    spy_weekly = build_weekly_ohlcv_from_daily(spy_ohlcv[["Open", "High", "Low", "Close", "Volume"]])
-    market = calculate_market_regime(spy_weekly, config=alpha_config())
+    market = load_market_model_snapshot(f"market-model:{universe_signature}:{divergence_signature}")
     df = calculate_alpha_engine(df, market_regime=market)
 
     fetched_at_utc = pd.Timestamp.now(tz="UTC").isoformat()
@@ -1691,6 +1694,25 @@ def extract_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
 
+def extract_market_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    out = extract_ohlcv_frame(px, ticker)
+    if out.empty:
+        return out
+    try:
+        raw = px
+        if isinstance(px.columns, pd.MultiIndex):
+            if ticker in px.columns.get_level_values(0):
+                raw = px[ticker]
+            elif ticker in px.columns.get_level_values(1):
+                raw = px.xs(ticker, axis=1, level=1)
+        if ticker in {"SPY", "IWM", "XLI", "XLP"} and "Adj Close" in raw.columns:
+            adj_close = pd.to_numeric(raw["Adj Close"], errors="coerce").reindex(out.index)
+            out.loc[adj_close.notna(), "Close"] = adj_close.loc[adj_close.notna()]
+    except Exception:
+        pass
+    return out
+
+
 @st.cache_data(show_spinner=False, ttl=AUTO_REFRESH_SECONDS)
 def load_ohlcv_history(tickers: list, universe_signature: str) -> dict:
     _ = universe_signature
@@ -1736,6 +1758,44 @@ def load_ohlcv_history(tickers: list, universe_signature: str) -> dict:
         if not single_frame.empty:
             data[ticker] = single_frame
     return data
+
+
+def get_fred_api_key_for_app() -> str | None:
+    key = os.environ.get("FRED_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return str(st.secrets["FRED_API_KEY"]).strip() if "FRED_API_KEY" in st.secrets else None
+    except StreamlitSecretNotFoundError:
+        return None
+
+
+@st.cache_data(show_spinner=True, ttl=AUTO_REFRESH_SECONDS)
+def load_market_model_snapshot(cache_signature: str) -> dict:
+    _ = cache_signature
+    try:
+        px = yf.download(
+            list(YAHOO_MARKET_TICKERS),
+            period="max",
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            group_by="ticker",
+            threads=True,
+        )
+    except Exception:
+        px = pd.DataFrame()
+
+    weekly = {}
+    for ticker in YAHOO_MARKET_TICKERS:
+        daily = extract_market_ohlcv_frame(px, ticker)
+        weekly[ticker] = build_weekly_ohlcv_from_daily(
+            daily[["Open", "High", "Low", "Close", "Volume"]],
+            include_partial_last_week=False,
+        ) if not daily.empty else pd.DataFrame()
+
+    fred_data = download_fred_market_data(api_key=get_fred_api_key_for_app())
+    return calculate_market_model(weekly, fred_data, config=market_model_config())
 
 
 def prepare_candle_data(ohlcv: pd.DataFrame, period_mode: str, max_candles: int) -> pd.DataFrame:
@@ -2395,6 +2455,132 @@ def _render_spy_weekly_market_regime_chart() -> None:
     st.altair_chart(chart, use_container_width=True)
 
 
+def format_market_value(value, kind: str = "number") -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, str):
+        return value if value else "n/a"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(numeric):
+        return "n/a"
+    if kind == "percent":
+        return f"{numeric * 100.0:.1f}%"
+    if kind == "percent_points":
+        return f"{numeric:.1f}%"
+    if kind == "bp":
+        return f"{numeric:.0f} bp"
+    if kind == "score":
+        return f"{numeric:.0f}"
+    return f"{numeric:.2f}"
+
+
+def render_market_metric(label: str, value: str, detail: str = "") -> None:
+    st.markdown(
+        f"""
+<div style="padding: 0.75rem 0; line-height: 1.15;">
+  <div style="font-size: 0.72rem; color: #94a3b8; font-weight: 700;">{label}</div>
+  <div style="font-size: 1.1rem; color: #f8fafc; font-weight: 800;">{value}</div>
+  <div style="font-size: 0.72rem; color: #cbd5e1;">{detail}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_market_detail_table(rows: list[tuple[str, str]]) -> None:
+    st.dataframe(
+        pd.DataFrame(rows, columns=["Metric", "Value"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def render_market_regime_tab(market: dict) -> None:
+    st.subheader("Market Regime")
+
+    summary_cols = st.columns(5)
+    with summary_cols[0]:
+        render_market_metric("Structural Market Regime", format_market_value(market.get("Market_Regime")), "SPY weekly")
+    with summary_cols[1]:
+        render_market_metric(
+            "Fast Transition Risk",
+            f"{format_market_value(market.get('Fast_Transition_Risk'), 'score')} / {format_market_value(market.get('Fast_Transition_State'))}",
+            "VIX + DXY",
+        )
+    with summary_cols[2]:
+        render_market_metric(
+            "Macro Transition Risk",
+            f"{format_market_value(market.get('Macro_Transition_Risk'), 'score')} / {format_market_value(market.get('Macro_Transition_State'))}",
+            "DXY + Fed liquidity + US2Y",
+        )
+    with summary_cols[3]:
+        render_market_metric("Overall Status", format_market_value(market.get("Overall_Transition_Status")), "rules-based")
+    with summary_cols[4]:
+        render_market_metric("Alpha Confidence", format_market_value(market.get("Alpha_Confidence"), "score"), "regime-adjusted")
+
+    st.markdown("### Structural Market Regime")
+    structural_cols = st.columns(2)
+    with structural_cols[0]:
+        render_market_detail_table(
+            [
+                ("Structural Regime", format_market_value(market.get("Market_Regime"))),
+                ("SPY vs SMA40W", format_market_value(market.get("SPY_vs_SMA40W_%"), "percent_points")),
+                ("SPY Drawdown 52W", format_market_value(market.get("SPY_Drawdown_52W_%"), "percent_points")),
+                ("SPY Volatility 13W", format_market_value(market.get("SPY_Volatility_13W_%"), "percent_points")),
+                ("SPY Volatility Percentile", format_market_value(market.get("SPY_Volatility_Percentile"), "score")),
+            ]
+        )
+    with structural_cols[1]:
+        _render_spy_weekly_market_regime_chart()
+
+    st.markdown("### Fast Transition Risk")
+    render_market_detail_table(
+        [
+            ("Fast Transition Risk", f"{format_market_value(market.get('Fast_Transition_Risk'), 'score')} / {format_market_value(market.get('Fast_Transition_State'))}"),
+            ("VIX Robust Z 26W", format_market_value(market.get("VIX_Z26"))),
+            ("VIX Risk", format_market_value(market.get("VIX_Risk"), "score")),
+            ("DXY Return 13W", format_market_value(market.get("DXY_Return_13W"), "percent")),
+            ("DXY Return 26W", format_market_value(market.get("DXY_Return_26W"), "percent")),
+            ("DXY Risk", format_market_value(market.get("DXY_Risk"), "score")),
+        ]
+    )
+
+    st.markdown("### Macro Transition Risk")
+    render_market_detail_table(
+        [
+            ("Macro Transition Risk", f"{format_market_value(market.get('Macro_Transition_Risk'), 'score')} / {format_market_value(market.get('Macro_Transition_State'))}"),
+            ("Fed Liquidity 13W", format_market_value(market.get("Fed_Liquidity_13W"), "percent")),
+            ("Fed Liquidity 26W", format_market_value(market.get("Fed_Liquidity_26W"), "percent")),
+            ("Fed Liquidity Risk", format_market_value(market.get("Fed_Liquidity_Risk"), "score")),
+            ("US2Y Change 13W", format_market_value(market.get("US2Y_Change_13W_bp"), "bp")),
+            ("US2Y Risk", format_market_value(market.get("US2Y_Risk"), "score")),
+            ("DXY Risk", format_market_value(market.get("Macro_DXY_Risk"), "score")),
+        ]
+    )
+
+    st.markdown("### Confirmations")
+    render_market_detail_table(
+        [
+            ("WTI 4W", format_market_value(market.get("WTI_4W_Return"), "percent")),
+            ("WTI 13W", format_market_value(market.get("WTI_13W_Return"), "percent")),
+            ("WTI 26W", format_market_value(market.get("WTI_26W_Return"), "percent")),
+            ("WTI Confirmation", format_market_value(market.get("WTI_Confirmation"))),
+            ("10Y Real Yield 13W", format_market_value(market.get("Real_Yield_10Y_Change_13W_bp"), "bp")),
+            ("10Y Real Yield Confirmation", format_market_value(market.get("Real_Yield_10Y_Confirmation"))),
+            ("IWM/SPY 13W", format_market_value(market.get("IWM_SPY_13W_Return"), "percent")),
+            ("IWM/SPY Confirmation", format_market_value(market.get("IWM_SPY_Confirmation"))),
+            ("XLI/XLP 13W", format_market_value(market.get("XLI_XLP_13W_Return"), "percent")),
+            ("XLI/XLP Confirmation", format_market_value(market.get("XLI_XLP_Confirmation"))),
+            ("RSI Divergence", format_market_value(market.get("RSI_Divergence"))),
+            ("Negative Confirmation Count", format_market_value(market.get("Negative_Confirmation_Count"))),
+            ("Confirmation Flag", format_market_value(market.get("Confirmation_Flag"))),
+        ]
+    )
+
+
 def render_charts(df: pd.DataFrame) -> None:
     if df.empty:
         st.info("No rows to chart for current filters.")
@@ -2403,7 +2589,6 @@ def render_charts(df: pd.DataFrame) -> None:
     chart_df = _build_chart_frame(df)
 
     _render_performance_sma200w_bubble_chart(chart_df)
-    _render_spy_weekly_market_regime_chart()
     _render_rsi_chart(chart_df)
     _render_bar_chart(
         chart_df,
@@ -2614,12 +2799,14 @@ def main():
 
     with st.spinner("Computing ETF metrics..."):
         selected_universe = universe_map[selected_universe_name]
+        market_signature = f"market-model:{selected_universe_name}:{str(selected_universe)}:{divergence_signature}"
         df, app_refresh_utc = compute_metrics_table(
             selected_universe,
             f"{selected_universe_name}:{str(selected_universe)}",
             divergence_cfg,
             divergence_signature,
         )
+        market_snapshot = load_market_model_snapshot(market_signature)
     refresh_text = "n/a"
     try:
         ts = pd.to_datetime(app_refresh_utc, utc=True)
@@ -2660,8 +2847,8 @@ def main():
     if flow_unavailable:
         st.warning("Fund flow data unavailable")
 
-    table_tab, charts_tab, graphs_tab, alpha_tab, inputs_tab, description_tab, tester_tab = st.tabs(
-        ["Table", "Charts", "Graphs", "Alpha Engine", "Inputs", "Description", "Tester"]
+    table_tab, charts_tab, graphs_tab, market_regime_tab, alpha_tab, inputs_tab, description_tab, tester_tab = st.tabs(
+        ["Table", "Charts", "Graphs", "Market Regime", "Alpha Engine", "Inputs", "Description", "Tester"]
     )
     with table_tab:
         gb = GridOptionsBuilder.from_dataframe(table_display_df)
@@ -2873,6 +3060,8 @@ def main():
         else:
             graph_ordered_df = base_df
         render_graphs_tab(graph_ordered_df.drop(columns=["__row_id__"], errors="ignore"), selected_universe, selected_universe_name)
+    with market_regime_tab:
+        render_market_regime_tab(market_snapshot)
     with alpha_tab:
         render_alpha_engine_tab(table_df.drop(columns=["__row_id__"], errors="ignore"))
     with inputs_tab:

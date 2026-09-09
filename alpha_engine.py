@@ -86,6 +86,11 @@ ALPHA_OUTPUT_COLUMNS = [
     "Persistence_Score",
     "Market_Regime",
     "Alpha_Confidence",
+    "Fast_Transition_Risk",
+    "Fast_Transition_State",
+    "Macro_Transition_Risk",
+    "Macro_Transition_State",
+    "Overall_Transition_Status",
     "Entry_Risk_Score",
     "Entry_Risk",
     "Opportunity_State",
@@ -107,6 +112,9 @@ TEXT_OUTPUT_COLUMNS = {
     "Market_Regime",
     "Entry_Risk",
     "Opportunity_State",
+    "Fast_Transition_State",
+    "Macro_Transition_State",
+    "Overall_Transition_Status",
 }
 
 
@@ -335,6 +343,11 @@ def normalize_market_regime(market_regime: dict | pd.Series | None, config: dict
     return {
         "Market_Regime": regime,
         "Alpha_Confidence": confidence,
+        "Fast_Transition_Risk": market_regime.get("Fast_Transition_Risk", np.nan),
+        "Fast_Transition_State": market_regime.get("Fast_Transition_State", "DATA_INCOMPLETE"),
+        "Macro_Transition_Risk": market_regime.get("Macro_Transition_Risk", np.nan),
+        "Macro_Transition_State": market_regime.get("Macro_Transition_State", "DATA_INCOMPLETE"),
+        "Overall_Transition_Status": market_regime.get("Overall_Transition_Status", "DATA_INCOMPLETE"),
         "SPY_vs_SMA40W_%": market_regime.get("SPY_vs_SMA40W_%", np.nan),
         "SPY_Drawdown_52W_%": market_regime.get("SPY_Drawdown_52W_%", np.nan),
         "SPY_Volatility_13W_%": market_regime.get("SPY_Volatility_13W_%", np.nan),
@@ -382,13 +395,16 @@ def sort_by_alpha(df: pd.DataFrame, sort_by: str = "Alpha Score") -> pd.DataFram
 def sort_by_opportunity_state(df: pd.DataFrame) -> pd.DataFrame:
     order = {
         "HIGH_CONVICTION": 0,
-        "ATTRACTIVE": 1,
-        "STRONG_BUT_EXTENDED": 2,
-        "LOW_CONFIDENCE": 3,
-        "STRESS_AVOID_CHASING": 4,
-        "NEUTRAL": 5,
-        "WEAK": 6,
-        "Missing Data": 7,
+        "ATTRACTIVE_BUT_MACRO_WATCH": 1,
+        "FAST_TRANSITION_WARNING": 2,
+        "STRONG_BUT_MACRO_RISK": 3,
+        "ATTRACTIVE": 4,
+        "STRONG_BUT_EXTENDED": 5,
+        "LOW_CONFIDENCE": 6,
+        "STRESS_AVOID_CHASING": 7,
+        "NEUTRAL": 8,
+        "WEAK": 9,
+        "Missing Data": 10,
     }
     out = df.copy()
     out["_Opportunity_State_Order"] = out["Opportunity_State"].map(order).fillna(99)
@@ -410,14 +426,28 @@ def classify_opportunity_state(row: pd.Series) -> str:
     alpha = row.get("Alpha_Score", np.nan)
     entry = row.get("Entry_Risk_Score", np.nan)
     regime = row.get("Market_Regime", "UNKNOWN")
+    fast_risk = row.get("Fast_Transition_Risk", np.nan)
+    macro_risk = row.get("Macro_Transition_Risk", np.nan)
     if not np.isfinite(alpha) or not np.isfinite(entry) or regime == "UNKNOWN":
         return "Missing Data"
     if regime == "STRESS" and entry >= 60.0:
         return "STRESS_AVOID_CHASING"
+    if alpha >= 70.0 and np.isfinite(fast_risk) and fast_risk > 60.0:
+        return "FAST_TRANSITION_WARNING"
+    if alpha >= 70.0 and np.isfinite(macro_risk) and macro_risk > 60.0:
+        return "STRONG_BUT_MACRO_RISK"
     if alpha < 50.0:
         return "WEAK"
-    if alpha >= 75.0 and entry <= 30.0 and regime in {"BULL", "BULL_HIGH_VOL"}:
+    if (
+        alpha >= 75.0
+        and entry <= 30.0
+        and regime in {"BULL", "BULL_HIGH_VOL"}
+        and (not np.isfinite(fast_risk) or fast_risk <= 40.0)
+        and (not np.isfinite(macro_risk) or macro_risk <= 40.0)
+    ):
         return "HIGH_CONVICTION"
+    if alpha >= 70.0 and (not np.isfinite(fast_risk) or fast_risk <= 40.0) and np.isfinite(macro_risk) and macro_risk > 40.0:
+        return "ATTRACTIVE_BUT_MACRO_WATCH"
     if alpha >= 65.0 and regime == "CORRECTION":
         return "LOW_CONFIDENCE"
     if alpha >= 70.0 and entry > 40.0:
