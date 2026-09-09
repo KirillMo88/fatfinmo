@@ -2584,20 +2584,18 @@ def render_market_regime_tab(market: dict) -> None:
     with summary_cols[4]:
         render_market_metric("Alpha Confidence", format_market_value(market.get("Alpha_Confidence"), "score"), "regime-adjusted")
 
+    _render_spy_weekly_market_regime_chart()
+
     st.markdown("### Structural Market Regime")
-    structural_cols = st.columns(2)
-    with structural_cols[0]:
-        render_market_detail_table(
-            [
-                ("Structural Regime", format_market_value(market.get("Market_Regime"))),
-                ("SPY vs SMA40W", format_market_value(market.get("SPY_vs_SMA40W_%"), "percent_points")),
-                ("SPY Drawdown 52W", format_market_value(market.get("SPY_Drawdown_52W_%"), "percent_points")),
-                ("SPY Volatility 13W", format_market_value(market.get("SPY_Volatility_13W_%"), "percent_points")),
-                ("SPY Volatility Percentile", format_market_value(market.get("SPY_Volatility_Percentile"), "score")),
-            ]
-        )
-    with structural_cols[1]:
-        _render_spy_weekly_market_regime_chart()
+    render_market_detail_table(
+        [
+            ("Structural Regime", format_market_value(market.get("Market_Regime"))),
+            ("SPY vs SMA40W", format_market_value(market.get("SPY_vs_SMA40W_%"), "percent_points")),
+            ("SPY Drawdown 52W", format_market_value(market.get("SPY_Drawdown_52W_%"), "percent_points")),
+            ("SPY Volatility 13W", format_market_value(market.get("SPY_Volatility_13W_%"), "percent_points")),
+            ("SPY Volatility Percentile", format_market_value(market.get("SPY_Volatility_Percentile"), "score")),
+        ]
+    )
 
     st.markdown("### Fast Transition Risk")
     render_market_detail_table(
