@@ -121,7 +121,6 @@ AUTO_REFRESH_SECONDS = 600
 GRAPH_PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly", "Full history"]
 
 ALPHA_CORE_COLUMNS = [
-    "Alpha_Rank",
     "Alpha_Score",
     "Alpha_State",
     "Momentum_Score",
@@ -169,7 +168,6 @@ TABLE_HEADER_NAMES = {
     "Group": "Group",
     "Subgroup": "Sub\ngroup",
     "Ticker": "Ticker",
-    "Alpha_Rank": "Alpha\nRank",
     "Alpha_Score": "Alpha\nScore",
     "Alpha_State": "Alpha\nState",
     "Momentum_Score": "Momentum\nScore",
@@ -1110,7 +1108,7 @@ def apply_filters(df: pd.DataFrame):
     with c11:
         alpha_sort = st.selectbox(
             "Sort by",
-            options=["Alpha Score", "Opportunity State", "Entry Risk", "Alpha Confidence", "Opportunity Score", "Off"],
+            options=["Off", "Alpha Score", "Opportunity State", "Entry Risk", "Alpha Confidence", "Opportunity Score"],
             index=0,
         )
     with c12:
@@ -1251,6 +1249,142 @@ def render_description_tab() -> None:
     st.subheader("Metric Calculation Description")
     st.markdown(
         """
+### Alpha Engine
+- Alpha Engine is a cross-sectional scoring model. It compares all assets in the selected universe, converts raw metrics into normalized `0..100` component scores, then combines them into `Alpha Score`, `Entry Risk`, `Opportunity State`, and `Opportunity Score`.
+- If one of the required core components is missing, `Alpha Score` and `Opportunity Score` are set to missing.
+
+#### Market Regime and Alpha Confidence
+- Market regime is calculated from weekly `SPY` data.
+- `SPY_SMA40W = SMA(SPY weekly close, 40)`
+- `SPY_Drawdown_52W = SPY_Close / 52W_High - 1`
+- `SPY_Volatility_13W = Std(weekly returns, 13) * sqrt(52)`
+- `SPY_Volatility_Percentile = percentile rank of current 13W volatility`
+- Structural bull:
+  - `SPY_Close > SPY_SMA40W`
+  - `SPY_Drawdown_52W > -10%`
+- High volatility:
+  - `SPY_Volatility_Percentile >= 75`
+- Regime classification:
+  - Structural bull and normal volatility -> `BULL`
+  - Structural bull and high volatility -> `BULL_HIGH_VOL`
+  - Not structural bull and normal volatility -> `CORRECTION`
+  - Not structural bull and high volatility -> `STRESS`
+- `Alpha Confidence`:
+  - `BULL`: `100`
+  - `BULL_HIGH_VOL`: `100`
+  - `CORRECTION`: `50`
+  - `STRESS`: `20`
+
+#### Momentum Score
+- Uses cross-sectional percentile ranks across the selected universe.
+- `Perf1M_Rank = percentile_rank(Perf1M %)`
+- `Perf3M_Rank = percentile_rank(Perf3M %)`
+- `Perf6M_Rank = percentile_rank(Perf6M %)`
+- Formula:
+  - `Momentum Score = 0.20*Perf1M_Rank + 0.45*Perf3M_Rank + 0.35*Perf6M_Rank`
+
+#### Trend Quality Score
+- `Trend Quality Score` combines ADX/DI trend, SMA regime, and distance to the 52-week high.
+- ADX/DI block:
+  - `DI_Balance = (DI_Plus_14 - DI_Minus_14) / (DI_Plus_14 + DI_Minus_14)`
+  - `DI_Bull_Score = 100 * clamp(DI_Balance / 0.25, 0..1)`
+  - `ADX_Strength_Score` is piecewise-scored:
+    - `ADX 15 -> 0`
+    - `ADX 20 -> 40`
+    - `ADX 25 -> 70`
+    - `ADX 30 -> 90`
+    - `ADX 35 -> 100`
+  - `ADX_DI_Trend_Score = ADX_Strength_Score * DI_Bull_Score / 100`
+- SMA regime block:
+  - `Absolute_SMA_Score` uses `SMA50w_vs_SMA200w_Spread_%`:
+    - `-5 -> 0`
+    - `0 -> 50`
+    - `5 -> 100`
+  - `SMA200d_Robust_Z_36M` compares the current daily `Close/SMA200d - 1` spread with its last 36 months using median and MAD:
+    - `robust_sigma = 1.4826 * MAD`
+    - `SMA200d_Robust_Z_36M = (latest_spread - median_spread) / robust_sigma`
+  - `Relative_SMA_Score` uses `SMA200d_Robust_Z_36M`:
+    - `-2 -> 0`
+    - `-1 -> 25`
+    - `0 -> 50`
+    - `1 -> 70`
+    - `2 -> 90`
+    - `3 -> 100`
+  - If relative SMA data is not available, `Relative_SMA_Score` falls back to `50`.
+  - `SMA_Regime_Score = 0.65*Absolute_SMA_Score + 0.35*Relative_SMA_Score`
+- 52-week high block:
+  - `High52W_Score` uses `Price_vs_52W_High_%`:
+    - `-25 -> 0`
+    - `-15 -> 50`
+    - `-5 -> 90`
+    - `0 -> 100`
+- Formula:
+  - `Trend Quality Score = 0.55*ADX_DI_Trend_Score + 0.30*SMA_Regime_Score + 0.15*High52W_Score`
+
+#### Persistence Score
+- Uses cross-sectional percentile ranks and historical consistency.
+- `Perf12M_Rank = percentile_rank(Perf12M %)`
+- `Median_Rank = median(Perf1M_Rank, Perf3M_Rank, Perf6M_Rank, Perf12M_Rank)`
+- `Min_Core_Rank = min(Perf3M_Rank, Perf6M_Rank, Perf12M_Rank)`
+- `Positive_Breadth_Score = count(positive Perf1M/3M/6M/12M) * 25`
+- `Historical_12M_Score = 100 * clamp(Perf12M_Percentile / 85, 0..1)`
+- Formula:
+  - `Persistence Score = 0.35*Median_Rank + 0.25*Min_Core_Rank + 0.20*Positive_Breadth_Score + 0.20*Historical_12M_Score`
+
+#### Alpha Score and Alpha State
+- `Base Alpha = 0.35*Momentum Score + 0.30*Trend Quality Score + 0.35*Persistence Score`
+- `Alpha Score = clamp(Base Alpha, 0..100)`
+- `Alpha State`:
+  - `>= 80`: `Strong Alpha`
+  - `>= 70`: `Positive Alpha`
+  - `>= 60`: `Moderate Alpha`
+  - `>= 50`: `Neutral`
+  - `< 50`: `Weak`
+
+#### Entry Risk
+- `Entry Risk Score` is a penalty score from `0..100`, where a lower value means a cleaner entry.
+- It combines regime-dependent `SMA200d_Robust_Z_36M` risk and extreme 12-month percentile risk.
+- Regime-dependent SMAZ risk:
+  - `BULL`: `0` if `SMAZ <= 3.0`, otherwise `10`
+  - `BULL_HIGH_VOL`: `0` if `SMAZ <= 2.5`, `5` if `<= 3.0`, otherwise `10`
+  - `CORRECTION`: `10` if `SMAZ <= 1.5`, `20` if `<= 2.5`, `30` if `<= 3.0`, otherwise `50`
+  - `STRESS`: `20` if `SMAZ <= 1.5`, `30` if `<= 2.5`, `50` if `<= 3.0`, otherwise `80`
+- 12-month percentile risk:
+  - `Perf12M_Percentile <= 98`: `0`
+  - `98 < Perf12M_Percentile <= 99`: `5`
+  - `Perf12M_Percentile > 99`: `10`
+- Base formula:
+  - `Entry Risk Score = clamp(Regime_Dependent_SMAZ_Risk + Perf12M_Extreme_Risk, 0..100)`
+- Stress override:
+  - If `Market_Regime == STRESS`, `Momentum Score >= 70`, and `SMA200d_Robust_Z_36M > 3`, then `Entry Risk Score` is at least `80`.
+- `Entry Risk` label:
+  - `<= 20`: `Low`
+  - `<= 40`: `Moderate`
+  - `<= 60`: `Elevated`
+  - `<= 80`: `High`
+  - `> 80`: `Extreme`
+
+#### Opportunity Score and Opportunity State
+- `Opportunity Score` adjusts `Alpha Score` by current entry risk:
+  - `Opportunity Score = Alpha Score * (1 - Entry Risk Score / 100)`
+- `Opportunity State`:
+  - Missing inputs or unknown regime -> `Missing Data`
+  - `STRESS` and `Entry Risk Score >= 60` -> `STRESS_AVOID_CHASING`
+  - `Alpha Score < 50` -> `WEAK`
+  - `Alpha Score >= 75`, `Entry Risk Score <= 30`, and regime is `BULL` or `BULL_HIGH_VOL` -> `HIGH_CONVICTION`
+  - `Alpha Score >= 65` and regime is `CORRECTION` -> `LOW_CONFIDENCE`
+  - `Alpha Score >= 70` and `Entry Risk Score > 40` -> `STRONG_BUT_EXTENDED`
+  - `Alpha Score >= 65` and `Entry Risk Score <= 40` -> `ATTRACTIVE`
+  - Otherwise -> `NEUTRAL`
+
+#### Alpha Sorting
+- `Off`: keeps the current table order.
+- `Alpha Score`: sorts by `Alpha Score`, then `Persistence Score`, `Trend Quality Score`, `Momentum Score`, and lower `Entry Risk Score`.
+- `Opportunity State`: sorts by opportunity bucket, then `Opportunity Score`, `Alpha Score`, and lower `Entry Risk Score`.
+- `Entry Risk`: sorts by lower `Entry Risk Score`, then higher `Alpha Score` and `Opportunity Score`.
+- `Alpha Confidence`: sorts by higher `Alpha Confidence`, then higher `Alpha Score` and lower `Entry Risk Score`.
+- `Opportunity Score`: sorts by higher `Opportunity Score`, then higher `Alpha Score` and lower `Entry Risk Score`.
+
 ### Performance Ratios
 - `Perf1D %`  
   Formula: `(Close_now / Close_(now-1 calendar day on-or-before) - 1) * 100`
@@ -1357,7 +1491,6 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Alpha_Rank": st.column_config.NumberColumn(format="%.0f"),
             "Alpha_Score": st.column_config.ProgressColumn(min_value=0.0, max_value=100.0, format="%.1f"),
             "Alpha_State": st.column_config.TextColumn(width="large"),
             "Momentum_Score": st.column_config.NumberColumn(format="%.1f"),
@@ -1444,7 +1577,7 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
         )
 
 
-def render_top_alpha_status(market_slot, entry_risk_slot, df: pd.DataFrame, filtered_df: pd.DataFrame) -> None:
+def render_top_alpha_status(market_slot, entry_risk_slot, confidence_slot, df: pd.DataFrame, filtered_df: pd.DataFrame) -> None:
     market_source = df.dropna(subset=["Market_Regime"]) if "Market_Regime" in df.columns else pd.DataFrame()
     if market_source.empty:
         regime = "n/a"
@@ -1470,7 +1603,18 @@ def render_top_alpha_status(market_slot, entry_risk_slot, df: pd.DataFrame, filt
 <div style="padding-top: 1.35rem; line-height: 1.1;">
   <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Market Regime</div>
   <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{regime}</div>
-  <div style="font-size: 0.68rem; color: #cbd5e1;">Confidence: <b>{confidence}</b></div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    with confidence_slot.container():
+        st.markdown(
+            f"""
+<div style="padding-top: 1.35rem; line-height: 1.1;">
+  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Alpha Confidence</div>
+  <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{confidence}</div>
+  <div style="font-size: 0.68rem; color: #cbd5e1;">Market regime confidence</div>
 </div>
 """,
             unsafe_allow_html=True,
@@ -2268,8 +2412,8 @@ def main():
         unsafe_allow_html=True,
     )
 
-    top_left, top_export_col, top_market_col, top_entry_col, top_mid, top_refresh_col, top_hard_refresh_col = st.columns(
-        [2, 1.25, 1.35, 1.55, 3.35, 1, 1.4]
+    top_left, top_export_col, top_market_col, top_entry_col, top_confidence_col, top_mid, top_refresh_col, top_hard_refresh_col = st.columns(
+        [2, 1.25, 1.35, 1.55, 1.25, 2.1, 1, 1.4]
     )
     with top_left:
         selected_universe_name = st.selectbox("ETF Version", options=list(universe_map.keys()), index=0)
@@ -2279,6 +2423,8 @@ def main():
         market_status_slot = st.empty()
     with top_entry_col:
         entry_risk_status_slot = st.empty()
+    with top_confidence_col:
+        alpha_confidence_status_slot = st.empty()
     with top_refresh_col:
         refresh = st.button("Refresh", use_container_width=True)
     with top_hard_refresh_col:
@@ -2321,7 +2467,7 @@ def main():
         )
 
     filtered_df, flow_unavailable = apply_filters(df)
-    render_top_alpha_status(market_status_slot, entry_risk_status_slot, df, filtered_df)
+    render_top_alpha_status(market_status_slot, entry_risk_status_slot, alpha_confidence_status_slot, df, filtered_df)
     graph_ordered_df = filtered_df.copy()
     table_df = filtered_df.copy().reset_index(drop=True)
     table_df["__row_id__"] = np.arange(len(table_df))
@@ -2369,7 +2515,6 @@ def main():
             "Group": 120,
             "Subgroup": 140,
             "Ticker": 95,
-            "Alpha_Rank": 70,
             "Alpha_Score": 82,
             "Alpha_State": 264,
             "Momentum_Score": 92,
