@@ -2342,11 +2342,11 @@ def _render_spy_weekly_market_regime_chart() -> None:
     x_axis = alt.Axis(title=None, format="%Y", labelFontSize=9)
     regime_colors = alt.Scale(
         domain=["BULL", "BULL_HIGH_VOL", "CORRECTION", "STRESS"],
-        range=["#16a34a", "#86efac", "#facc15", "#ef4444"],
+        range=["#00ff66", "#b7ff4a", "#ffd400", "#ff1744"],
     )
 
     base = alt.Chart(d).encode(x=alt.X("Date:T", axis=x_axis))
-    zones = alt.Chart(d).mark_rect(opacity=0.18).encode(
+    zones = alt.Chart(d).mark_rect(opacity=0.34).encode(
         x=alt.X("Date:T", axis=x_axis),
         x2="NextDate:T",
         y=alt.Y("YMin:Q", scale=price_scale, axis=alt.Axis(title="SPY")),
