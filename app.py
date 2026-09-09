@@ -2654,6 +2654,18 @@ def render_market_detail_table(rows: list[tuple[str, str]]) -> None:
     )
 
 
+def render_market_formula(title: str, formula: str) -> None:
+    st.markdown(
+        f"""
+<div style="margin-top: 0.35rem; margin-bottom: 1.4rem; color: #cbd5e1; font-size: 0.78rem; line-height: 1.35;">
+  <div style="color: #94a3b8; font-weight: 800; margin-bottom: 0.25rem;">{title}</div>
+  <pre style="white-space: pre-wrap; background: #111827; border: 1px solid #293241; border-radius: 6px; padding: 0.7rem; margin: 0;">{formula}</pre>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
 def render_market_regime_tab(market: dict) -> None:
     st.subheader("Market Regime")
 
@@ -2689,6 +2701,15 @@ def render_market_regime_tab(market: dict) -> None:
             ("SPY Volatility Percentile", format_market_value(market.get("SPY_Volatility_Percentile"), "score")),
         ]
     )
+    render_market_formula(
+        "Formula",
+        "SPY_SMA40W = SMA(SPY weekly close, 40)\n"
+        "SPY_Drawdown_52W = SPY_Close / RollingHigh52W - 1\n"
+        "SPY_Vol13W = StdDev(weekly returns, 13) * sqrt(52)\n"
+        "HighVol = SPY_Vol13W percentile >= 75\n"
+        "StructuralBull = SPY_Close > SPY_SMA40W and SPY_Drawdown_52W > -10%\n"
+        "BULL/BULL_HIGH_VOL if StructuralBull; CORRECTION/STRESS otherwise, split by HighVol",
+    )
 
     st.markdown("### Fast Transition Risk")
     render_market_detail_table(
@@ -2700,6 +2721,15 @@ def render_market_regime_tab(market: dict) -> None:
             ("DXY Return 26W", format_market_value(market.get("DXY_Return_26W"), "percent")),
             ("DXY Risk", format_market_value(market.get("DXY_Risk"), "score")),
         ]
+    )
+    render_market_formula(
+        "Formula",
+        "MedianVIX26 = Median(VIX, 26W)\n"
+        "MADVIX26 = Median(abs(VIX - MedianVIX26), 26W)\n"
+        "VIX_Z26 = (VIX - MedianVIX26) / (1.4826 * MADVIX26)\n"
+        "VIX_Risk = piecewise_score(VIX_Z26)\n"
+        "DXY_Risk = piecewise_score(DXY_26W_Return)\n"
+        "FastTransitionRisk = clip(0.70 * VIX_Risk + 0.30 * DXY_Risk, 0, 100)",
     )
 
     st.markdown("### Macro Transition Risk")
@@ -2713,6 +2743,17 @@ def render_market_regime_tab(market: dict) -> None:
             ("US2Y Risk", format_market_value(market.get("US2Y_Risk"), "score")),
             ("DXY Risk", format_market_value(market.get("Macro_DXY_Risk"), "score")),
         ]
+    )
+    render_market_formula(
+        "Formula",
+        "FedLiquidity = WALCL - RRPONTSYD - WTREGEN\n"
+        "FedLiquidity13W = FedLiquidity / FedLiquidity.shift(13) - 1\n"
+        "FedLiquidity26W = FedLiquidity / FedLiquidity.shift(26) - 1\n"
+        "US2Y_Change13W_bp = (DGS2 - DGS2.shift(13)) * 100\n"
+        "DXY_Risk = piecewise_score(DXY_26W_Return)\n"
+        "FedLiquidity_Risk = piecewise_score(FedLiquidity26W)\n"
+        "US2Y_Risk = piecewise_score(US2Y_Change13W_bp)\n"
+        "MacroTransitionRisk = clip(0.40 * DXY_Risk + 0.30 * FedLiquidity_Risk + 0.30 * US2Y_Risk, 0, 100)",
     )
 
     st.markdown("### Confirmations")
@@ -2732,6 +2773,15 @@ def render_market_regime_tab(market: dict) -> None:
             ("Negative Confirmation Count", format_market_value(market.get("Negative_Confirmation_Count"))),
             ("Confirmation Flag", format_market_value(market.get("Confirmation_Flag"))),
         ]
+    )
+    render_market_formula(
+        "Formula",
+        "WTI confirmation = classify(WTI_13W_Return)\n"
+        "10Y Real Yield confirmation = classify((DFII10 - DFII10.shift(13)) * 100 bp)\n"
+        "IWM/SPY confirmation = classify((IWM/SPY) / (IWM/SPY).shift(13) - 1)\n"
+        "XLI/XLP confirmation = classify((XLI/XLP) / (XLI/XLP).shift(13) - 1)\n"
+        "RSI Divergence = latest SPY weekly higher-high with lower RSI14 high\n"
+        "NegativeConfirmationCount = NEGATIVE + STRONG_NEGATIVE confirmations; MILD RSI divergence counts as 0.5",
     )
 
 
