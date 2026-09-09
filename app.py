@@ -2402,8 +2402,8 @@ def render_charts(df: pd.DataFrame) -> None:
 
     chart_df = _build_chart_frame(df)
 
-    _render_spy_weekly_market_regime_chart()
     _render_performance_sma200w_bubble_chart(chart_df)
+    _render_spy_weekly_market_regime_chart()
     _render_rsi_chart(chart_df)
     _render_bar_chart(
         chart_df,
@@ -2517,7 +2517,8 @@ def main():
         [data-testid="stElementToolbar"] {
             display: none !important;
         }
-        .stButton > button {
+        .stButton > button,
+        .stDownloadButton > button {
             font-size: 0.74rem;
             padding: 0.2rem 0.5rem;
             min-height: 1.55rem;
@@ -2578,19 +2579,19 @@ def main():
         unsafe_allow_html=True,
     )
 
-    top_left, top_export_col, top_market_col, top_entry_col, top_confidence_col, top_mid, top_refresh_col, top_hard_refresh_col = st.columns(
-        [2, 1.25, 1.35, 1.55, 1.25, 2.1, 1, 1.4]
+    top_left, top_market_col, top_entry_col, top_confidence_col, top_mid, top_export_col, top_refresh_col, top_hard_refresh_col = st.columns(
+        [2, 1.35, 1.55, 1.25, 2.1, 1.25, 1, 1.4]
     )
     with top_left:
         selected_universe_name = st.selectbox("ETF Version", options=list(universe_map.keys()), index=0)
-    with top_export_col:
-        table_export_slot = st.empty()
     with top_market_col:
         market_status_slot = st.empty()
     with top_entry_col:
         entry_risk_status_slot = st.empty()
     with top_confidence_col:
         alpha_confidence_status_slot = st.empty()
+    with top_export_col:
+        table_export_slot = st.empty()
     with top_refresh_col:
         refresh = st.button("Refresh", use_container_width=True)
     with top_hard_refresh_col:
