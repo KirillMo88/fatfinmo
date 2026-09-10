@@ -23,6 +23,7 @@ from alpha_engine import (
     sort_by_alpha,
 )
 from finance_core import download_completed_ohlcv
+from fund_flows import get_fund_flow_metrics
 from market_model import (
     YAHOO_MARKET_TICKERS,
     calculate_fast_transition_risk_history,
@@ -985,9 +986,12 @@ def get_metrics(ticker: str, divergence_cfg: dict):
             sma200w = wk_close.rolling(window=200, min_periods=200).mean()
             golden_cross_w1, death_cross_w1 = detect_recent_sma_crossover(sma50w, sma200w, lookback_bars=14)
 
-        # Fund flows placeholders (data source needed)
-        flows_1m = np.nan
-        flows_3m = np.nan
+        try:
+            fund_flow_metrics = get_fund_flow_metrics(ticker)
+        except Exception:
+            fund_flow_metrics = None
+        flows_1m = np.nan if fund_flow_metrics is None else fund_flow_metrics.flow_1m_pct
+        flows_3m = np.nan if fund_flow_metrics is None else fund_flow_metrics.flow_3m_pct
 
         return [
             perf_1d, perf_1w, perf_1m, perf_3m, perf_6m,

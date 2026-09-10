@@ -16,6 +16,7 @@ services:
       - "8501"
     volumes:
       - ./persistent/custom_universe_lists.json:/app/custom_universe_lists.json
+      - ./persistent/finance_cache:/app/persistent/finance_cache
 
   tester:
     build: .
