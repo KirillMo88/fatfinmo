@@ -5663,8 +5663,38 @@ def render_divergence_settings() -> dict:
     return cfg
 
 
+def _first_query_value(query: Any, key: str) -> str | None:
+    try:
+        value = query.get(key)
+    except Exception:
+        return None
+    if isinstance(value, (list, tuple)):
+        return str(value[0]) if value else None
+    return str(value) if value is not None else None
+
+
+def _handle_tradingview_oauth_callback() -> None:
+    query = getattr(st, "query_params", {})
+    code = _first_query_value(query, "code")
+    state = _first_query_value(query, "state")
+    if not code or not state:
+        return
+    try:
+        import tradingview_mcp as tv_mcp
+
+        tv_mcp.exchange_code(code, state)
+        st.success("TradingView OAuth authorization saved.")
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+    except Exception as exc:
+        st.warning(f"TradingView OAuth callback failed: {exc}")
+
+
 def main():
     st.set_page_config(page_title="ETF Market Screener", layout="wide")
+    _handle_tradingview_oauth_callback()
     if st_autorefresh is not None:
         st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="performance_autorefresh")
     else:
