@@ -83,6 +83,7 @@ RAW_COLUMNS = [
     "release_date",
     "source",
     "source_name",
+    "source_mode",
     "source_url",
     "series_id",
     "region",
@@ -262,6 +263,7 @@ def empty_raw_row(source: str, source_name: str, source_url: str, series_id: str
                 "release_date": pd.NaT,
                 "source": source,
                 "source_name": source_name,
+                "source_mode": "FALLBACK_SOURCE",
                 "source_url": source_url,
                 "series_id": series_id,
                 "region": region,
@@ -557,8 +559,115 @@ def validate_boj_total_assets_code() -> str:
     raise RuntimeError(f"BOJ code {code} not found in metadata")
 
 
+def tradingview_mcp_economic_raw(
+    symbol: str,
+    series_id: str,
+    region: str,
+    metric: str,
+    expected: str,
+    source_url_key: str,
+    min_observations: int = 24,
+) -> pd.DataFrame:
+    from tradingview_mcp import (
+        get_economic_data,
+        normalize_cny_to_100mn,
+        validate_economic_result,
+    )
+
+    result = get_economic_data(
+        symbol,
+        date_from=str(GLOBAL_LIQUIDITY_CONFIG["start_date"]),
+        date_to=now_utc().strftime("%Y-%m-%d"),
+    )
+    valid, status = validate_economic_result(result, min_observations=min_observations)
+    if not valid:
+        raise RuntimeError(f"{symbol} validation failed: {status}")
+
+    rows = []
+    downloaded = fmt_datetime(now_utc())
+    unit_notes: list[str] = []
+    for _, item in result.frame.iterrows():
+        raw_value, unit_note = normalize_cny_to_100mn(
+            float(item["value"]),
+            unit=result.unit,
+            scale=result.scale,
+            expected=expected,
+        )
+        if not np.isfinite(raw_value):
+            raise RuntimeError(f"{symbol} unit validation failed: {unit_note}")
+        unit_notes.append(unit_note)
+        release_date = item.get("release_date", pd.NaT) if isinstance(item, pd.Series) else pd.NaT
+        rows.append(
+            {
+                "observation_date": pd.to_datetime(item["date"], errors="coerce"),
+                "release_date": pd.to_datetime(release_date, errors="coerce"),
+                "source": "TRADINGVIEW_MCP",
+                "source_name": f"TradingView MCP / {symbol}",
+                "source_mode": "MCP_PRIMARY",
+                "source_url": str(GLOBAL_LIQUIDITY_CONFIG[source_url_key]),
+                "series_id": series_id,
+                "region": region,
+                "metric": metric,
+                "frequency": result.frequency or "monthly",
+                "currency": "CNY",
+                "unit": "CNY 100 million",
+                "raw_value": raw_value,
+                "download_timestamp": downloaded,
+                "data_status": "OK",
+                "notes": (
+                    f"{result.description or symbol}; {unit_note}; "
+                    f"{result.notes}; point_in_time="
+                    f"{'PARTIAL' if pd.notna(pd.to_datetime(release_date, errors='coerce')) else 'RELEASE_DATE_UNKNOWN'}"
+                ),
+            }
+        )
+
+    frame = pd.DataFrame(rows, columns=RAW_COLUMNS)
+    frame["observation_date"] = pd.to_datetime(frame["observation_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    frame["release_date"] = pd.to_datetime(frame["release_date"], errors="coerce")
+    frame["raw_value"] = pd.to_numeric(frame["raw_value"], errors="coerce")
+    frame = frame.dropna(subset=["observation_date", "raw_value"])
+    if frame.empty:
+        raise RuntimeError(f"{symbol} returned no normalized observations")
+    return frame.sort_values(["observation_date", "download_timestamp"]).drop_duplicates(
+        subset=["observation_date", "series_id"],
+        keep="last",
+    )[RAW_COLUMNS]
+
+
+def tradingview_mcp_china_m2_raw() -> pd.DataFrame:
+    return tradingview_mcp_economic_raw(
+        "ECONOMICS:CNM2",
+        CHINA_M2_SERIES_ID,
+        "China",
+        "M2",
+        "cnm2",
+        "tradingview_cnm2_reports_url",
+        min_observations=36,
+    )
+
+
+def tradingview_mcp_pboc_total_assets_raw() -> pd.DataFrame:
+    return tradingview_mcp_economic_raw(
+        "ECONOMICS:CNCBBS",
+        PBOC_TOTAL_ASSETS_SERIES_ID,
+        "China",
+        "PBoC Total Assets",
+        "cncbbs",
+        "tradingview_cncbbs_url",
+        min_observations=36,
+    )
+
+
 def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
     source_url = str(GLOBAL_LIQUIDITY_CONFIG["pboc_money_supply_url"])
+    mcp_error = ""
+    try:
+        mcp_frame = tradingview_mcp_china_m2_raw()
+        if not mcp_frame.empty:
+            return mcp_frame
+    except Exception as exc:
+        mcp_error = str(exc)
     try:
         links = discover_pboc_money_supply_links(source_url)
         rows: list[dict[str, Any]] = []
@@ -585,6 +694,10 @@ def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
     except Exception as exc:
         fallback = china_m2_fred_tradingview_fallback_raw(api_key=api_key, official_error=str(exc))
         if not fallback.empty:
+            if "notes" in fallback.columns and mcp_error:
+                fallback["notes"] = fallback["notes"].astype(str) + f"; TradingView MCP primary unavailable: {mcp_error}"
+            if "source_mode" in fallback.columns:
+                fallback["source_mode"] = "FALLBACK_SOURCE"
             return fallback
         return empty_raw_row(
             "PBOC",
@@ -597,7 +710,7 @@ def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
             "CNY",
             "CNY 100 million",
             "ERROR",
-            f"Official PBoC parser unavailable: {exc}. Missing data is not filled with zero.",
+            f"TradingView MCP primary unavailable: {mcp_error}; Official PBoC parser unavailable: {exc}. Missing data is not filled with zero.",
         )
 
 
@@ -1071,6 +1184,15 @@ def write_pboc_total_assets_table(frame: pd.DataFrame) -> None:
 
 def pboc_total_assets_raw() -> pd.DataFrame:
     source_url = str(GLOBAL_LIQUIDITY_CONFIG["pboc_balance_sheet_url"])
+    mcp_error = ""
+    try:
+        mcp_frame = tradingview_mcp_pboc_total_assets_raw()
+        if not mcp_frame.empty:
+            write_pboc_total_assets_table(mcp_frame)
+            return mcp_frame
+    except Exception as exc:
+        mcp_error = str(exc)
+
     local_frames: list[pd.DataFrame] = []
     try:
         local_frames.append(pboc_total_assets_table_raw())
@@ -1094,6 +1216,10 @@ def pboc_total_assets_raw() -> pd.DataFrame:
                 .drop_duplicates(subset=["observation_date", "series_id"], keep="last")[RAW_COLUMNS]
                 .reset_index(drop=True)
             )
+            if "source_mode" in frame.columns:
+                frame["source_mode"] = "FALLBACK_SOURCE"
+            if "notes" in frame.columns and mcp_error:
+                frame["notes"] = frame["notes"].astype(str) + f"; TradingView MCP primary unavailable: {mcp_error}"
             write_pboc_total_assets_table(frame)
             return frame
 
@@ -1281,6 +1407,11 @@ def fetch_raw_global_liquidity(api_key: str | None = None) -> pd.DataFrame:
     raw["observation_date"] = pd.to_datetime(raw["observation_date"], errors="coerce")
     raw["release_date"] = pd.to_datetime(raw["release_date"], errors="coerce")
     raw["raw_value"] = pd.to_numeric(raw["raw_value"], errors="coerce")
+    raw["source_mode"] = np.where(
+        raw["source"].eq("TRADINGVIEW_MCP"),
+        "MCP_PRIMARY",
+        raw["source_mode"].fillna("FALLBACK_SOURCE"),
+    )
     return raw[RAW_COLUMNS]
 
 

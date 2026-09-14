@@ -234,6 +234,7 @@ def test_pboc_total_assets_raw_prefers_local_table(monkeypatch, tmp_path):
     monkeypatch.setenv("PBOC_TOTAL_ASSETS_TABLE_PATH", str(table_path))
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_STORAGE_PATH", tmp_path / "storage_pboc_total_assets.csv")
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_BUNDLED_PATH", tmp_path / "bundled_pboc_total_assets.csv")
+    monkeypatch.setattr(gl, "tradingview_mcp_pboc_total_assets_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
     monkeypatch.setattr(gl, "tradingview_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
 
     def fail_if_called(*args, **kwargs):
@@ -260,6 +261,7 @@ def test_pboc_total_assets_raw_uses_tradingview_latest_over_seed(monkeypatch, tm
     monkeypatch.setenv("PBOC_TOTAL_ASSETS_TABLE_PATH", str(table_path))
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_STORAGE_PATH", tmp_path / "storage_pboc_total_assets.csv")
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_BUNDLED_PATH", tmp_path / "bundled_pboc_total_assets.csv")
+    monkeypatch.setattr(gl, "tradingview_mcp_pboc_total_assets_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
     monkeypatch.setattr(
         gl,
         "tradingview_pboc_total_assets_latest_raw",
@@ -286,6 +288,47 @@ def test_pboc_total_assets_raw_uses_tradingview_latest_over_seed(monkeypatch, tm
     assert len(raw) == 1
     assert raw.iloc[0]["source"] == "TRADINGVIEW"
     assert np.isclose(raw.iloc[0]["raw_value"], 502_068.47)
+
+
+def test_pboc_total_assets_raw_prefers_valid_mcp(monkeypatch, tmp_path):
+    monkeypatch.setenv("PBOC_TOTAL_ASSETS_TABLE_PATH", str(tmp_path / "missing.csv"))
+    monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_STORAGE_PATH", tmp_path / "storage_pboc_total_assets.csv")
+    monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_BUNDLED_PATH", tmp_path / "bundled_pboc_total_assets.csv")
+    monkeypatch.setattr(
+        gl,
+        "tradingview_mcp_pboc_total_assets_raw",
+        lambda: pd.DataFrame(
+            [
+                {
+                    **raw_row(
+                        "2026-07-01",
+                        gl.PBOC_TOTAL_ASSETS_SERIES_ID,
+                        502_100.0,
+                        source="TRADINGVIEW_MCP",
+                        region="China",
+                        metric="PBoC Total Assets",
+                        frequency="monthly",
+                        currency="CNY",
+                        unit="CNY 100 million",
+                    ),
+                    "source_mode": "MCP_PRIMARY",
+                }
+            ],
+            columns=gl.RAW_COLUMNS,
+        ),
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("fallback should not be called when MCP is valid")
+
+    monkeypatch.setattr(gl, "tradingview_pboc_total_assets_latest_raw", fail_if_called)
+    monkeypatch.setattr(gl, "discover_pboc_balance_sheet_links", fail_if_called)
+
+    raw = gl.pboc_total_assets_raw()
+
+    assert len(raw) == 1
+    assert raw.iloc[0]["source"] == "TRADINGVIEW_MCP"
+    assert raw.iloc[0]["source_mode"] == "MCP_PRIMARY"
 
 
 def test_parse_tradingview_observation_month():

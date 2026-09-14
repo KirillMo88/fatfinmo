@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
+import os
 from typing import Any, Literal
 
 import numpy as np
@@ -61,6 +62,7 @@ def render_global_macro_tab(api_key: str | None = None) -> None:
             f"Liquidity storage: {GLOBAL_LIQUIDITY_STORAGE_DIR}</div>",
             unsafe_allow_html=True,
         )
+    _render_tradingview_mcp_panel()
 
     if force_refresh:
         st.session_state["global_macro_refresh_nonce"] += 1
@@ -96,6 +98,133 @@ def render_global_macro_tab(api_key: str | None = None) -> None:
             continue
         st.markdown(f"### {block}")
         st.dataframe(_style_global_macro_table(block_df), use_container_width=True, hide_index=True)
+
+
+def _render_tradingview_mcp_panel() -> None:
+    with st.expander("TradingView MCP", expanded=False):
+        try:
+            import tradingview_mcp as tv_mcp
+        except Exception as exc:
+            st.warning(f"TradingView MCP module is not available: {exc}")
+            return
+
+        query = getattr(st, "query_params", {})
+        code = _first_query_value(query, "code")
+        state = _first_query_value(query, "state")
+        if code and state:
+            try:
+                tv_mcp.exchange_code(code, state)
+                _tradingview_mcp_status_snapshot.clear()
+                st.success("TradingView OAuth authorization saved.")
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+            except Exception as exc:
+                st.warning(f"TradingView OAuth callback failed: {exc}")
+
+        status = _tradingview_mcp_status_snapshot()
+        status_cols = st.columns(4)
+        with status_cols[0]:
+            st.metric("MCP Endpoint", "Reachable" if status.oauth_status != "ENDPOINT_ERROR" else "Error")
+        with status_cols[1]:
+            st.metric("OAuth", status.oauth_status)
+        with status_cols[2]:
+            st.metric("Tools", "OK" if status.connected else "n/a")
+        with status_cols[3]:
+            st.metric("Source Mode", "MCP_PRIMARY" if status.connected else "FALLBACK_SOURCE")
+        st.caption(f"https://mcp.tradingview.com/mcp - {status.detail}")
+
+        redirect_default = os.environ.get("TRADINGVIEW_MCP_REDIRECT_URI", "")
+        redirect_uri = st.text_input(
+            "TradingView OAuth redirect URL",
+            value=redirect_default,
+            placeholder="https://your-screener-url/",
+            key="tradingview_mcp_redirect_uri",
+        )
+        auth_cols = st.columns([1.2, 1.2, 5.6])
+        with auth_cols[0]:
+            if st.button("Create Auth Link", key="tradingview_mcp_auth_link", use_container_width=True):
+                if not redirect_uri:
+                    st.warning("Set a public redirect URL first.")
+                else:
+                    try:
+                        st.session_state["tradingview_mcp_auth_url"] = tv_mcp.build_authorization_url(redirect_uri)
+                    except Exception as exc:
+                        st.warning(f"Could not create TradingView auth link: {exc}")
+        with auth_cols[1]:
+            validate = st.button("Validate Symbols", key="tradingview_mcp_validate", use_container_width=True)
+        auth_url = st.session_state.get("tradingview_mcp_auth_url")
+        if auth_url:
+            st.markdown(f"[Open TradingView authorization]({auth_url})")
+
+        try:
+            tools = tv_mcp.discover_tools(force=False) if status.connected else []
+        except Exception:
+            tools = []
+        if tools:
+            tool_names = ", ".join(str(tool.get("name", "")) for tool in tools)
+            st.caption(f"Discovered tools: {tool_names}")
+
+        if validate:
+            _render_tradingview_mcp_validation(tv_mcp)
+
+
+def _render_tradingview_mcp_validation(tv_mcp: Any) -> None:
+    symbols = ["ECONOMICS:CNM2", "ECONOMICS:CNCBBS", "ECONOMICS:USBCOI", "ECONOMICS:USNMPMI"]
+    reports = []
+    previews = []
+    with st.spinner("Validating TradingView economic symbols..."):
+        for symbol in symbols:
+            try:
+                result = tv_mcp.get_economic_data(symbol, date_from="2010-01-01", force=True)
+                valid, status = tv_mcp.validate_economic_result(result, min_observations=24, max_stale_days=120)
+                summary = tv_mcp.validation_summary(result)
+                summary["Validation"] = "OK" if valid else status
+                reports.append(summary)
+                sample = pd.concat([result.frame.head(5), result.frame.tail(5)], ignore_index=True)
+                sample.insert(0, "symbol", symbol)
+                previews.append(sample)
+            except Exception as exc:
+                reports.append(
+                    {
+                        "Symbol": symbol,
+                        "Description": "n/a",
+                        "Source": "TradingView MCP",
+                        "Unit": "n/a",
+                        "Scale": "n/a",
+                        "Frequency": "n/a",
+                        "First available date": "n/a",
+                        "Last available date": "n/a",
+                        "Latest value": np.nan,
+                        "Number of observations": 0,
+                        "Null count": 0,
+                        "Duplicate date count": 0,
+                        "Data Status": "ERROR",
+                        "Validation": str(exc),
+                    }
+                )
+    st.dataframe(pd.DataFrame(reports), use_container_width=True, hide_index=True)
+    if previews:
+        preview = pd.concat(previews, ignore_index=True)
+        st.dataframe(preview, use_container_width=True, hide_index=True)
+
+
+def _first_query_value(query: Any, key: str) -> str:
+    try:
+        value = query.get(key)
+    except Exception:
+        return ""
+    if isinstance(value, list):
+        return str(value[0]) if value else ""
+    return str(value or "")
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _tradingview_mcp_status_snapshot() -> Any:
+    import tradingview_mcp as tv_mcp
+
+    return tv_mcp.connection_status()
 
 
 @st.cache_data(show_spinner=True, ttl=SLOW_REFRESH_SECONDS)
@@ -323,14 +452,48 @@ def _rates_specs(fred: dict[str, pd.Series]) -> list[MacroSeriesSpec]:
 
 
 def _growth_specs(fred: dict[str, pd.Series], market: dict[str, pd.Series]) -> list[MacroSeriesSpec]:
+    ism_manufacturing, ism_manufacturing_source, ism_manufacturing_status = _tradingview_economic_series_or_fallback(
+        "ECONOMICS:USBCOI",
+        "FRED / NAPM",
+        fred.get("NAPM"),
+    )
+    ism_services, ism_services_source, ism_services_status = _tradingview_economic_series_or_fallback(
+        "ECONOMICS:USNMPMI",
+        "FRED / NMFCI fallback",
+        fred.get("NMFCI"),
+    )
     return [
-        MacroSeriesSpec("Growth / Business Cycle", "U.S. ISM Manufacturing PMI", "FRED / NAPM", "absolute", "number", "monthly", "index", _clean_series(fred.get("NAPM"))),
-        MacroSeriesSpec("Growth / Business Cycle", "U.S. ISM Services PMI", "FRED / NMFCI fallback", "absolute", "number", "monthly", "index", _clean_series(fred.get("NMFCI"))),
+        MacroSeriesSpec("Growth / Business Cycle", "U.S. ISM Manufacturing PMI", ism_manufacturing_source, "absolute", "number", "monthly", "index", ism_manufacturing, ism_manufacturing_status),
+        MacroSeriesSpec("Growth / Business Cycle", "U.S. ISM Services PMI", ism_services_source, "absolute", "number", "monthly", "index", ism_services, ism_services_status),
         MacroSeriesSpec("Growth / Business Cycle", "U.S. Initial Jobless Claims", "FRED / ICSA", "percent", "integer", "weekly", "claims", _clean_series(fred.get("ICSA"))),
         MacroSeriesSpec("Growth / Business Cycle", "Chicago Fed National Activity Index", "FRED / CFNAI", "absolute", "number", "monthly", "index", _clean_series(fred.get("CFNAI"))),
         MacroSeriesSpec("Growth / Business Cycle", "WTI Crude Oil", "Yahoo / CL=F", "percent", "number", "daily", "price", _clean_series(market.get("WTI"))),
         MacroSeriesSpec("Growth / Business Cycle", "Copper", "Yahoo / HG=F", "percent", "number", "daily", "price", _clean_series(market.get("Copper"))),
     ]
+
+
+def _tradingview_economic_series_or_fallback(
+    symbol: str,
+    fallback_source: str,
+    fallback_series: pd.Series | None,
+) -> tuple[pd.Series, str, str]:
+    try:
+        from tradingview_mcp import get_economic_data, validate_economic_result
+
+        result = get_economic_data(symbol, date_from="2010-01-01")
+        valid, status = validate_economic_result(result, min_observations=24, max_stale_days=120)
+        if valid and not result.frame.empty:
+            series = _clean_series(
+                pd.Series(
+                    pd.to_numeric(result.frame["value"], errors="coerce").values,
+                    index=pd.to_datetime(result.frame["date"], errors="coerce"),
+                )
+            )
+            return series, f"TradingView MCP / {symbol}", "OK"
+        raise RuntimeError(status)
+    except Exception:
+        series = _clean_series(fallback_series)
+        return series, f"{fallback_source} fallback", "FALLBACK_SOURCE" if not series.empty else "MISSING"
 
 
 def _risk_specs(fred: dict[str, pd.Series], market: dict[str, pd.Series]) -> list[MacroSeriesSpec]:
