@@ -21,6 +21,7 @@ services:
       - ./persistent/custom_universe_lists.json:/app/custom_universe_lists.json
       - ./persistent/finance_cache:/app/persistent/finance_cache
       - ./persistent/bybit_derivatives:/app/persistent/bybit_derivatives
+      - ./persistent/cio_view:/app/persistent/cio_view
       - ./persistent/global_liquidity:/app/persistent/global_liquidity
       - ./persistent/tradingview_mcp:/app/persistent/tradingview_mcp
 

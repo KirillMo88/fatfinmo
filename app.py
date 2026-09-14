@@ -46,6 +46,7 @@ from market_model import (
 from table_export import dataframe_to_excel_xls_bytes
 from ai_dashboard import AI_GROUP_LABELS, AI_UNIVERSE, canonical_ai_group_label, is_ai_group_label
 from ai_dashboard_tab import render_ai_dashboard_tab
+from cio_view import render_cio_view_tab
 from global_macro_tab import render_global_macro_tab
 from gold_regime_tab import render_gold_regime_tab
 from global_liquidity import (
@@ -5942,6 +5943,7 @@ def main():
         charts_tab,
         graphs_tab,
         ai_dashboard_tab,
+        cio_view_tab,
         market_regime_tab,
         global_macro_tab,
         global_liquidity_tab,
@@ -5958,6 +5960,7 @@ def main():
             "Charts",
             "Graphs",
             "AI Dashboard",
+            "CIO View",
             "Market Regime",
             "Global Macro",
             "Global Liquidity Regime",
@@ -6182,6 +6185,8 @@ def main():
         render_graphs_tab(graph_ordered_df.drop(columns=["__row_id__"], errors="ignore"), selected_universe, selected_universe_name)
     with ai_dashboard_tab:
         render_ai_dashboard_tab()
+    with cio_view_tab:
+        render_cio_view_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), market_snapshot, get_fred_api_key_for_app())
     with market_regime_tab:
         render_market_regime_tab(market_snapshot)
     with global_macro_tab:
