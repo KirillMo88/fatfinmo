@@ -79,6 +79,21 @@ def load_usd_krw_history(period: str = "10y") -> pd.DataFrame:
     return drop_incomplete_daily_bar(extract_ohlcv_frame(raw, USD_KRW_TICKER))
 
 
+def load_usd_krw_latest_history(period: str = "10y") -> pd.DataFrame:
+    try:
+        raw = yf.download(
+            USD_KRW_TICKER,
+            period=period,
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            threads=False,
+        )
+    except Exception:
+        raw = pd.DataFrame()
+    return extract_ohlcv_frame(raw, USD_KRW_TICKER)
+
+
 def convert_krw_ohlcv_to_usd(frame: pd.DataFrame, usd_krw: pd.DataFrame) -> pd.DataFrame:
     if frame.empty or usd_krw.empty:
         return frame
@@ -109,6 +124,28 @@ def download_completed_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
             frame = drop_incomplete_daily_bar(extract_ohlcv_frame(raw, ticker))
             if is_krw_quoted_ticker(ticker):
                 frame = convert_krw_ohlcv_to_usd(frame, load_usd_krw_history(period=period))
+            if not frame.empty:
+                return frame
+        except Exception:
+            pass
+        time.sleep(0.5 * (attempt + 1))
+    return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+
+def download_latest_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
+    for attempt in range(3):
+        try:
+            raw = yf.download(
+                ticker,
+                period=period,
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+            frame = extract_ohlcv_frame(raw, ticker)
+            if is_krw_quoted_ticker(ticker):
+                frame = convert_krw_ohlcv_to_usd(frame, load_usd_krw_latest_history(period=period))
             if not frame.empty:
                 return frame
         except Exception:

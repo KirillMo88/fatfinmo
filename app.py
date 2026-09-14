@@ -16,6 +16,10 @@ from typing import Any
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 import streamlit.components.v1 as components
 from streamlit.errors import StreamlitSecretNotFoundError
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:  # pragma: no cover - optional dependency fallback.
+    st_autorefresh = None
 
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
@@ -25,7 +29,7 @@ from alpha_engine import (
     calculate_sma200d_robust_z_36m,
     sort_by_alpha,
 )
-from finance_core import download_completed_ohlcv
+from finance_core import download_completed_ohlcv, download_latest_ohlcv
 from fund_flows import FundFlowCache, default_fund_flow_cache_path, get_fund_flow_metrics
 from market_model import (
     YAHOO_MARKET_TICKERS,
@@ -943,10 +947,49 @@ def build_ai_group_ohlcv(group_label: str, period: str = "10y") -> pd.DataFrame:
     return out.dropna(subset=["Close"]).sort_index()
 
 
+@st.cache_data(show_spinner=False, ttl=AUTO_REFRESH_SECONDS)
+def build_ai_group_latest_ohlcv(group_label: str, period: str = "10y", refresh_bucket: int = 0) -> pd.DataFrame:
+    _ = refresh_bucket
+    canonical = canonical_ai_group_label(group_label)
+    members = AI_UNIVERSE.get(canonical, [])
+    normalized_frames: dict[str, pd.DataFrame] = {}
+    for member in members:
+        frame = download_latest_ohlcv(member, period=period)
+        if frame.empty:
+            continue
+        close = pd.to_numeric(frame.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
+        if close.empty:
+            continue
+        base = float(close.iloc[0])
+        if not np.isfinite(base) or base == 0.0:
+            continue
+        normalized = frame[["Open", "High", "Low", "Close", "Volume"]].copy()
+        for column in ["Open", "High", "Low", "Close"]:
+            normalized[column] = pd.to_numeric(normalized[column], errors="coerce") / base * 100.0
+        normalized["Volume"] = pd.to_numeric(normalized["Volume"], errors="coerce")
+        normalized_frames[member] = normalized
+
+    if not normalized_frames:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+    combined = pd.concat(normalized_frames, axis=1).sort_index()
+    out = pd.DataFrame(index=combined.index)
+    for column in ["Open", "High", "Low", "Close"]:
+        out[column] = combined.xs(column, axis=1, level=1).mean(axis=1, skipna=True)
+    out["Volume"] = combined.xs("Volume", axis=1, level=1).sum(axis=1, min_count=1)
+    return out.dropna(subset=["Close"]).sort_index()
+
+
 def download_metrics_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
     if is_ai_group_label(ticker):
         return build_ai_group_ohlcv(canonical_ai_group_label(ticker), period=period)
     return download_completed_ohlcv(ticker, period=period)
+
+
+def download_performance_ohlcv(ticker: str, period: str = "10y", refresh_bucket: int = 0) -> pd.DataFrame:
+    if is_ai_group_label(ticker):
+        return build_ai_group_latest_ohlcv(canonical_ai_group_label(ticker), period=period, refresh_bucket=refresh_bucket)
+    return download_latest_ohlcv(ticker, period=period)
 
 
 def get_metrics(ticker: str, divergence_cfg: dict):
@@ -1083,8 +1126,8 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         return None
 
 
-def get_performance_metrics(ticker: str) -> list[float] | None:
-    ohlcv = download_metrics_ohlcv(ticker)
+def get_performance_metrics(ticker: str, refresh_bucket: int = 0) -> list[float] | None:
+    ohlcv = download_performance_ohlcv(ticker, refresh_bucket=refresh_bucket)
     if ohlcv.empty:
         return None
     close = pd.to_numeric(ohlcv["Close"], errors="coerce").dropna()
@@ -1107,13 +1150,13 @@ def get_performance_metrics(ticker: str) -> list[float] | None:
 @st.cache_data(show_spinner=True, ttl=AUTO_REFRESH_SECONDS)
 def compute_performance_table(universe: dict, universe_signature: str, refresh_nonce: int = 0) -> tuple[pd.DataFrame, str]:
     _ = universe_signature
-    _ = refresh_nonce
+    refresh_bucket = int(refresh_nonce)
     columns = ["Group", "Subgroup", "Ticker", *FAST_PERFORMANCE_COLUMNS]
     rows = []
     for group, subgroups in universe.items():
         for subgroup, tickers in subgroups.items():
             for ticker in tickers:
-                res = get_performance_metrics(ticker)
+                res = get_performance_metrics(ticker, refresh_bucket=refresh_bucket)
                 rows.append([group, subgroup, ticker] + ([np.nan] * len(FAST_PERFORMANCE_COLUMNS) if res is None else res))
     fetched_at_utc = pd.Timestamp.now(tz="UTC").isoformat()
     return pd.DataFrame(rows, columns=columns), fetched_at_utc
@@ -5622,17 +5665,20 @@ def render_divergence_settings() -> dict:
 
 def main():
     st.set_page_config(page_title="ETF Market Screener", layout="wide")
-    components.html(
-        f"""
-        <script>
-        setTimeout(function() {{
-            window.parent.location.reload();
-        }}, {AUTO_REFRESH_SECONDS * 1000});
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
+    if st_autorefresh is not None:
+        st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="performance_autorefresh")
+    else:
+        components.html(
+            f"""
+            <script>
+            setTimeout(function() {{
+                window.parent.location.reload();
+            }}, {AUTO_REFRESH_SECONDS * 1000});
+            </script>
+            """,
+            height=0,
+            width=0,
+        )
     if "universe_map" not in st.session_state:
         st.session_state["universe_map"] = load_universe_map()
     if "performance_refresh_nonce" not in st.session_state:
@@ -5779,12 +5825,15 @@ def main():
     with st.spinner("Computing ETF metrics..."):
         selected_universe = universe_map[selected_universe_name]
         market_signature = f"market-model:{selected_universe_name}:{str(selected_universe)}:{divergence_signature}"
+        performance_refresh_key = int(time.time() // AUTO_REFRESH_SECONDS) + (
+            int(st.session_state["performance_refresh_nonce"]) * 10_000_000
+        )
         df, app_refresh_utc = compute_metrics_table(
             selected_universe,
             f"{selected_universe_name}:{str(selected_universe)}",
             divergence_cfg,
             divergence_signature,
-            st.session_state["performance_refresh_nonce"],
+            performance_refresh_key,
             st.session_state["slow_refresh_nonce"],
         )
         market_snapshot = load_market_model_snapshot(market_signature)
