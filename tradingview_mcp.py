@@ -309,6 +309,15 @@ def resolve_tool_name(preferred_name: str) -> str | None:
     suffix_matches = [name for name in names if name.endswith(f".{preferred_name}") or name.endswith(f"/{preferred_name}")]
     if suffix_matches:
         return suffix_matches[0]
+    normalized_preferred = preferred_name.replace("_", "-")
+    normalized_matches = [
+        name
+        for name in names
+        if name.replace("_", "-") == normalized_preferred
+        or name.replace("_", "-").endswith(f"-{normalized_preferred}")
+    ]
+    if normalized_matches:
+        return normalized_matches[0]
     return None
 
 
