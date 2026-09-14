@@ -1127,6 +1127,8 @@ def get_metrics(ticker: str, divergence_cfg: dict):
 
 
 def get_performance_metrics(ticker: str, refresh_bucket: int = 0) -> list[float] | None:
+    if is_ai_group_label(ticker):
+        return get_ai_group_performance_metrics(canonical_ai_group_label(ticker), refresh_bucket=refresh_bucket)
     ohlcv = download_performance_ohlcv(ticker, refresh_bucket=refresh_bucket)
     if ohlcv.empty:
         return None
@@ -1145,6 +1147,24 @@ def get_performance_metrics(ticker: str, refresh_bucket: int = 0) -> list[float]
         safe_perf(close, today, 365 * 5),
         safe_perf(close, today, 365 * 10),
     ]
+
+
+def get_ai_group_performance_metrics(group_label: str, refresh_bucket: int = 0) -> list[float] | None:
+    windows = [1, 7, 30, 90, 182, 365, 365 * 3, 365 * 5, 365 * 10]
+    member_returns: list[list[float]] = []
+    for member in AI_UNIVERSE.get(canonical_ai_group_label(group_label), []):
+        ohlcv = download_performance_ohlcv(member, refresh_bucket=refresh_bucket)
+        if ohlcv.empty:
+            continue
+        close = pd.to_numeric(ohlcv["Close"], errors="coerce").dropna()
+        if close.empty:
+            continue
+        end = pd.Timestamp(close.index[-1])
+        member_returns.append([safe_perf(close, end, days) for days in windows])
+    if not member_returns:
+        return None
+    frame = pd.DataFrame(member_returns, columns=FAST_PERFORMANCE_COLUMNS)
+    return [float(pd.to_numeric(frame[col], errors="coerce").mean(skipna=True)) for col in FAST_PERFORMANCE_COLUMNS]
 
 
 @st.cache_data(show_spinner=True, ttl=AUTO_REFRESH_SECONDS)
