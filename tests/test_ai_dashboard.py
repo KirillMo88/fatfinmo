@@ -6,11 +6,13 @@ from ai_dashboard import (
     aggregate_return,
     breadth_percent,
     build_group_table,
+    canonical_ai_group_label,
     company_price_metrics,
-    convert_krw_ohlcv_to_usd,
     convert_krw_value_to_usd,
+    is_ai_group_label,
     positive_percent,
 )
+from finance_core import convert_krw_ohlcv_to_usd
 
 
 def test_aggregate_return_equal_weighted_skips_missing_values():
@@ -124,3 +126,10 @@ def test_convert_krw_market_cap_to_usd_for_korean_tickers_only():
     assert convert_krw_value_to_usd("005930.KS", 2_600_000.0, 1300.0) == pytest.approx(2000.0)
     assert convert_krw_value_to_usd("006930.KS", 3_900_000.0, 1300.0) == pytest.approx(3000.0)
     assert convert_krw_value_to_usd("MSFT", 1_300_000.0, 1300.0) == pytest.approx(1_300_000.0)
+
+
+def test_ai_group_labels_are_canonicalized_after_universe_cleaning():
+    assert canonical_ai_group_label("AI COMPUTE") == "AI Compute"
+    assert canonical_ai_group_label("power producers") == "Power Producers"
+    assert is_ai_group_label("SEMICONDUCTOR EQUIPMENT")
+    assert not is_ai_group_label("MSFT")

@@ -80,6 +80,8 @@ AI_COMPANY_NAMES: dict[str, str] = {
     "EQIX": "Equinix",
     "DLR": "Digital Realty",
 }
+AI_GROUP_LABELS = list(AI_UNIVERSE.keys())
+AI_GROUP_LABEL_BY_UPPER = {group.upper(): group for group in AI_GROUP_LABELS}
 
 PERFORMANCE_WINDOWS: dict[str, int] = {
     "Perf 1D": 1,
@@ -175,6 +177,15 @@ def ai_tickers(include_benchmarks: bool = False) -> list[str]:
 
 def ticker_group_map() -> dict[str, str]:
     return {ticker: group for group, tickers in AI_UNIVERSE.items() for ticker in tickers}
+
+
+def canonical_ai_group_label(value: Any) -> str:
+    label = str(value or "").strip()
+    return AI_GROUP_LABEL_BY_UPPER.get(label.upper(), label.upper())
+
+
+def is_ai_group_label(value: Any) -> bool:
+    return str(value or "").strip().upper() in AI_GROUP_LABEL_BY_UPPER
 
 
 def load_ai_price_history(tickers: list[str]) -> dict[str, pd.DataFrame]:

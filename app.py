@@ -40,7 +40,7 @@ from market_model import (
     weekly_close,
 )
 from table_export import dataframe_to_excel_xls_bytes
-from ai_dashboard import AI_UNIVERSE
+from ai_dashboard import AI_GROUP_LABELS, AI_UNIVERSE, canonical_ai_group_label, is_ai_group_label
 from ai_dashboard_tab import render_ai_dashboard_tab
 from gold_regime_tab import render_gold_regime_tab
 from global_liquidity import (
@@ -89,7 +89,9 @@ ETF_UNIVERSE_FULL = {
         "Tech": ["BLOK", "BUG", "DTCR", "SKYY", "SOXX", "TINY"],
         "Transport": ["BOAT"],
     },
-    "AI": AI_UNIVERSE,
+    "Equity": {
+        "AI": AI_GROUP_LABELS,
+    },
     "Bonds": {
         "Bonds": ["SHY", "IEF", "TLT", "TIP", "EMB", "HYG", "JNK"],
     },
@@ -383,7 +385,7 @@ def _clean_universe_block(block: dict) -> dict:
                 continue
             unique = []
             for ticker in tickers:
-                t = str(ticker).strip().upper()
+                t = canonical_ai_group_label(ticker) if is_ai_group_label(ticker) else str(ticker).strip().upper()
                 if t and t not in unique:
                     unique.append(t)
             if unique:
@@ -908,7 +910,41 @@ def detect_divergence_for_indicator(
 # ============================================================
 # 4) Metrics function (same logic)
 # ============================================================
+@st.cache_data(show_spinner=False, ttl=SLOW_REFRESH_SECONDS)
+def build_ai_group_ohlcv(group_label: str, period: str = "10y") -> pd.DataFrame:
+    canonical = canonical_ai_group_label(group_label)
+    members = AI_UNIVERSE.get(canonical, [])
+    normalized_frames: dict[str, pd.DataFrame] = {}
+    for member in members:
+        frame = download_completed_ohlcv(member, period=period)
+        if frame.empty:
+            continue
+        close = pd.to_numeric(frame.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
+        if close.empty:
+            continue
+        base = float(close.iloc[0])
+        if not np.isfinite(base) or base == 0.0:
+            continue
+        normalized = frame[["Open", "High", "Low", "Close", "Volume"]].copy()
+        for column in ["Open", "High", "Low", "Close"]:
+            normalized[column] = pd.to_numeric(normalized[column], errors="coerce") / base * 100.0
+        normalized["Volume"] = pd.to_numeric(normalized["Volume"], errors="coerce")
+        normalized_frames[member] = normalized
+
+    if not normalized_frames:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+    combined = pd.concat(normalized_frames, axis=1).sort_index()
+    out = pd.DataFrame(index=combined.index)
+    for column in ["Open", "High", "Low", "Close"]:
+        out[column] = combined.xs(column, axis=1, level=1).mean(axis=1, skipna=True)
+    out["Volume"] = combined.xs("Volume", axis=1, level=1).sum(axis=1, min_count=1)
+    return out.dropna(subset=["Close"]).sort_index()
+
+
 def download_metrics_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
+    if is_ai_group_label(ticker):
+        return build_ai_group_ohlcv(canonical_ai_group_label(ticker), period=period)
     return download_completed_ohlcv(ticker, period=period)
 
 
@@ -1024,7 +1060,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
             golden_cross_w1, death_cross_w1 = detect_recent_sma_crossover(sma50w, sma200w, lookback_bars=14)
 
         try:
-            fund_flow_metrics = get_fund_flow_metrics(ticker)
+            fund_flow_metrics = None if is_ai_group_label(ticker) else get_fund_flow_metrics(ticker)
         except Exception:
             fund_flow_metrics = None
         flows_1m = np.nan if fund_flow_metrics is None else fund_flow_metrics.flow_1m_pct
