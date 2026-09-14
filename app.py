@@ -42,6 +42,7 @@ from market_model import (
 from table_export import dataframe_to_excel_xls_bytes
 from ai_dashboard import AI_GROUP_LABELS, AI_UNIVERSE, canonical_ai_group_label, is_ai_group_label
 from ai_dashboard_tab import render_ai_dashboard_tab
+from global_macro_tab import render_global_macro_tab
 from gold_regime_tab import render_gold_regime_tab
 from global_liquidity import (
     GLOBAL_LIQUIDITY_STORAGE_DIR,
@@ -5843,6 +5844,7 @@ def main():
         graphs_tab,
         ai_dashboard_tab,
         market_regime_tab,
+        global_macro_tab,
         global_liquidity_tab,
         gold_regime_tab,
         btc_regime_tab,
@@ -5858,6 +5860,7 @@ def main():
             "Graphs",
             "AI Dashboard",
             "Market Regime",
+            "Global Macro",
             "Global Liquidity Regime",
             "Gold Regime",
             "BTC Regime",
@@ -6082,6 +6085,8 @@ def main():
         render_ai_dashboard_tab()
     with market_regime_tab:
         render_market_regime_tab(market_snapshot)
+    with global_macro_tab:
+        render_global_macro_tab(get_fred_api_key_for_app())
     with global_liquidity_tab:
         render_global_liquidity_dashboard_tab()
     with gold_regime_tab:
