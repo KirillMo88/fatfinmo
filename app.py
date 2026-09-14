@@ -5,11 +5,14 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 import altair as alt
+import plotly.graph_objects as go
 import time
 import os
 import json
+import html
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 import streamlit.components.v1 as components
 from streamlit.errors import StreamlitSecretNotFoundError
@@ -23,17 +26,38 @@ from alpha_engine import (
     sort_by_alpha,
 )
 from finance_core import download_completed_ohlcv
-from fund_flows import get_fund_flow_metrics
+from fund_flows import FundFlowCache, default_fund_flow_cache_path, get_fund_flow_metrics
 from market_model import (
     YAHOO_MARKET_TICKERS,
+    calculate_confirmations_history,
     calculate_fast_transition_risk_history,
     calculate_macro_transition_risk_history,
     calculate_market_model,
+    calculate_overall_transition_status,
+    classify_global_liquidity_backdrop,
     download_fred_market_data,
     market_model_config,
     weekly_close,
 )
 from table_export import dataframe_to_excel_xls_bytes
+from ai_dashboard_tab import render_ai_dashboard_tab
+from gold_regime_tab import render_gold_regime_tab
+from global_liquidity import (
+    GLOBAL_LIQUIDITY_STORAGE_DIR,
+    freshness as global_liquidity_freshness,
+    global_liquidity_update_in_progress,
+    read_global_liquidity,
+    start_background_update_if_stale as start_global_liquidity_update_if_stale,
+    update_global_liquidity,
+)
+from bybit_derivatives import (
+    BYBIT_ASSET_MAP,
+    BYBIT_STORAGE_PATH,
+    bybit_update_in_progress,
+    latest_states as bybit_latest_states,
+    read_bybit_storage,
+    start_background_update_if_stale,
+)
 from screener_metrics import (
     correction_risk_from_percentile_analogs,
     historical_momentum_52w_metrics,
@@ -106,7 +130,7 @@ ETF_UNIVERSE_CRYPTO = {
     "Crypto": {
         "BTC": ["BTC-USD"],
         "L1": [
-            "ETH-USD", "SOL-USD", "SUI-USD", "APT-USD", "NEAR-USD", "TRON-USD", "ADA-USD",
+            "ETH-USD", "SOL-USD", "SUI-USD", "APT-USD", "NEAR-USD", "TRX-USD", "ADA-USD",
             "AVAX-USD", "TON-USD", "HBAR-USD", "VET-USD", "INJ-USD", "TIA-USD", "DOT-USD",
         ],
         "CEX": ["BNB-USD", "BGB-USD", "OKB-USD", "CRO-USD"],
@@ -126,6 +150,7 @@ ETF_UNIVERSE_MAP = {
 }
 UNIVERSE_STORAGE_PATH = Path(__file__).with_name("custom_universe_lists.json")
 AUTO_REFRESH_SECONDS = 600
+SLOW_REFRESH_SECONDS = 21600
 
 GRAPH_PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly", "Full history"]
 
@@ -238,8 +263,6 @@ TABLE_HEADER_NAMES = {
 }
 
 TABLE_PERMANENTLY_HIDDEN_COLUMNS = {
-    "FundFlows_1M_%",
-    "FundFlows_3M_%",
     *ALPHA_TECHNICAL_COLUMNS,
     "SMA50w_vs_SMA200w_Spread_%",
     "SMA_Spread_%_Change_6M_%",
@@ -279,6 +302,18 @@ PERFORMANCE_COLUMNS = [
     "Perf_5Y_%",
     "Perf_10Y_%",
     "Avg_Forward_Return_6M_%",
+]
+
+FAST_PERFORMANCE_COLUMNS = [
+    "Perf_1D_%",
+    "Perf_1W_%",
+    "Perf_1M_%",
+    "Perf_3M_%",
+    "Perf_6M_%",
+    "Perf_12M_%",
+    "Perf_3Y_%",
+    "Perf_5Y_%",
+    "Perf_10Y_%",
 ]
 
 INVERSE_PERFORMANCE_COLUMNS = [
@@ -1009,10 +1044,53 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         return None
 
 
+def get_performance_metrics(ticker: str) -> list[float] | None:
+    ohlcv = download_metrics_ohlcv(ticker)
+    if ohlcv.empty:
+        return None
+    close = pd.to_numeric(ohlcv["Close"], errors="coerce").dropna()
+    if close.empty:
+        return None
+    today = close.index[-1]
+    return [
+        safe_perf(close, today, 1),
+        safe_perf(close, today, 7),
+        safe_perf(close, today, 30),
+        safe_perf(close, today, 90),
+        safe_perf(close, today, 182),
+        safe_perf(close, today, 365),
+        safe_perf(close, today, 365 * 3),
+        safe_perf(close, today, 365 * 5),
+        safe_perf(close, today, 365 * 10),
+    ]
+
+
 @st.cache_data(show_spinner=True, ttl=AUTO_REFRESH_SECONDS)
-def compute_metrics_table(universe: dict, universe_signature: str, divergence_cfg: dict, divergence_signature: str) -> tuple[pd.DataFrame, str]:
+def compute_performance_table(universe: dict, universe_signature: str, refresh_nonce: int = 0) -> tuple[pd.DataFrame, str]:
+    _ = universe_signature
+    _ = refresh_nonce
+    columns = ["Group", "Subgroup", "Ticker", *FAST_PERFORMANCE_COLUMNS]
+    rows = []
+    for group, subgroups in universe.items():
+        for subgroup, tickers in subgroups.items():
+            for ticker in tickers:
+                res = get_performance_metrics(ticker)
+                rows.append([group, subgroup, ticker] + ([np.nan] * len(FAST_PERFORMANCE_COLUMNS) if res is None else res))
+    fetched_at_utc = pd.Timestamp.now(tz="UTC").isoformat()
+    return pd.DataFrame(rows, columns=columns), fetched_at_utc
+
+
+@st.cache_data(show_spinner=True, ttl=SLOW_REFRESH_SECONDS)
+def compute_slow_metrics_table(
+    universe: dict,
+    universe_signature: str,
+    divergence_cfg: dict,
+    divergence_signature: str,
+    refresh_nonce: int = 0,
+) -> tuple[pd.DataFrame, str]:
     _ = universe_signature
     _ = divergence_signature
+    _ = refresh_nonce
     columns = [
         "Group", "Subgroup", "Ticker",
         "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%",
@@ -1054,6 +1132,44 @@ def compute_metrics_table(universe: dict, universe_signature: str, divergence_cf
 
     fetched_at_utc = pd.Timestamp.now(tz="UTC").isoformat()
     return df, fetched_at_utc
+
+
+@st.cache_data(show_spinner=True, ttl=AUTO_REFRESH_SECONDS)
+def compute_metrics_table(
+    universe: dict,
+    universe_signature: str,
+    divergence_cfg: dict,
+    divergence_signature: str,
+    performance_refresh_nonce: int = 0,
+    slow_refresh_nonce: int = 0,
+) -> tuple[pd.DataFrame, str]:
+    slow_df, _ = compute_slow_metrics_table(
+        universe,
+        universe_signature,
+        divergence_cfg,
+        divergence_signature,
+        slow_refresh_nonce,
+    )
+    perf_df, performance_fetched_at_utc = compute_performance_table(
+        universe,
+        universe_signature,
+        performance_refresh_nonce,
+    )
+    if slow_df.empty:
+        return perf_df, performance_fetched_at_utc
+    if perf_df.empty:
+        return slow_df, performance_fetched_at_utc
+
+    keys = ["Group", "Subgroup", "Ticker"]
+    merged = slow_df.drop(columns=FAST_PERFORMANCE_COLUMNS, errors="ignore").merge(
+        perf_df,
+        on=keys,
+        how="left",
+    )
+    ordered_columns = [col for col in slow_df.columns if col in merged.columns] + [
+        col for col in merged.columns if col not in slow_df.columns
+    ]
+    return merged[ordered_columns], performance_fetched_at_utc
 
 
 def apply_filters(df: pd.DataFrame):
@@ -1258,6 +1374,2188 @@ def render_tester_tab() -> None:
         return
     st.caption(f"Tester mounted from {tester_url}")
     components.iframe(tester_url, height=2100, scrolling=True)
+
+
+def render_crypto_derivatives_tab() -> None:
+    st.subheader("Crypto Derivatives - Bybit")
+    st.caption("Public market data only. No API key, no API secret, no account access.")
+
+    col_asset, col_refresh, col_path = st.columns([1.4, 1.0, 4.5])
+    with col_asset:
+        selected_asset = st.selectbox("Asset", options=list(BYBIT_ASSET_MAP.keys()), index=0, key="bybit_asset_selector")
+    with col_refresh:
+        force_refresh = st.button("Refresh Bybit Data", use_container_width=True, key="bybit_force_refresh")
+    with col_path:
+        st.markdown(
+            f"<div style='padding-top:1.5rem; color:#94a3b8; font-size:0.78rem;'>Storage: {html.escape(str(BYBIT_STORAGE_PATH))}</div>",
+            unsafe_allow_html=True,
+        )
+
+    update_started = start_background_update_if_stale(path=BYBIT_STORAGE_PATH, force=force_refresh)
+    if bybit_update_in_progress():
+        st.info("Bybit public market data update is running in the background.")
+    elif update_started:
+        st.success("Bybit public market data update completed.")
+    derivatives_df = read_bybit_storage(BYBIT_STORAGE_PATH)
+
+    states = bybit_latest_states(derivatives_df)
+    state = states.get(selected_asset)
+    if state is None:
+        st.warning("No Bybit state is available for this asset.")
+        return
+
+    st.markdown("#### Current Summary")
+    render_key_value_table(
+        [
+            ("Asset", state.asset),
+            ("Bybit Symbol", state.exchange_symbol),
+            ("Price", fmt_plain_number(state.price, 2)),
+            ("Open Interest USD", fmt_money_compact(state.open_interest_usd)),
+            ("OI Change 1W", fmt_plain_percent(state.oi_change_1w_pct)),
+            ("OI Change 4W", fmt_plain_percent(state.oi_change_4w_pct)),
+            ("OI Change 13W", fmt_plain_percent(state.oi_change_13w_pct)),
+            ("OI 4W Percentile", fmt_plain_number(state.oi_change_4w_percentile, 0)),
+            ("Funding Current", fmt_plain_percent(state.funding_current)),
+            ("Funding 7D", fmt_plain_percent(state.funding_7d)),
+            ("Funding 28D", fmt_plain_percent(state.funding_28d)),
+            ("Funding Percentile", fmt_plain_number(state.funding_percentile, 0)),
+            ("Perpetual Premium", fmt_plain_percent_from_pct(state.perp_premium_pct)),
+            ("Premium 28D", fmt_plain_percent_from_pct(state.premium_28d_avg)),
+            ("Premium Percentile", fmt_plain_number(state.premium_percentile, 0)),
+            ("OI / Price Regime", state.oi_price_regime),
+            ("History Start", state.history_start_date),
+            ("Last Updated", state.last_updated),
+            ("Data Status", state.data_status),
+        ]
+    )
+
+    asset_history = derivatives_df[derivatives_df["asset"].eq(selected_asset)].copy() if not derivatives_df.empty else pd.DataFrame()
+    if asset_history.empty:
+        st.info("No stored history for the selected asset yet.")
+        return
+
+    st.markdown("#### Weekly History")
+    history_cols = [
+        "date",
+        "price",
+        "open_interest_usd",
+        "oi_change_1w_pct",
+        "oi_change_4w_pct",
+        "oi_change_13w_pct",
+        "oi_change_4w_percentile",
+        "funding_rate",
+        "funding_7d",
+        "funding_28d",
+        "funding_28d_percentile",
+        "perp_premium_pct",
+        "perp_premium_28d_avg",
+        "perp_premium_percentile",
+        "oi_price_regime",
+        "data_status",
+        "outlier_flags",
+    ]
+    display_history = asset_history.sort_values("date", ascending=False)
+    display_history = display_history[[col for col in history_cols if col in display_history.columns]].head(104)
+    st.dataframe(display_history, use_container_width=True, hide_index=True)
+
+
+def render_key_value_table(rows: list[tuple[str, str]]) -> None:
+    st.dataframe(pd.DataFrame(rows, columns=["Metric", "Value"]), use_container_width=True, hide_index=True)
+
+
+def render_global_liquidity_dashboard_tab() -> None:
+    st.subheader("Global Liquidity Regime")
+
+    control_cols = st.columns([1.2, 4.8])
+    with control_cols[0]:
+        force_refresh = st.button("Refresh Liquidity Data", use_container_width=True, key="global_liquidity_force_refresh")
+    with control_cols[1]:
+        st.markdown(
+            f"<div style='padding-top:1.6rem; color:#94a3b8; font-size:0.78rem;'>Storage: {html.escape(str(GLOBAL_LIQUIDITY_STORAGE_DIR))}</div>",
+            unsafe_allow_html=True,
+        )
+
+    if force_refresh:
+        with st.spinner("Refreshing official liquidity sources..."):
+            raw, monthly, weekly = update_global_liquidity(api_key=get_fred_api_key_for_app(), force=True)
+    else:
+        update_started = start_global_liquidity_update_if_stale(api_key=get_fred_api_key_for_app())
+        raw, monthly, weekly = read_global_liquidity()
+        if raw.empty and monthly.empty and weekly.empty and not global_liquidity_update_in_progress():
+            with st.spinner("Initial liquidity backfill is running..."):
+                raw, monthly, weekly = update_global_liquidity(api_key=get_fred_api_key_for_app(), force=True)
+        elif update_started or global_liquidity_update_in_progress():
+            st.info("Liquidity data refresh is running in the background. Reload the tab in a moment to see new observations.")
+
+    if raw.empty and monthly.empty and weekly.empty:
+        st.warning("No Global Liquidity data is stored yet.")
+        return
+
+    monthly = _liquidity_prepare_dates(monthly)
+    weekly = _liquidity_prepare_dates(weekly)
+    regime = _build_global_liquidity_regime_frame(monthly, weekly)
+    if regime.empty:
+        st.warning("Global Liquidity Regime cannot be calculated from the current storage.")
+        return
+    latest = _liquidity_latest_row_with_value(regime, "global_liquidity_score")
+    if not latest:
+        latest = _liquidity_latest_row(regime)
+
+    range_choice = st.radio(
+        "Time range",
+        ["1Y", "3Y", "5Y", "10Y", "MAX"],
+        index=2,
+        horizontal=True,
+        key="global_liquidity_regime_range",
+    )
+    chart_frame = _liquidity_filter_range(regime, range_choice)
+
+    st.markdown("### Regime Summary")
+    row1 = st.columns(4)
+    with row1[0]:
+        render_market_metric("Global Liquidity Regime", str(latest.get("final_regime_label", "n/a")), str(latest.get("impulse_state", "n/a")))
+    with row1[1]:
+        render_market_metric("Global Liquidity Score", _liquidity_fmt_number(latest.get("global_liquidity_score"), 1), "0-100 impulse")
+    with row1[2]:
+        render_market_metric("13W Direction", str(latest.get("direction_13w_state", "n/a")), _liquidity_fmt_score_delta(latest.get("direction_13w")))
+    with row1[3]:
+        render_market_metric("Global M2 Trend", str(latest.get("trend_state", "n/a")), _liquidity_fmt_number(latest.get("trend_score"), 2))
+
+    row2 = st.columns(4)
+    with row2[0]:
+        render_market_metric("M2 Impulse", _liquidity_fmt_score_state(latest.get("m2_impulse")), "M2 13W/26W/52W")
+    with row2[1]:
+        render_market_metric("CB Impulse", _liquidity_fmt_score_state(latest.get("cb_impulse")), "global CB assets")
+    with row2[2]:
+        render_market_metric("US Net Liquidity Impulse", _liquidity_fmt_score_state(latest.get("usnl_impulse")), "WALCL - TGA - RRP")
+    with row2[3]:
+        render_market_metric("Long Cycle", str(latest.get("long_cycle_phase", "n/a")), "structural context")
+
+    row3 = st.columns(4)
+    with row3[0]:
+        render_market_metric("Global M2", _liquidity_fmt_trillions(latest.get("global_m2_usd_bn")), "US + EA + China + Japan")
+    with row3[1]:
+        render_market_metric("Global CB Assets", _liquidity_fmt_trillions(latest.get("global_cb_assets_usd_bn")), "Fed + ECB + BoJ + PBoC")
+    with row3[2]:
+        render_market_metric("Last Updated", str(latest.get("last_updated", "n/a")), "")
+    with row3[3]:
+        render_market_metric("Data Status", str(latest.get("data_status", "n/a")), _liquidity_history_start(regime))
+
+    st.markdown("### Global M2")
+    _render_global_m2_level_growth(chart_frame, regime)
+    with st.expander("Global M2 Momentum vs 65M Liquidity Cycle", expanded=True):
+        cycle_range = st.radio(
+            "Long cycle range",
+            ["5Y", "10Y", "MAX"],
+            index=1,
+            horizontal=True,
+            key="global_liquidity_cycle_range",
+        )
+        _render_long_cycle_chart(_liquidity_filter_range(regime, cycle_range))
+
+    _render_global_liquidity_components_chart(chart_frame)
+    _render_liquidity_contribution_chart(chart_frame, "m2")
+    _render_liquidity_contribution_chart(chart_frame, "cb")
+    _render_us_net_liquidity_chart(chart_frame)
+
+    st.markdown("### What Global Liquidity Regime Means for Markets")
+    st.dataframe(_build_liquidity_asset_impact_table(latest), use_container_width=True, hide_index=True)
+
+    st.markdown("### Data Quality")
+    st.dataframe(_build_liquidity_regime_quality_summary(regime), use_container_width=True, hide_index=True)
+    freshness_rows = [
+        {
+            "Block": item.block,
+            "Last Observation": item.last_observation_date,
+            "Last Release": item.last_release_date,
+            "Last Updated": item.last_updated,
+            "Status": item.data_status,
+        }
+        for item in global_liquidity_freshness(raw, monthly, weekly)
+    ]
+    st.dataframe(pd.DataFrame(freshness_rows), use_container_width=True, hide_index=True)
+    with st.expander("Source Details", expanded=False):
+        st.markdown("#### Regional M2")
+        st.dataframe(_build_liquidity_regional_table(raw, monthly), use_container_width=True, hide_index=True)
+        st.markdown("#### Central Bank Assets")
+        st.dataframe(_build_liquidity_cb_table(raw, monthly), use_container_width=True, hide_index=True)
+        st.markdown("#### Raw Sources")
+        st.dataframe(_build_liquidity_quality_table(raw), use_container_width=True, hide_index=True)
+
+    st.markdown("### Methodology")
+    render_market_formula(
+        "Global Liquidity Regime formulas",
+        "Global_M2 = US_M2 + EA_M2 + China_M2 + Japan_M2\n"
+        "TrendScore = 0.50 * I(M2_13W > 0) + 0.30 * I(M2_26W > 0) + 0.20 * I(M2_52W > 0)\n"
+        "M2Impulse = 0.50 * Pctl(M2_13W) + 0.30 * Pctl(M2_26W) + 0.20 * Pctl(M2_52W)\n"
+        "Global_CB_Assets = Fed_Assets + ECB_Assets + BoJ_Assets + PBoC_Assets\n"
+        "CBImpulse = 0.50 * Pctl(CB_13W) + 0.30 * Pctl(CB_26W) + 0.20 * Pctl(CB_52W)\n"
+        "US_Net_Liquidity = WALCL - TGA - RRP\n"
+        "USNLImpulse = 0.50 * Pctl(USNL_4W) + 0.30 * Pctl(USNL_13W) + 0.20 * Pctl(USNL_26W)\n"
+        "GlobalLiquidityScore = 0.50 * M2Impulse + 0.25 * CBImpulse + 0.25 * USNLImpulse\n"
+        "Direction13W = GlobalLiquidityScore_t - GlobalLiquidityScore_t-13W\n\n"
+        "All M2 and central-bank balance-sheet series are already normalized to bn USD. Missing major data is not treated as zero. "
+        "Percentiles are trailing 3Y point-in-time windows. The 65M long cycle is structural context and is not included in the score.",
+    )
+
+
+def _build_global_liquidity_regime_frame(monthly: pd.DataFrame, weekly: pd.DataFrame) -> pd.DataFrame:
+    if monthly.empty and weekly.empty:
+        return pd.DataFrame()
+    monthly_source = _liquidity_weekly_from_monthly(
+        monthly,
+        [
+            "us_m2_usd_bn",
+            "ea_m2_usd_bn",
+            "china_m2_usd_bn",
+            "japan_m2_usd_bn",
+            "fed_assets_usd_bn",
+            "ecb_assets_usd_bn",
+            "boj_assets_usd_bn",
+            "pboc_assets_usd_bn",
+            "last_updated",
+        ],
+    )
+    weekly_source = weekly.set_index("date").sort_index() if not weekly.empty and "date" in weekly.columns else pd.DataFrame()
+    index = monthly_source.index.union(weekly_source.index).sort_values()
+    if index.empty:
+        return pd.DataFrame()
+    frame = pd.DataFrame(index=index)
+    for column in monthly_source.columns:
+        frame[column] = monthly_source[column].reindex(index).ffill()
+    weekly_cols = [
+        "us_net_liquidity_usd_bn",
+        "fed_assets_usd_bn",
+        "tga_usd_bn",
+        "rrp_usd_bn",
+        "last_updated",
+    ]
+    for column in weekly_cols:
+        if column in weekly_source.columns:
+            frame[f"weekly_{column}" if column in frame.columns else column] = weekly_source[column].reindex(index).ffill()
+
+    m2_components = ["us_m2_usd_bn", "ea_m2_usd_bn", "china_m2_usd_bn", "japan_m2_usd_bn"]
+    cb_components = ["fed_assets_usd_bn", "ecb_assets_usd_bn", "boj_assets_usd_bn", "pboc_assets_usd_bn"]
+    frame["global_m2_usd_bn"] = frame[m2_components].sum(axis=1, min_count=4)
+    frame["global_cb_assets_usd_bn"] = frame[cb_components].sum(axis=1, min_count=4)
+    frame["global_m2_partial_usd_bn"] = frame[m2_components].sum(axis=1, min_count=1)
+    frame["global_cb_assets_partial_usd_bn"] = frame[cb_components].sum(axis=1, min_count=1)
+    if "weekly_us_net_liquidity_usd_bn" in frame.columns:
+        frame["us_net_liquidity_usd_bn"] = frame["weekly_us_net_liquidity_usd_bn"]
+
+    for weeks in [4, 13, 26, 52]:
+        frame[f"m2_{weeks}w"] = frame["global_m2_usd_bn"].pct_change(weeks, fill_method=None)
+        frame[f"cb_{weeks}w"] = frame["global_cb_assets_usd_bn"].pct_change(weeks, fill_method=None)
+    for weeks in [4, 13, 26]:
+        frame[f"usnl_{weeks}w"] = frame["us_net_liquidity_usd_bn"].pct_change(weeks, fill_method=None)
+
+    frame["trend_score"] = (
+        0.50 * (frame["m2_13w"] > 0).astype(float)
+        + 0.30 * (frame["m2_26w"] > 0).astype(float)
+        + 0.20 * (frame["m2_52w"] > 0).astype(float)
+    )
+    frame.loc[frame[["m2_13w", "m2_26w", "m2_52w"]].isna().any(axis=1), "trend_score"] = np.nan
+    frame["trend_state"] = frame["trend_score"].map(_liquidity_trend_state)
+
+    frame["m2_13w_pctl"] = _liquidity_trailing_percentile(frame["m2_13w"])
+    frame["m2_26w_pctl"] = _liquidity_trailing_percentile(frame["m2_26w"])
+    frame["m2_52w_pctl"] = _liquidity_trailing_percentile(frame["m2_52w"])
+    frame["cb_13w_pctl"] = _liquidity_trailing_percentile(frame["cb_13w"])
+    frame["cb_26w_pctl"] = _liquidity_trailing_percentile(frame["cb_26w"])
+    frame["cb_52w_pctl"] = _liquidity_trailing_percentile(frame["cb_52w"])
+    frame["usnl_4w_pctl"] = _liquidity_trailing_percentile(frame["usnl_4w"])
+    frame["usnl_13w_pctl"] = _liquidity_trailing_percentile(frame["usnl_13w"])
+    frame["usnl_26w_pctl"] = _liquidity_trailing_percentile(frame["usnl_26w"])
+
+    frame["m2_impulse"] = 0.50 * frame["m2_13w_pctl"] + 0.30 * frame["m2_26w_pctl"] + 0.20 * frame["m2_52w_pctl"]
+    frame["cb_impulse"] = 0.50 * frame["cb_13w_pctl"] + 0.30 * frame["cb_26w_pctl"] + 0.20 * frame["cb_52w_pctl"]
+    frame["usnl_impulse"] = 0.50 * frame["usnl_4w_pctl"] + 0.30 * frame["usnl_13w_pctl"] + 0.20 * frame["usnl_26w_pctl"]
+    frame["global_liquidity_score"] = 0.50 * frame["m2_impulse"] + 0.25 * frame["cb_impulse"] + 0.25 * frame["usnl_impulse"]
+    frame["impulse_state"] = frame["global_liquidity_score"].map(_liquidity_score_state)
+    frame["direction_13w"] = frame["global_liquidity_score"] - frame["global_liquidity_score"].shift(13)
+    frame["direction_13w_state"] = frame["direction_13w"].map(_liquidity_direction_state)
+    frame["long_cycle_phase"] = [ _liquidity_long_cycle_phase(date) for date in frame.index ]
+    frame["long_cycle_value"] = [ _liquidity_long_cycle_value(date) for date in frame.index ]
+    frame["cycle_confirmation"] = _liquidity_cycle_confirmation(frame)
+    frame["final_regime_label"] = frame.apply(_liquidity_final_label, axis=1)
+    frame["data_status"] = np.where(
+        frame[["global_m2_usd_bn", "global_cb_assets_usd_bn", "us_net_liquidity_usd_bn", "global_liquidity_score"]].notna().all(axis=1),
+        "CURRENT",
+        "PARTIAL_DATA",
+    )
+    if "last_updated" not in frame.columns or frame["last_updated"].isna().all():
+        frame["last_updated"] = frame.get("weekly_last_updated", "n/a")
+    frame = frame.reset_index().rename(columns={"index": "date"})
+    return frame
+
+
+def _liquidity_weekly_from_monthly(monthly: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    if monthly.empty or "date" not in monthly.columns:
+        return pd.DataFrame()
+    use_cols = [column for column in columns if column in monthly.columns]
+    if not use_cols:
+        return pd.DataFrame()
+    source = monthly[["date"] + use_cols].dropna(subset=["date"]).copy()
+    source["date"] = pd.to_datetime(source["date"], errors="coerce")
+    source = source.dropna(subset=["date"]).sort_values("date")
+    source = source.set_index("date")
+    weekly_index = pd.date_range(source.index.min(), source.index.max() + pd.offsets.MonthEnd(1), freq="W-FRI")
+    combined_index = source.index.union(weekly_index).sort_values()
+    return source.reindex(combined_index).ffill().reindex(weekly_index).ffill()
+
+
+def _liquidity_trailing_percentile(series: pd.Series, window: int = 156, min_periods: int = 104) -> pd.Series:
+    values = pd.to_numeric(series, errors="coerce")
+
+    def rank_last(window_values: np.ndarray) -> float:
+        clean = window_values[np.isfinite(window_values)]
+        if len(clean) < min_periods or not np.isfinite(window_values[-1]):
+            return np.nan
+        return float((clean <= window_values[-1]).sum() / len(clean) * 100.0)
+
+    return values.rolling(window, min_periods=min_periods).apply(rank_last, raw=True)
+
+
+def _liquidity_trend_state(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "DATA_INCOMPLETE"
+    number = float(value)
+    if number >= 0.80:
+        return "STRONGLY_EXPANDING"
+    if number >= 0.60:
+        return "EXPANDING"
+    if number >= 0.40:
+        return "FLAT_MIXED"
+    if number >= 0.20:
+        return "CONTRACTING"
+    return "STRONGLY_CONTRACTING"
+
+
+def _liquidity_score_state(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "DATA_INCOMPLETE"
+    number = float(value)
+    if number >= 80:
+        return "VERY_STRONG"
+    if number >= 60:
+        return "STRONG"
+    if number >= 40:
+        return "NEUTRAL"
+    if number >= 20:
+        return "WEAK"
+    return "VERY_WEAK"
+
+
+def _liquidity_direction_state(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "DATA_INCOMPLETE"
+    number = float(value)
+    if number > 10:
+        return "ACCELERATING"
+    if number >= 5:
+        return "IMPROVING"
+    if number > -5:
+        return "STABLE"
+    if number >= -10:
+        return "DETERIORATING"
+    return "DETERIORATING_FAST"
+
+
+def _liquidity_long_cycle_phase(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "DATA_INCOMPLETE"
+    date = pd.Timestamp(value)
+    months = _liquidity_cycle_months_since_anchor(date)
+    phase_pos = months % 65.0
+    if phase_pos < 16.25:
+        return "RECOVERY_REACCELERATION"
+    if phase_pos < 32.50:
+        return "ACCELERATING_EXPANSION"
+    if phase_pos < 48.75:
+        return "DECELERATING_EXPANSION"
+    return "CONTRACTION"
+
+
+def _liquidity_long_cycle_value(value: Any) -> float:
+    if value is None or pd.isna(value):
+        return np.nan
+    months = _liquidity_cycle_months_since_anchor(pd.Timestamp(value))
+    return float(-np.cos((months / 65.0) * 2.0 * np.pi) * 100.0)
+
+
+def _liquidity_cycle_months_since_anchor(value: pd.Timestamp) -> float:
+    anchor = pd.Timestamp("2022-10-01")
+    date = pd.Timestamp(value)
+    return (date.year - anchor.year) * 12 + (date.month - anchor.month) + (date.day - 1) / 30.4375
+
+
+def _liquidity_cycle_peak_date(cycle_number: int) -> pd.Timestamp:
+    return pd.Timestamp("2022-10-01") + pd.DateOffset(months=32 + (65 * cycle_number), days=15)
+
+
+def _liquidity_cycle_confirmation(frame: pd.DataFrame) -> pd.Series:
+    roc = pd.to_numeric(frame.get("m2_52w", np.nan), errors="coerce")
+    roc_direction = roc.diff(13)
+    cycle_direction = pd.Series(frame.get("long_cycle_value", np.nan), index=frame.index).diff(13)
+    confirmed = np.sign(roc_direction) == np.sign(cycle_direction)
+    return pd.Series(np.where(confirmed, "CYCLE_CONFIRMED", "LIQUIDITY_CYCLE_DIVERGENCE"), index=frame.index).where(
+        roc_direction.notna() & cycle_direction.notna(),
+        "DATA_INCOMPLETE",
+    )
+
+
+def _liquidity_final_label(row: pd.Series) -> str:
+    score = row.get("global_liquidity_score")
+    direction = row.get("direction_13w")
+    trend = str(row.get("trend_state", ""))
+    if score is None or direction is None or pd.isna(score) or pd.isna(direction):
+        return "DATA_INCOMPLETE"
+    score = float(score)
+    direction = float(direction)
+    if score >= 80 and direction >= 5:
+        return "STRONG_EXPANSION"
+    if score >= 60 and direction >= -5:
+        return "EXPANSION"
+    if score >= 40 and direction > 5:
+        return "REACCELERATION"
+    if score >= 40 and direction < -10:
+        return "LIQUIDITY_WARNING"
+    if score >= 40:
+        return "DECELERATING_EXPANSION" if "EXPANDING" in trend else "NEUTRAL"
+    if score < 20:
+        return "STRONG_CONTRACTION"
+    return "CONTRACTION"
+
+
+def _liquidity_filter_range(frame: pd.DataFrame, range_key: str) -> pd.DataFrame:
+    if frame.empty or range_key == "MAX":
+        return frame
+    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(range_key)
+    if years is None or "date" not in frame.columns:
+        return frame
+    max_date = pd.to_datetime(frame["date"], errors="coerce").max()
+    if pd.isna(max_date):
+        return frame
+    return frame[pd.to_datetime(frame["date"], errors="coerce") >= max_date - pd.DateOffset(years=years)].copy()
+
+
+def _liquidity_fmt_score_state(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{float(value):.1f} / {_liquidity_score_state(value)}"
+
+
+def _liquidity_fmt_score_delta(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{float(value):+.1f} score pts"
+
+
+def _liquidity_history_start(frame: pd.DataFrame) -> str:
+    if frame.empty or "date" not in frame.columns:
+        return "History Start: n/a"
+    rows = frame.dropna(subset=["global_liquidity_score"])
+    if rows.empty:
+        rows = frame.dropna(subset=["global_m2_usd_bn", "global_cb_assets_usd_bn", "us_net_liquidity_usd_bn"], how="all")
+    if rows.empty:
+        return "History Start: n/a"
+    return f"History Start: {pd.Timestamp(rows['date'].iloc[0]).strftime('%Y-%m-%d')}"
+
+
+LIQUIDITY_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
+
+
+def _style_liquidity_plotly(fig: go.Figure, height: int, title: str) -> go.Figure:
+    fig.update_layout(
+        title=title,
+        height=height,
+        paper_bgcolor="#0f131a",
+        plot_bgcolor="#0f131a",
+        font={"color": "#e5e7eb", "size": 11},
+        margin={"l": 58, "r": 72, "t": 62, "b": 42},
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "top", "y": -0.16, "xanchor": "left", "x": 0},
+    )
+    fig.update_xaxes(
+        tickformat="%b'%y",
+        showgrid=False,
+        zeroline=False,
+        color="#cbd5e1",
+        linecolor="#475569",
+        ticks="outside",
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="#263241",
+        zeroline=False,
+        color="#cbd5e1",
+        linecolor="#475569",
+        ticks="outside",
+    )
+    return fig
+
+
+def _render_global_m2_level_growth(frame: pd.DataFrame, full_frame: pd.DataFrame) -> None:
+    growth_choice = st.selectbox("Global M2 Growth", ["13W ROC", "26W ROC", "52W / YoY"], index=2, key="global_m2_growth_selector")
+    growth_col = {"13W ROC": "m2_13w", "26W ROC": "m2_26w", "52W / YoY": "m2_52w"}[growth_choice]
+    if frame.empty:
+        st.info("No data for Global M2 - Level and Growth.")
+        return
+    chart_df = frame[["date", "global_m2_usd_bn", growth_col, "long_cycle_phase"]].copy()
+    chart_df["level"] = pd.to_numeric(chart_df["global_m2_usd_bn"], errors="coerce") / 1000.0
+    chart_df["growth"] = pd.to_numeric(chart_df[growth_col], errors="coerce") * 100.0
+    chart_df = chart_df.dropna(subset=["date"])
+    if chart_df.empty:
+        st.info("No data for Global M2 - Level and Growth.")
+        return
+    bands = _liquidity_phase_bands(full_frame, frame)
+    fig = go.Figure()
+    phase_colors = {
+        "RECOVERY_REACCELERATION": "#22c55e",
+        "ACCELERATING_EXPANSION": "#84cc16",
+        "DECELERATING_EXPANSION": "#facc15",
+        "CONTRACTION": "#ef4444",
+    }
+    for _, band in bands.iterrows():
+        fig.add_vrect(
+            x0=band["start"],
+            x1=band["end"],
+            fillcolor=phase_colors.get(str(band["Phase"]), "#64748b"),
+            opacity=0.16,
+            line_width=0,
+        )
+    level_df = chart_df.dropna(subset=["level"])
+    growth_df = chart_df.dropna(subset=["growth"])
+    fig.add_trace(
+        go.Scatter(
+            x=level_df["date"],
+            y=level_df["level"],
+            mode="lines",
+            name="Global M2",
+            line={"color": "#38bdf8", "width": 2.2},
+            hovertemplate="Date: %{x|%Y-%m-%d}<br>Global M2: %{y:.2f}T<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=growth_df["date"],
+            y=growth_df["growth"],
+            mode="lines",
+            name=growth_choice,
+            yaxis="y2",
+            line={"color": "#f97316", "width": 1.8},
+            hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{growth_choice}: %{{y:.2f}}%<extra></extra>",
+        )
+    )
+    fig.add_shape(type="line", xref="paper", x0=0, x1=1, yref="y2", y0=0, y1=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+    fig.update_layout(
+        yaxis={"title": "Global M2, USD tn"},
+        yaxis2={"title": f"{growth_choice}, %", "overlaying": "y", "side": "right", "showgrid": False},
+    )
+    st.plotly_chart(_style_liquidity_plotly(fig, 360, "Global M2 - Level and Growth"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _liquidity_phase_bands(full_frame: pd.DataFrame, visible_frame: pd.DataFrame) -> pd.DataFrame:
+    if full_frame.empty or visible_frame.empty:
+        return pd.DataFrame(columns=["start", "end", "Phase"])
+    dates = pd.to_datetime(full_frame["date"], errors="coerce")
+    phases = full_frame["long_cycle_phase"].astype(str)
+    rows = []
+    start = None
+    current = None
+    last_date = None
+    min_visible = pd.to_datetime(visible_frame["date"], errors="coerce").min()
+    max_visible = pd.to_datetime(visible_frame["date"], errors="coerce").max()
+    for date, phase in zip(dates, phases):
+        if pd.isna(date):
+            continue
+        if current is None:
+            start = date
+            current = phase
+        elif phase != current:
+            rows.append({"start": max(start, min_visible), "end": min(last_date, max_visible), "Phase": current})
+            start = date
+            current = phase
+        last_date = date
+    if current is not None and start is not None and last_date is not None:
+        rows.append({"start": max(start, min_visible), "end": min(last_date, max_visible), "Phase": current})
+    bands = pd.DataFrame(rows)
+    if bands.empty:
+        return bands
+    return bands[bands["end"] >= bands["start"]]
+
+
+def _render_global_liquidity_components_chart(frame: pd.DataFrame) -> None:
+    mapping = {
+        "GlobalLiquidityScore": "global_liquidity_score",
+        "M2Impulse": "m2_impulse",
+        "CBImpulse": "cb_impulse",
+        "USNLImpulse": "usnl_impulse",
+    }
+    fig = go.Figure()
+    colors = {
+        "GlobalLiquidityScore": "#f8fafc",
+        "M2Impulse": "#38bdf8",
+        "CBImpulse": "#a78bfa",
+        "USNLImpulse": "#22c55e",
+    }
+    added = False
+    for label, column in mapping.items():
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        d = pd.DataFrame({"date": frame["date"], "value": values}).dropna()
+        if d.empty:
+            continue
+        added = True
+        fig.add_trace(
+            go.Scatter(
+                x=d["date"],
+                y=d["value"],
+                mode="lines",
+                name=label,
+                line={"color": colors.get(label, "#cbd5e1"), "width": 1.9},
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{label}: %{{y:.1f}}<extra></extra>",
+            )
+        )
+    if not added:
+        st.info("No data for Global Liquidity Score - Components.")
+        return
+    for level in [20, 40, 60, 80]:
+        fig.add_hline(y=level, line={"color": "#94a3b8", "dash": "dot", "width": 1}, opacity=0.55)
+    fig.update_layout(yaxis={"title": "Score", "range": [0, 100]})
+    st.plotly_chart(_style_liquidity_plotly(fig, 320, "Global Liquidity Score - Components"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _render_liquidity_contribution_chart(frame: pd.DataFrame, block: str) -> None:
+    horizon = st.selectbox(
+        "Regional M2 horizon" if block == "m2" else "Central Bank horizon",
+        ["13W", "26W", "52W"],
+        index=0,
+        key=f"global_liquidity_{block}_contribution_horizon",
+    )
+    weeks = int(horizon.replace("W", ""))
+    if block == "m2":
+        title = "Global M2 - Regional Contribution"
+        components = {
+            "US": "us_m2_usd_bn",
+            "Euro Area": "ea_m2_usd_bn",
+            "China": "china_m2_usd_bn",
+            "Japan": "japan_m2_usd_bn",
+        }
+        total_col = "global_m2_usd_bn"
+    else:
+        title = "Global Central Bank Assets - Regional Impulse"
+        components = {
+            "Fed": "fed_assets_usd_bn",
+            "ECB": "ecb_assets_usd_bn",
+            "BoJ": "boj_assets_usd_bn",
+            "PBoC": "pboc_assets_usd_bn",
+        }
+        total_col = "global_cb_assets_usd_bn"
+    rows = []
+    for label, column in components.items():
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce").diff(weeks)
+        for date, value in zip(frame["date"], values):
+            if pd.notna(date) and np.isfinite(value):
+                rows.append({"Date": date, "Component": label, "Change": float(value)})
+    chart_df = pd.DataFrame(rows)
+    total = pd.DataFrame()
+    if total_col in frame.columns:
+        total = pd.DataFrame({"Date": frame["date"], "Total Change": pd.to_numeric(frame[total_col], errors="coerce").diff(weeks)})
+        total = total.dropna(subset=["Date", "Total Change"])
+    if chart_df.empty:
+        st.info(f"No data for {title}.")
+        return
+    fig = go.Figure()
+    palette = ["#38bdf8", "#a78bfa", "#22c55e", "#facc15"]
+    for idx, component in enumerate(chart_df["Component"].drop_duplicates()):
+        d = chart_df[chart_df["Component"].eq(component)]
+        fig.add_trace(
+            go.Bar(
+                x=d["Date"],
+                y=d["Change"],
+                name=component,
+                marker_color=palette[idx % len(palette)],
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{component}: %{{y:,.0f}}B<extra></extra>",
+            )
+        )
+    if not total.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=total["Date"],
+                y=total["Total Change"],
+                mode="lines",
+                name="Global total change",
+                line={"color": "#f8fafc", "width": 1.8},
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>Total: %{y:,.0f}B<extra></extra>",
+            )
+        )
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+    fig.update_layout(barmode="relative", yaxis={"title": f"{horizon} change, USD bn"})
+    st.plotly_chart(_style_liquidity_plotly(fig, 320, title), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _render_us_net_liquidity_chart(frame: pd.DataFrame) -> None:
+    if frame.empty:
+        st.info("No data for US Net Liquidity - Fed / TGA / RRP.")
+        return
+    rows = []
+    mapping = {
+        "US Net Liquidity": ("us_net_liquidity_usd_bn", 1000.0),
+        "Fed Assets": ("weekly_fed_assets_usd_bn", 1000.0),
+        "-TGA": ("tga_usd_bn", -1000.0),
+        "-RRP": ("rrp_usd_bn", -1000.0),
+    }
+    for label, (column, divisor) in mapping.items():
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce") / divisor
+        for date, value in zip(frame["date"], values):
+            if pd.notna(date) and np.isfinite(value):
+                rows.append({"Date": date, "Series": label, "Value": float(value)})
+    chart_df = pd.DataFrame(rows)
+    change = pd.DataFrame({"Date": frame["date"], "13W change": pd.to_numeric(frame.get("usnl_13w", np.nan), errors="coerce") * 100.0}).dropna()
+    if chart_df.empty:
+        st.info("No data for US Net Liquidity - Fed / TGA / RRP.")
+        return
+    fig = go.Figure()
+    colors = {"US Net Liquidity": "#38bdf8", "Fed Assets": "#22c55e", "-TGA": "#f97316", "-RRP": "#a78bfa"}
+    for series in chart_df["Series"].drop_duplicates():
+        d = chart_df[chart_df["Series"].eq(series)]
+        fig.add_trace(
+            go.Scatter(
+                x=d["Date"],
+                y=d["Value"],
+                mode="lines",
+                name=series,
+                line={"color": colors.get(series, "#cbd5e1"), "width": 1.8},
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{series}: %{{y:.2f}}T<extra></extra>",
+            )
+        )
+    if not change.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=change["Date"],
+                y=change["13W change"],
+                mode="lines",
+                name="13W change",
+                yaxis="y2",
+                line={"color": "#facc15", "width": 1.5, "dash": "dash"},
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>13W change: %{y:.2f}%<extra></extra>",
+            )
+        )
+        fig.update_layout(yaxis2={"title": "13W change, %", "overlaying": "y", "side": "right", "showgrid": False})
+    fig.update_layout(yaxis={"title": "USD tn"})
+    st.plotly_chart(_style_liquidity_plotly(fig, 340, "US Net Liquidity - Fed / TGA / RRP"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _render_long_cycle_chart(frame: pd.DataFrame) -> None:
+    if frame.empty:
+        st.info("No data for Global M2 Momentum vs 65M Liquidity Cycle.")
+        return
+    m2_roc = pd.to_numeric(frame.get("m2_52w", np.nan), errors="coerce")
+    normalized = _liquidity_rolling_zscore(m2_roc, 156, 104).clip(-2, 2) * 50.0
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    min_date = dates.min()
+    max_date = dates.max()
+    current_peak = _liquidity_cycle_peak_date(0)
+    next_peak = _liquidity_cycle_peak_date(1)
+    cycle_end = max(max_date, next_peak) if pd.notna(max_date) else next_peak
+    cycle_dates = pd.date_range(min_date, cycle_end, freq="W-FRI") if pd.notna(min_date) else pd.DatetimeIndex([])
+    cycle = pd.Series([_liquidity_long_cycle_value(date) for date in cycle_dates], index=cycle_dates)
+    rows = []
+    for date, value in zip(frame["date"], normalized):
+        if pd.notna(date) and np.isfinite(value):
+            rows.append({"Date": date, "Series": "Normalized Global M2 ROC", "Value": float(value)})
+    for date, value in cycle.items():
+        if pd.notna(date) and np.isfinite(value):
+            rows.append({"Date": date, "Series": "65M Reference Cycle", "Value": float(value)})
+    chart_df = pd.DataFrame(rows)
+    if chart_df.empty:
+        st.info("No data for Global M2 Momentum vs 65M Liquidity Cycle.")
+        return
+    latest = _liquidity_latest_row(frame)
+    st.caption(f"Informational status: {latest.get('cycle_confirmation', 'n/a')}")
+    fig = go.Figure()
+    colors = {"Normalized Global M2 ROC": "#38bdf8", "65M Reference Cycle": "#facc15"}
+    for series in chart_df["Series"].drop_duplicates():
+        d = chart_df[chart_df["Series"].eq(series)]
+        fig.add_trace(
+            go.Scatter(
+                x=d["Date"],
+                y=d["Value"],
+                mode="lines",
+                name=series,
+                line={"color": colors.get(series, "#cbd5e1"), "width": 1.8},
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{series}: %{{y:.1f}}<extra></extra>",
+            )
+        )
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+    trough = pd.Timestamp("2022-10-01")
+    for marker_date, label, color in [
+        (trough, "Cycle trough Oct 2022", "#ef4444"),
+        (current_peak, "Current cycle peak", "#22c55e"),
+        (next_peak, "Next cycle peak", "#22c55e"),
+    ]:
+        if pd.notna(min_date) and marker_date >= min_date and marker_date <= cycle_end:
+            marker_x = marker_date.strftime("%Y-%m-%d")
+            fig.add_shape(
+                type="line",
+                xref="x",
+                yref="paper",
+                x0=marker_x,
+                x1=marker_x,
+                y0=0,
+                y1=1,
+                line={"color": color, "dash": "dot", "width": 1},
+            )
+            fig.add_annotation(
+                x=marker_x,
+                y=1.03,
+                xref="x",
+                yref="paper",
+                text=label,
+                showarrow=False,
+                font={"color": color, "size": 10},
+                xanchor="left",
+            )
+    fig.update_layout(yaxis={"title": "-100 to +100", "range": [-100, 100]})
+    st.plotly_chart(_style_liquidity_plotly(fig, 300, "Global M2 Momentum vs 65M Liquidity Cycle"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _liquidity_rolling_zscore(series: pd.Series, window: int, min_periods: int) -> pd.Series:
+    values = pd.to_numeric(series, errors="coerce")
+    mean = values.rolling(window, min_periods=min_periods).mean()
+    std = values.rolling(window, min_periods=min_periods).std(ddof=0)
+    return (values - mean) / std.replace(0.0, np.nan)
+
+
+def _build_liquidity_asset_impact_table(latest: dict[str, Any]) -> pd.DataFrame:
+    score = latest.get("global_liquidity_score")
+    direction = latest.get("direction_13w")
+    long_cycle = str(latest.get("long_cycle_phase", "n/a"))
+    final_label = str(latest.get("final_regime_label", "n/a"))
+    score_value = float(score) if score is not None and not pd.isna(score) else np.nan
+    direction_value = float(direction) if direction is not None and not pd.isna(direction) else np.nan
+
+    spy_bias = _liquidity_asset_bias(score_value, direction_value, sensitivity=1.0)
+    qqq_bias = _liquidity_asset_bias(score_value, direction_value, sensitivity=1.25)
+    btc_bias = _liquidity_asset_bias(score_value, direction_value, sensitivity=1.15)
+    gld_bias = "Neutral" if long_cycle != "CONTRACTION" else "Neutral / weaker structural backdrop"
+
+    return pd.DataFrame(
+        [
+            {
+                "Asset": "SPY",
+                "Liquidity Bias": spy_bias,
+                "Horizon": "8-12W",
+                "Long-Cycle Context": long_cycle,
+                "Historical Regime Context": "Strong/improving liquidity is historically favorable; weak/deteriorating liquidity is a correction-risk modifier.",
+                "Confidence": "MEDIUM",
+                "Current Implication": _liquidity_asset_text("SPY", spy_bias, final_label),
+            },
+            {
+                "Asset": "QQQ",
+                "Liquidity Bias": qqq_bias,
+                "Horizon": "8-12W",
+                "Long-Cycle Context": long_cycle,
+                "Historical Regime Context": "More sensitive than SPY; accelerating expansion was strongest and contraction was weakest in long-cycle tests.",
+                "Confidence": "MEDIUM_HIGH",
+                "Current Implication": _liquidity_asset_text("QQQ", qqq_bias, final_label),
+            },
+            {
+                "Asset": "GLD",
+                "Liquidity Bias": gld_bias,
+                "Horizon": "Structural",
+                "Long-Cycle Context": long_cycle,
+                "Historical Regime Context": "Global Liquidity Score is not a core short-term gold signal; long-cycle context is more relevant.",
+                "Confidence": "MEDIUM",
+                "Current Implication": "Gold remains driven primarily by DXY, real yields, US2Y, Gold Tactical Flow and Gold Alpha.",
+            },
+            {
+                "Asset": "BTC-USD",
+                "Liquidity Bias": btc_bias,
+                "Horizon": "4-12W",
+                "Long-Cycle Context": "Informational only",
+                "Historical Regime Context": "Global Liquidity Score is a meaningful macro modifier, but its BTC relationship is unstable across subperiods.",
+                "Confidence": "MEDIUM_LOW",
+                "Current Implication": "Macro liquidity can be overridden by trend, ETF flows, open interest, funding, basis and crypto-specific liquidity.",
+            },
+        ]
+    )
+
+
+def _liquidity_asset_bias(score: float, direction: float, sensitivity: float = 1.0) -> str:
+    if not np.isfinite(score) or not np.isfinite(direction):
+        return "Data incomplete"
+    adjusted = (score - 50.0) + direction * sensitivity
+    if score >= 60 and direction > 5:
+        return "Positive"
+    if adjusted <= -20 or (score < 40 and direction < -5):
+        return "Caution / negative liquidity modifier"
+    if adjusted <= -8:
+        return "Neutral / caution"
+    if adjusted >= 12:
+        return "Constructive"
+    return "Neutral"
+
+
+def _liquidity_asset_text(asset: str, bias: str, final_label: str) -> str:
+    if "negative" in bias.lower() or "caution" in bias.lower():
+        return f"{asset} has a weaker liquidity backdrop under {final_label}; this is a risk modifier, not an automatic sell signal."
+    if bias in {"Positive", "Constructive"}:
+        return f"{asset} has a historically more favorable liquidity backdrop under {final_label}."
+    return f"{asset} has a mixed liquidity backdrop under {final_label}."
+
+
+def _build_liquidity_regime_quality_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    specs = [
+        ("Global M2", "global_m2_usd_bn"),
+        ("Global CB Assets", "global_cb_assets_usd_bn"),
+        ("US Net Liquidity", "us_net_liquidity_usd_bn"),
+    ]
+    for label, column in specs:
+        if frame.empty or column not in frame.columns:
+            rows.append({"Block": label, "History Start": "n/a", "Last Observation": "n/a", "Last Updated": "n/a", "Status": "MISSING"})
+            continue
+        rows_with_values = frame.dropna(subset=[column])
+        status = "CURRENT" if not rows_with_values.empty else "MISSING"
+        rows.append(
+            {
+                "Block": label,
+                "History Start": _liquidity_fmt_date(rows_with_values["date"].min() if not rows_with_values.empty else None),
+                "Last Observation": _liquidity_fmt_date(rows_with_values["date"].max() if not rows_with_values.empty else None),
+                "Last Updated": str(frame["last_updated"].dropna().iloc[-1]) if "last_updated" in frame.columns and frame["last_updated"].notna().any() else "n/a",
+                "Status": status,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+BTC_SPOT_ETF_FLOW_TICKERS = ("IBIT", "FBTC", "GBTC", "ARKB", "BITB", "BTCO", "EZBC", "HODL", "BRRR", "BTCW")
+BTC_HALVING_EVENTS = [
+    {"date": pd.Timestamp("2016-07-09"), "label": "2016 Halving", "price": 650.0},
+    {"date": pd.Timestamp("2020-05-11"), "label": "2020 Halving", "price": 8600.0},
+    {"date": pd.Timestamp("2024-04-20"), "label": "2024 Halving", "price": 63800.0},
+]
+BTC_CYCLE_TOPS = [
+    {"date": pd.Timestamp("2017-12-17"), "label": "2017 Top", "price": 19666.0},
+    {"date": pd.Timestamp("2021-11-10"), "label": "2021 Top", "price": 69000.0},
+    {"date": pd.Timestamp("2025-10-01"), "label": "2025 Top", "price": 126000.0},
+]
+BTC_CYCLE_BOTTOMS = [
+    {"date": pd.Timestamp("2015-01-14"), "label": "2015 Bottom", "price": 172.0},
+    {"date": pd.Timestamp("2018-12-15"), "label": "2018 Bottom", "price": 3200.0},
+    {"date": pd.Timestamp("2022-11-21"), "label": "2022 Bottom", "price": 15600.0},
+]
+BTC_CURRENT_CYCLE_TOP_DATE = pd.Timestamp("2025-10-01")
+BTC_CURRENT_CYCLE_TOP_PRICE = 126000.0
+
+
+def render_btc_regime_tab(table_df: pd.DataFrame, market_snapshot: dict) -> None:
+    st.subheader("BTC Regime")
+    btc_price = load_btc_weekly_price()
+    raw, monthly, weekly = read_global_liquidity()
+    liquidity = _build_global_liquidity_regime_frame(_liquidity_prepare_dates(monthly), _liquidity_prepare_dates(weekly))
+    liquidity_latest = _liquidity_latest_row_with_value(liquidity, "global_liquidity_score")
+    btc_row = _btc_alpha_row(table_df)
+    bybit = _btc_bybit_history()
+    etf = _btc_etf_flow_history()
+    snapshot = _build_btc_regime_snapshot(btc_price, liquidity_latest, btc_row, bybit, etf, market_snapshot)
+
+    st.markdown("### BTC Regime Summary")
+    summary_cols = st.columns(4)
+    with summary_cols[0]:
+        render_market_metric("Halving Phase", snapshot["halving_phase"], f"{snapshot['months_since_halving']:.1f}M since halving")
+    with summary_cols[1]:
+        render_market_metric("Cycle Status", snapshot["cycle_bottom_status"], snapshot["bottom_note"])
+    with summary_cols[2]:
+        render_market_metric("Global Liquidity Regime", snapshot["global_liquidity_label"], f"{snapshot['liquidity_direction']} | {snapshot['long_cycle_phase']}")
+    with summary_cols[3]:
+        render_market_metric("Tactical Flow State", snapshot["tactical_flow_state"], snapshot["tactical_note"])
+
+    summary_cols = st.columns(4)
+    with summary_cols[0]:
+        render_market_metric("BTC REGIME", snapshot["final_state"], snapshot["final_note"])
+    with summary_cols[1]:
+        render_market_metric("BTC Structural Macro", _liquidity_fmt_score_state(snapshot["structural_macro"]), "Liquidity 40% + DXY 40% + US2Y 20%")
+    with summary_cols[2]:
+        render_market_metric("BTC Forward Macro Risk", f"{_liquidity_fmt_number(snapshot['forward_macro_risk'], 1)} / {snapshot['forward_macro_risk_state']}", "DXY 55% + US2Y 30% + liquidity 15%")
+    with summary_cols[3]:
+        render_market_metric("BTC Alpha", _liquidity_fmt_score_state(snapshot["btc_alpha"]), "existing Alpha Engine")
+
+    st.markdown("### BTC Regime Interpretation")
+    render_market_formula("Current interpretation", _btc_interpretation_text(snapshot))
+
+    st.markdown("### BTC Price - Halving Cycle")
+    btc_range = st.radio("BTC chart range", ["3Y", "5Y", "10Y", "MAX"], index=1, horizontal=True, key="btc_regime_price_range")
+    btc_price_chart = _filter_date_range(btc_price, btc_range)
+    btc_x_range = _btc_x_range(btc_price_chart)
+    _render_btc_price_halving_chart(btc_price_chart, liquidity, btc_x_range)
+    _render_btc_etf_flow_intensity_chart(etf, btc_x_range)
+
+    st.markdown("### Structural Matrix")
+    st.dataframe(_btc_halving_liquidity_matrix(snapshot), use_container_width=True, hide_index=True)
+
+    st.markdown("### BTC Macro Regime")
+    btc_macro_frame = _build_btc_macro_frame(liquidity, market_snapshot, btc_x_range)
+    _render_btc_macro_score_chart(btc_macro_frame, "BTCStructuralMacro", "BTC Structural Macro", "#22c55e")
+    _render_btc_macro_score_chart(btc_macro_frame, "BTCForwardMacroRisk", "BTC Forward Macro Risk", "#ef4444")
+    st.markdown("### BTC Trend / Alpha")
+    st.dataframe(_btc_alpha_table(btc_row), use_container_width=True, hide_index=True)
+
+    st.markdown("### BTC Tactical Flows")
+    st.dataframe(_btc_tactical_table(snapshot, etf, bybit), use_container_width=True, hide_index=True)
+
+    st.markdown("### BTC Cycle Bottom Monitor")
+    st.dataframe(_btc_bottom_monitor(snapshot), use_container_width=True, hide_index=True)
+
+    st.markdown("### BTC Mature Cycle Multiples")
+    _render_btc_cycle_multiples_chart()
+    st.markdown("### BTC Cycle Valuation")
+    st.dataframe(_btc_valuation_table(snapshot), use_container_width=True, hide_index=True)
+    st.markdown("### Historical Cycle Table")
+    st.dataframe(_btc_cycle_table(), use_container_width=True, hide_index=True)
+    st.markdown("### Data Quality")
+    st.dataframe(_btc_data_quality_table(btc_price, etf, bybit, liquidity_latest), use_container_width=True, hide_index=True)
+
+
+@st.cache_data(show_spinner=False, ttl=SLOW_REFRESH_SECONDS)
+def load_btc_weekly_price() -> pd.DataFrame:
+    daily = download_completed_ohlcv("BTC-USD", period="max")
+    if daily.empty:
+        return pd.DataFrame(columns=["date", "Open", "High", "Low", "Close", "Volume"])
+    weekly = daily.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna(subset=["Close"])
+    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    weekly = weekly[weekly.index <= today]
+    return weekly.reset_index().rename(columns={"index": "date", "Date": "date"})
+
+
+def _btc_alpha_row(table_df: pd.DataFrame) -> dict[str, Any]:
+    if table_df.empty or "Ticker" not in table_df.columns:
+        return {}
+    rows = table_df[table_df["Ticker"].astype(str).str.upper().eq("BTC-USD")]
+    return rows.tail(1).to_dict("records")[0] if not rows.empty else {}
+
+
+def _btc_bybit_history() -> pd.DataFrame:
+    try:
+        data = read_bybit_storage(BYBIT_STORAGE_PATH)
+    except Exception:
+        return pd.DataFrame()
+    if data.empty:
+        return data
+    out = data[data["asset"].astype(str).str.upper().eq("BTC-USD")].copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    out = out.dropna(subset=["date"]).loc[lambda frame: frame["date"] <= today].sort_values("date")
+    if "oi_change_4w_pct" in out.columns:
+        computed_percentile = _liquidity_trailing_percentile(
+            pd.to_numeric(out["oi_change_4w_pct"], errors="coerce"),
+            156,
+            52,
+        )
+        if "oi_change_4w_percentile" not in out.columns:
+            out["oi_change_4w_percentile"] = computed_percentile
+        else:
+            out["oi_change_4w_percentile"] = pd.to_numeric(out["oi_change_4w_percentile"], errors="coerce").fillna(computed_percentile)
+    return out
+
+
+def _btc_etf_flow_history() -> pd.DataFrame:
+    cache = FundFlowCache(default_fund_flow_cache_path())
+    frames = []
+    for ticker in BTC_SPOT_ETF_FLOW_TICKERS:
+        observations = cache.load_observations(ticker, pd.Timestamp("2024-01-01").date())
+        if not observations:
+            continue
+        frames.append(
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime([obs.date for obs in observations]),
+                    "ticker": ticker,
+                    "net_flow": [obs.net_flow for obs in observations],
+                    "aum": [obs.aum for obs in observations],
+                }
+            )
+        )
+    if not frames:
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "ETF_Flow_1W",
+                "ETF_Flow_4W",
+                "ETF_Flow_13W",
+                "ETF_Flow_Intensity_4W",
+                "ETF_Flow_3Y_Pctl",
+                "ETF_Flow_13W_Pctl",
+                "ETF_Total_AUM",
+                "ETF_Coverage_Count",
+            ]
+        )
+    daily = pd.concat(frames, ignore_index=True)
+    daily["net_flow"] = pd.to_numeric(daily["net_flow"], errors="coerce")
+    daily["aum"] = pd.to_numeric(daily["aum"], errors="coerce")
+    weekly_by_ticker = (
+        daily.dropna(subset=["date", "net_flow"])
+        .set_index("date")
+        .groupby("ticker")
+        .resample("W-FRI")
+        .agg(net_flow=("net_flow", "sum"), aum=("aum", "last"))
+        .dropna(subset=["net_flow"])
+        .reset_index()
+    )
+    weekly = (
+        weekly_by_ticker.groupby("date")
+        .agg(
+            ETF_Flow_1W=("net_flow", "sum"),
+            ETF_Total_AUM=("aum", "sum"),
+            ETF_Coverage_Count=("ticker", "nunique"),
+        )
+        .sort_index()
+    )
+    weekly["ETF_Flow_4W"] = weekly["ETF_Flow_1W"].rolling(4, min_periods=1).sum()
+    weekly["ETF_Flow_13W"] = weekly["ETF_Flow_1W"].rolling(13, min_periods=1).sum()
+    aum_ref = pd.to_numeric(weekly["ETF_Total_AUM"], errors="coerce").replace(0.0, np.nan)
+    weekly["ETF_Flow_Intensity_4W"] = (weekly["ETF_Flow_4W"] / aum_ref) * 100.0
+    fallback_scale = weekly["ETF_Flow_1W"].abs().rolling(156, min_periods=52).median()
+    fallback_intensity = weekly["ETF_Flow_4W"] / (4.0 * fallback_scale.replace(0.0, np.nan))
+    weekly["ETF_Flow_Intensity_4W"] = weekly["ETF_Flow_Intensity_4W"].where(weekly["ETF_Flow_Intensity_4W"].notna(), fallback_intensity)
+    weekly["ETF_Flow_3Y_Pctl"] = _liquidity_trailing_percentile(weekly["ETF_Flow_Intensity_4W"], 156, 52)
+    weekly["ETF_Flow_13W_Pctl"] = _liquidity_trailing_percentile(weekly["ETF_Flow_13W"], 156, 104)
+    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    weekly = weekly[weekly.index <= today]
+    return weekly.reset_index()
+
+
+def _build_btc_regime_snapshot(
+    price: pd.DataFrame,
+    liquidity: dict[str, Any],
+    btc_row: dict[str, Any],
+    bybit: pd.DataFrame,
+    etf: pd.DataFrame,
+    market: dict,
+) -> dict[str, Any]:
+    current_date = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    latest_price = _btc_latest_price(price)
+    halving = max([event for event in BTC_HALVING_EVENTS if event["date"] <= current_date], key=lambda item: item["date"])
+    months_since_halving = _months_between(halving["date"], current_date)
+    months_since_top = _months_between(BTC_CURRENT_CYCLE_TOP_DATE, current_date) if current_date >= BTC_CURRENT_CYCLE_TOP_DATE else np.nan
+    phase = _btc_halving_phase(months_since_halving)
+    liq_score = _safe_float(liquidity.get("global_liquidity_score"))
+    liq_direction = str(liquidity.get("direction_13w_state", "DATA_INCOMPLETE"))
+    dxy_risk = _safe_float(market.get("Macro_DXY_Risk", market.get("DXY_Risk")))
+    us2y_risk = _safe_float(market.get("US2Y_Risk"))
+    liquidity_risk = 100.0 - liq_score if np.isfinite(liq_score) else np.nan
+    structural_macro = _weighted_mean([liq_score, 100.0 - dxy_risk, 100.0 - us2y_risk], [0.40, 0.40, 0.20])
+    forward_macro_risk = _weighted_mean([dxy_risk, us2y_risk, liquidity_risk], [0.55, 0.30, 0.15])
+    alpha = _safe_float(btc_row.get("Alpha_Score"))
+    latest_etf = _liquidity_latest_row(etf)
+    latest_bybit = _liquidity_latest_row(bybit)
+    tactical_state, tactical_note = _btc_tactical_state(latest_etf, latest_bybit, alpha)
+    bottom_status, bottom_note = _btc_bottom_status(phase, liq_direction, alpha, latest_etf, latest_bybit, forward_macro_risk)
+    final_state, final_note = _btc_final_state(phase, liq_score, liq_direction, alpha, structural_macro, forward_macro_risk, tactical_state, bottom_status)
+    multiple = _btc_expected_multiple(liq_score, liq_direction)
+    candidate_bottom = _btc_candidate_bottom(price)
+    drawdown = (latest_price / BTC_CURRENT_CYCLE_TOP_PRICE - 1.0) if np.isfinite(latest_price) else np.nan
+    return {
+        "date": current_date,
+        "btc_price": latest_price,
+        "halving_date": halving["date"],
+        "halving_price": halving["price"],
+        "halving_phase": phase,
+        "months_since_halving": months_since_halving,
+        "months_since_cycle_top": months_since_top,
+        "global_liquidity_label": str(liquidity.get("final_regime_label", "n/a")),
+        "global_liquidity_score": liq_score,
+        "liquidity_direction": liq_direction,
+        "long_cycle_phase": str(liquidity.get("long_cycle_phase", "n/a")),
+        "structural_macro": structural_macro,
+        "forward_macro_risk": forward_macro_risk,
+        "forward_macro_risk_state": _btc_risk_state(forward_macro_risk),
+        "btc_alpha": alpha,
+        "tactical_flow_state": tactical_state,
+        "tactical_note": tactical_note,
+        "cycle_bottom_status": bottom_status,
+        "bottom_note": bottom_note,
+        "final_state": final_state,
+        "final_note": final_note,
+        "expected_multiple": multiple,
+        "expected_multiple_label": f"{multiple[0]:.1f}x-{multiple[2]:.1f}x",
+        "projected_top_range": _btc_projected_top_range(candidate_bottom, multiple, bottom_status),
+        "projected_top_note": "Cycle Bottom Not Confirmed" if bottom_status not in {"CANDIDATE_BOTTOM", "BOTTOM_CONFIRMED"} else "candidate bottom x multiple range",
+        "candidate_bottom": candidate_bottom,
+        "drawdown_from_top": drawdown,
+        "last_updated": _btc_latest_observation_date(price, etf, bybit, liquidity.get("date")),
+    }
+
+
+def _btc_latest_price(price: pd.DataFrame) -> float:
+    if price.empty or "Close" not in price.columns:
+        return np.nan
+    return _safe_float(pd.to_numeric(price["Close"], errors="coerce").dropna().iloc[-1])
+
+
+def _months_between(start: pd.Timestamp, end: pd.Timestamp) -> float:
+    return ((end - start).days / 30.4375) if pd.notna(start) and pd.notna(end) else np.nan
+
+
+def _btc_halving_phase(months_since_halving: float) -> str:
+    if not np.isfinite(months_since_halving):
+        return "DATA_INCOMPLETE"
+    if months_since_halving < 6:
+        return "POST_HALVING_EARLY"
+    if months_since_halving < 12:
+        return "BULL_EXPANSION"
+    if months_since_halving < 18:
+        return "LATE_BULL_PEAK_WINDOW"
+    if months_since_halving < 30:
+        return "POST_PEAK_BEAR"
+    return "ACCUMULATION_PRE_HALVING"
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        number = float(value)
+        return number if np.isfinite(number) else np.nan
+    except Exception:
+        return np.nan
+
+
+def _weighted_mean(values: list[float], weights: list[float]) -> float:
+    value_arr = np.array(values, dtype="float64")
+    weight_arr = np.array(weights, dtype="float64")
+    mask = np.isfinite(value_arr)
+    if not mask.any():
+        return np.nan
+    return float(np.average(value_arr[mask], weights=weight_arr[mask]))
+
+
+def _btc_risk_state(value: float) -> str:
+    if not np.isfinite(value):
+        return "DATA_INCOMPLETE"
+    if value < 20:
+        return "LOW"
+    if value < 40:
+        return "MODERATE"
+    if value < 60:
+        return "ELEVATED"
+    if value < 80:
+        return "HIGH"
+    return "EXTREME"
+
+
+def _btc_tactical_state(etf: dict[str, Any], bybit: dict[str, Any], alpha: float) -> tuple[str, str]:
+    flow_4w = _safe_float(etf.get("ETF_Flow_4W"))
+    flow_13w = _safe_float(etf.get("ETF_Flow_13W"))
+    oi_4w = _safe_float(bybit.get("oi_change_4w_pct"))
+    oi_pctl = _safe_float(bybit.get("oi_change_4w_percentile"))
+    funding_pctl = _safe_float(bybit.get("funding_28d_percentile"))
+    funding_28d = _safe_float(bybit.get("funding_28d"))
+    etf_supportive = np.isfinite(flow_4w) and flow_4w > 0 and np.isfinite(flow_13w) and flow_13w > 0
+    etf_weak = np.isfinite(flow_4w) and flow_4w < 0
+    oi_extreme = (np.isfinite(oi_pctl) and oi_pctl >= 80) or (np.isfinite(oi_4w) and oi_4w > 0.15)
+    funding_extreme = (np.isfinite(funding_pctl) and funding_pctl >= 80) or (np.isfinite(funding_28d) and funding_28d > 0.02)
+    if etf_supportive and np.isfinite(alpha) and alpha >= 60 and not oi_extreme and not funding_extreme:
+        return "STRONG_CONFIRMATION", "ETF demand positive; leverage not extreme"
+    if etf_weak and np.isfinite(oi_4w) and oi_4w < 0 and (not np.isfinite(funding_pctl) or funding_pctl < 60):
+        return "DELEVERAGING", "ETF weak; OI falling; funding normalized"
+    if (np.isfinite(alpha) and alpha >= 60 and etf_weak) or (oi_extreme and funding_extreme):
+        return "FLOW_DIVERGENCE", "price/alpha strength not fully confirmed by flows or leverage"
+    if oi_extreme or funding_extreme:
+        return "OVERHEATED", "OI or funding is elevated"
+    if etf_supportive:
+        return "SUPPORTIVE", "ETF flows positive"
+    return "NEUTRAL", "mixed or partial tactical data"
+
+
+def _btc_bottom_status(phase: str, liq_direction: str, alpha: float, etf: dict[str, Any], bybit: dict[str, Any], macro_risk: float) -> tuple[str, str]:
+    if phase not in {"POST_PEAK_BEAR", "ACCUMULATION_PRE_HALVING"}:
+        return "NO_BOTTOM_SIGNAL", "bottom module inactive outside bear/accumulation phases"
+    signals = []
+    if liq_direction in {"IMPROVING", "ACCELERATING", "STABLE"}:
+        signals.append("liquidity improving/stable")
+    if np.isfinite(alpha) and alpha >= 50:
+        signals.append("BTC Alpha stabilizing")
+    if _safe_float(etf.get("ETF_Flow_4W")) > 0:
+        signals.append("ETF flows positive")
+    if _safe_float(bybit.get("oi_change_4w_pct")) < 0:
+        signals.append("OI deleveraging")
+    if abs(_safe_float(bybit.get("funding_28d"))) < 0.01:
+        signals.append("funding normalized")
+    if np.isfinite(macro_risk) and macro_risk <= 40:
+        signals.append("macro risk contained")
+    count = len(signals)
+    if count >= 5:
+        return "BOTTOM_CONFIRMED", ", ".join(signals)
+    if count >= 4:
+        return "CANDIDATE_BOTTOM", ", ".join(signals)
+    if count >= 3:
+        return "BOTTOMING_WATCH", ", ".join(signals)
+    if count >= 2:
+        return "EARLY_BOTTOMING_SIGNS", ", ".join(signals)
+    return "NO_BOTTOM_SIGNAL", "insufficient confirmation"
+
+
+def _btc_final_state(
+    phase: str,
+    liq_score: float,
+    liq_direction: str,
+    alpha: float,
+    structural_macro: float,
+    forward_risk: float,
+    tactical: str,
+    bottom: str,
+) -> tuple[str, str]:
+    deteriorating = liq_direction in {"DETERIORATING", "DETERIORATING_FAST"}
+    tactical_weak = tactical in {"FLOW_DIVERGENCE", "OVERHEATED", "DELEVERAGING"}
+    if phase == "LATE_BULL_PEAK_WINDOW" and sum([deteriorating, np.isfinite(alpha) and alpha < 60, tactical_weak, np.isfinite(forward_risk) and forward_risk > 60]) >= 2:
+        return "TOP_RISK_HIGH", "late bull window with multiple deterioration warnings"
+    if phase == "POST_PEAK_BEAR" and np.isfinite(alpha) and alpha < 50 and liq_direction not in {"IMPROVING", "ACCELERATING"}:
+        return "POST_CYCLE_BEAR", "post-peak phase; trend/alpha weak; liquidity not improving"
+    if bottom in {"BOTTOMING_WATCH", "CANDIDATE_BOTTOM", "BOTTOM_CONFIRMED"}:
+        return "BOTTOMING_WATCH", "bottom module has multiple confirmations"
+    if phase == "ACCUMULATION_PRE_HALVING" and liq_direction in {"IMPROVING", "ACCELERATING"} and np.isfinite(alpha) and alpha >= 60 and tactical in {"SUPPORTIVE", "STRONG_CONFIRMATION"}:
+        return "STRONG_EARLY_BULL_SETUP", "accumulation timing confirmed by liquidity, alpha and flows"
+    if phase in {"POST_HALVING_EARLY", "BULL_EXPANSION"} and np.isfinite(alpha) and alpha >= 70 and np.isfinite(liq_score) and liq_score >= 60 and not deteriorating and np.isfinite(structural_macro) and structural_macro >= 60 and np.isfinite(forward_risk) and forward_risk <= 40 and tactical in {"SUPPORTIVE", "STRONG_CONFIRMATION"}:
+        return "HIGH_CONVICTION_BULL", "cycle, liquidity, macro, trend and flows aligned"
+    if phase == "LATE_BULL_PEAK_WINDOW" and np.isfinite(alpha) and alpha >= 70 and not deteriorating and tactical in {"SUPPORTIVE", "STRONG_CONFIRMATION"}:
+        return "LATE_CYCLE_BULL", "late-cycle trend remains confirmed"
+    if np.isfinite(alpha) and alpha >= 60 and ((np.isfinite(forward_risk) and forward_risk > 60) or liq_direction == "DETERIORATING_FAST"):
+        return "MACRO_WARNING", "high alpha is overridden by macro/liquidity warning"
+    if np.isfinite(alpha) and alpha >= 60 and tactical in {"FLOW_DIVERGENCE", "OVERHEATED"}:
+        return "FLOW_DIVERGENCE_WARNING", "price strength is not confirmed by flows/leverage"
+    if np.isfinite(alpha) and alpha >= 60 and np.isfinite(liq_score) and liq_score >= 40 and not deteriorating:
+        return "BULLISH", "trend positive with broadly supportive macro"
+    if phase == "ACCUMULATION_PRE_HALVING":
+        return "ACCUMULATION", "pre-halving accumulation phase"
+    return "NEUTRAL", "no stronger rule matched"
+
+
+def _btc_expected_multiple(score: float, direction: str) -> tuple[float, float, float]:
+    if (np.isfinite(score) and score < 40) or direction in {"DETERIORATING", "DETERIORATING_FAST"}:
+        return 2.0, 2.25, 2.5
+    if np.isfinite(score) and score >= 60 and direction in {"IMPROVING", "ACCELERATING"}:
+        return 4.0, 4.5, 5.0
+    return 2.5, 3.0, 4.0
+
+
+def _btc_candidate_bottom(price: pd.DataFrame) -> float:
+    if price.empty or "date" not in price.columns or "Close" not in price.columns:
+        return np.nan
+    rows = price[pd.to_datetime(price["date"], errors="coerce") >= BTC_CURRENT_CYCLE_TOP_DATE].copy()
+    if rows.empty:
+        return np.nan
+    return _safe_float(pd.to_numeric(rows["Close"], errors="coerce").min())
+
+
+def _btc_projected_top_range(bottom: float, multiple: tuple[float, float, float], bottom_status: str) -> str:
+    if bottom_status not in {"CANDIDATE_BOTTOM", "BOTTOM_CONFIRMED"} or not np.isfinite(bottom):
+        return "N/A"
+    return f"{fmt_money_compact(bottom * multiple[0])} - {fmt_money_compact(bottom * multiple[2])}"
+
+
+def _btc_latest_observation_date(*items: Any) -> str:
+    dates: list[pd.Timestamp] = []
+    for item in items:
+        if isinstance(item, pd.DataFrame):
+            if item.empty or "date" not in item.columns:
+                continue
+            value = pd.to_datetime(item["date"], errors="coerce").max()
+        else:
+            value = pd.to_datetime(item, errors="coerce")
+        today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+        if pd.notna(value) and pd.Timestamp(value).tz_localize(None) <= today:
+            dates.append(pd.Timestamp(value).tz_localize(None) if pd.Timestamp(value).tzinfo else pd.Timestamp(value))
+    return _liquidity_fmt_date(max(dates)) if dates else "n/a"
+
+
+def _btc_interpretation_text(s: dict[str, Any]) -> str:
+    top_text = "n/a" if not np.isfinite(s["months_since_cycle_top"]) else f"{s['months_since_cycle_top']:.1f}"
+    return (
+        f"BTC is in {s['halving_phase']}, about {s['months_since_halving']:.1f} months after the {pd.Timestamp(s['halving_date']).strftime('%Y-%m-%d')} halving "
+        f"and {top_text} months after the fixed October 2025 cycle top.\n\n"
+        f"Global Liquidity is {s['global_liquidity_label']} with score {fmt_plain_number(s['global_liquidity_score'], 1)} "
+        f"and 13W direction {s['liquidity_direction']}. The long liquidity cycle is {s['long_cycle_phase']}.\n\n"
+        f"BTC Structural Macro is {fmt_plain_number(s['structural_macro'], 1)}, Forward Macro Risk is "
+        f"{fmt_plain_number(s['forward_macro_risk'], 1)} / {s['forward_macro_risk_state']}, and BTC Alpha is {fmt_plain_number(s['btc_alpha'], 1)}.\n\n"
+        f"Tactical flows are {s['tactical_flow_state']} ({s['tactical_note']}). Cycle Bottom Status is {s['cycle_bottom_status']} ({s['bottom_note']}).\n\n"
+        f"Final state is {s['final_state']}: {s['final_note']}. This is a regime/risk framework, not a deterministic price forecast."
+    )
+
+
+def _filter_date_range(frame: pd.DataFrame, range_key: str) -> pd.DataFrame:
+    if frame.empty or "date" not in frame.columns or range_key == "MAX":
+        return frame
+    years = {"3Y": 3, "5Y": 5, "10Y": 10}.get(range_key)
+    if years is None:
+        return frame
+    max_date = pd.to_datetime(frame["date"], errors="coerce").max()
+    return frame[pd.to_datetime(frame["date"], errors="coerce") >= max_date - pd.DateOffset(years=years)].copy()
+
+
+def _render_btc_price_halving_chart(price: pd.DataFrame, liquidity: pd.DataFrame, x_range: list[pd.Timestamp] | None = None) -> None:
+    if price.empty:
+        st.info("No BTC price history.")
+        return
+    d = price.dropna(subset=["date", "Close"]).copy()
+    liquidity_frame = _btc_filter_to_x_range(liquidity, x_range)
+    fig = go.Figure()
+    for _, band in _btc_phase_bands(d).iterrows():
+        fig.add_vrect(x0=band["start"], x1=band["end"], fillcolor=band["color"], opacity=0.14, line_width=0)
+    fig.add_trace(go.Scatter(x=d["date"], y=d["Close"], mode="lines", name="BTC", line={"color": "#f7931a", "width": 2.0}))
+    if not liquidity_frame.empty and "global_liquidity_score" in liquidity_frame.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=liquidity_frame["date"],
+                y=pd.to_numeric(liquidity_frame["global_liquidity_score"], errors="coerce"),
+                mode="lines",
+                name="Global Liquidity Score",
+                yaxis="y2",
+                line={"color": "#38bdf8", "width": 1.7},
+                hovertemplate="Week: %{x|%Y-%m-%d}<br>Global Liquidity Score: %{y:.1f}<extra></extra>",
+            )
+        )
+    for event in BTC_HALVING_EVENTS:
+        _btc_add_marker(fig, event["date"], event["label"], "#38bdf8")
+    for event in BTC_CYCLE_TOPS:
+        _btc_add_marker(fig, event["date"], event["label"], "#ef4444")
+    for event in BTC_CYCLE_BOTTOMS:
+        _btc_add_marker(fig, event["date"], event["label"], "#22c55e")
+    fig.update_layout(
+        yaxis={"title": "BTC USD", "type": "log"},
+        yaxis2={
+            "title": "Global Liquidity Score",
+            "overlaying": "y",
+            "side": "right",
+            "range": [0, 100],
+            "showgrid": False,
+            "color": "#cbd5e1",
+            "linecolor": "#475569",
+        },
+    )
+    if x_range:
+        fig.update_xaxes(range=x_range)
+    st.plotly_chart(_style_liquidity_plotly(fig, 390, "BTC Price - Halving Cycle"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _btc_phase_bands(price: pd.DataFrame) -> pd.DataFrame:
+    min_date = pd.to_datetime(price["date"], errors="coerce").min()
+    max_date = pd.to_datetime(price["date"], errors="coerce").max()
+    if pd.isna(min_date) or pd.isna(max_date):
+        return pd.DataFrame()
+    starts = [event["date"] for event in BTC_HALVING_EVENTS if event["date"] <= max_date]
+    rows = []
+    colors = {
+        "POST_HALVING_EARLY": "#22c55e",
+        "BULL_EXPANSION": "#84cc16",
+        "LATE_BULL_PEAK_WINDOW": "#facc15",
+        "POST_PEAK_BEAR": "#ef4444",
+        "ACCUMULATION_PRE_HALVING": "#38bdf8",
+    }
+    for start in starts:
+        for m0, m1 in [(0, 6), (6, 12), (12, 18), (18, 30), (30, 48)]:
+            phase = _btc_halving_phase(m0 + 0.1)
+            band_start = max(start + pd.DateOffset(months=m0), min_date)
+            band_end = min(start + pd.DateOffset(months=m1), max_date)
+            if band_end >= band_start:
+                rows.append({"start": band_start, "end": band_end, "phase": phase, "color": colors.get(phase, "#64748b")})
+    return pd.DataFrame(rows)
+
+
+def _btc_add_marker(fig: go.Figure, date: pd.Timestamp, label: str, color: str) -> None:
+    marker_x = pd.Timestamp(date).strftime("%Y-%m-%d")
+    fig.add_shape(type="line", xref="x", yref="paper", x0=marker_x, x1=marker_x, y0=0, y1=1, line={"color": color, "dash": "dot", "width": 1})
+    fig.add_annotation(x=marker_x, y=1.03, xref="x", yref="paper", text=label, showarrow=False, font={"color": color, "size": 10}, xanchor="left")
+
+
+def _btc_halving_liquidity_matrix(snapshot: dict[str, Any]) -> pd.DataFrame:
+    phase = snapshot["halving_phase"]
+    direction = snapshot["liquidity_direction"]
+    score = snapshot["global_liquidity_score"]
+    strong = np.isfinite(score) and score >= 60
+    weak = np.isfinite(score) and score < 40
+    improving = direction in {"IMPROVING", "ACCELERATING"}
+    deteriorating = direction in {"DETERIORATING", "DETERIORATING_FAST"}
+    if phase == "POST_HALVING_EARLY":
+        state = "HIGHLY_SUPPORTIVE" if strong or improving else "MIXED_DELAYED_EXPANSION"
+    elif phase == "BULL_EXPANSION":
+        state = "STRONG_BULL" if strong or improving else "BULLISH_BUT_FRAGILE"
+    elif phase == "LATE_BULL_PEAK_WINDOW":
+        state = "LATE_BULL_CYCLE_MAY_EXTEND" if improving else "TOP_RISK_HIGH" if deteriorating else "LATE_CYCLE_NEUTRAL"
+    elif phase == "POST_PEAK_BEAR":
+        state = "BOTTOMING_WATCH" if improving else "BEARISH_DELEVERAGING" if deteriorating or weak else "POST_PEAK_NEUTRAL"
+    else:
+        state = "STRONG_EARLY_BULL_SETUP" if improving else "WEAK_ACCUMULATION" if deteriorating else "ACCUMULATION"
+    return pd.DataFrame([{"Halving Phase": phase, "Global Liquidity Score": fmt_plain_number(score, 1), "Direction": direction, "Structural Interpretation": state}])
+
+
+def _btc_x_range(frame: pd.DataFrame) -> list[pd.Timestamp] | None:
+    if frame.empty or "date" not in frame.columns:
+        return None
+    dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
+    if dates.empty:
+        return None
+    return [pd.Timestamp(dates.min()), pd.Timestamp(dates.max())]
+
+
+def _btc_filter_to_x_range(frame: pd.DataFrame, x_range: list[pd.Timestamp] | None) -> pd.DataFrame:
+    if frame.empty or "date" not in frame.columns or not x_range:
+        return frame.copy()
+    out = frame.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    return out.dropna(subset=["date"]).loc[lambda data: (data["date"] >= x_range[0]) & (data["date"] <= x_range[1])].copy()
+
+
+def _build_btc_macro_frame(liquidity: pd.DataFrame, market: dict, x_range: list[pd.Timestamp] | None) -> pd.DataFrame:
+    frame = _btc_filter_to_x_range(liquidity, x_range)
+    if frame.empty:
+        return frame
+    dxy_risk = _safe_float(market.get("Macro_DXY_Risk", market.get("DXY_Risk")))
+    us2y_risk = _safe_float(market.get("US2Y_Risk"))
+    frame = frame.copy()
+    frame["BTCStructuralMacro"] = pd.to_numeric(frame["global_liquidity_score"], errors="coerce").map(lambda value: _weighted_mean([value, 100.0 - dxy_risk, 100.0 - us2y_risk], [0.40, 0.40, 0.20]))
+    frame["BTCForwardMacroRisk"] = pd.to_numeric(frame["global_liquidity_score"], errors="coerce").map(lambda value: _weighted_mean([dxy_risk, us2y_risk, 100.0 - value], [0.55, 0.30, 0.15]))
+    return frame
+
+
+def _render_btc_macro_score_chart(frame: pd.DataFrame, metric: str, title: str, color: str) -> None:
+    if frame.empty or "date" not in frame.columns or metric not in frame.columns:
+        st.info(f"No data available for {title}.")
+        return
+    d = frame.dropna(subset=["date", metric]).copy()
+    if d.empty:
+        st.info(f"No data available for {title}.")
+        return
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=d["date"], y=pd.to_numeric(d[metric], errors="coerce"), mode="lines", name=title, line={"color": color, "width": 1.9}))
+    for level in [20, 40, 60, 80]:
+        fig.add_hline(y=level, line={"color": "#94a3b8", "dash": "dot", "width": 1}, opacity=0.5)
+    fig.update_layout(yaxis={"title": "Score", "range": _btc_adaptive_y_range(d[metric])})
+    x_range = _btc_x_range(frame)
+    if x_range:
+        fig.update_xaxes(range=x_range)
+    st.plotly_chart(_style_liquidity_plotly(fig, 250, title), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _btc_adaptive_y_range(values: pd.Series, lower_bound: float = 0.0, upper_bound: float = 100.0) -> list[float]:
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty:
+        return [lower_bound, upper_bound]
+    vmin = float(numeric.min())
+    vmax = float(numeric.max())
+    span = max(vmax - vmin, 5.0)
+    padding = max(span * 0.18, 3.0)
+    return [max(lower_bound, vmin - padding), min(upper_bound, vmax + padding)]
+
+
+def _btc_alpha_table(row: dict[str, Any]) -> pd.DataFrame:
+    cols = ["Alpha_Score", "Momentum_Score", "Trend_Quality_Score", "Persistence_Score", "Alpha_State", "Opportunity_State", "Entry_Risk"]
+    return pd.DataFrame([{"Metric": col, "Value": row.get(col, "n/a")} for col in cols])
+
+
+def _btc_tactical_table(snapshot: dict[str, Any], etf: pd.DataFrame, bybit: pd.DataFrame) -> pd.DataFrame:
+    latest_etf = _liquidity_latest_row(etf)
+    latest_bybit = _liquidity_latest_row(bybit)
+    return pd.DataFrame(
+        [
+            {"Metric": "Tactical Flow State", "Value": snapshot["tactical_flow_state"]},
+            {"Metric": "ETF Flow 1W", "Value": fmt_money_compact(latest_etf.get("ETF_Flow_1W"))},
+            {"Metric": "ETF Flow 4W", "Value": fmt_money_compact(latest_etf.get("ETF_Flow_4W"))},
+            {"Metric": "ETF Flow 13W", "Value": fmt_money_compact(latest_etf.get("ETF_Flow_13W"))},
+            {"Metric": "ETF Flow Intensity 4W", "Value": fmt_plain_number(latest_etf.get("ETF_Flow_Intensity_4W"), 2)},
+            {"Metric": "ETF Flow Intensity Percentile", "Value": fmt_plain_number(latest_etf.get("ETF_Flow_3Y_Pctl"), 0)},
+            {"Metric": "OI USD", "Value": fmt_money_compact(latest_bybit.get("open_interest_usd"))},
+            {"Metric": "OI Change 4W", "Value": fmt_plain_percent(latest_bybit.get("oi_change_4w_pct"))},
+            {"Metric": "Funding 28D", "Value": fmt_plain_percent(latest_bybit.get("funding_28d"))},
+            {"Metric": "Basis / Premium", "Value": fmt_plain_percent_from_pct(latest_bybit.get("perp_premium_pct"))},
+        ]
+    )
+
+
+def _render_btc_etf_flow_intensity_chart(etf: pd.DataFrame, x_range: list[pd.Timestamp] | None = None) -> None:
+    _render_btc_dual_axis_percentile_chart(
+        etf,
+        left_metric="ETF_Flow_Intensity_4W",
+        right_metric="ETF_Flow_3Y_Pctl",
+        title="BTC ETF Fund Flows - 4W Flow Intensity and Trailing 3Y Percentile",
+        left_name="4W Flow Intensity",
+        right_name="3Y Percentile",
+        left_color="#22d3ee",
+        right_color="#facc15",
+        left_axis_title="4W Flow Intensity, normalized",
+        right_axis_title="Trailing 3Y Percentile",
+        x_range=x_range,
+    )
+
+
+def _render_btc_bybit_positioning_percentile_chart(bybit: pd.DataFrame) -> None:
+    _render_btc_dual_axis_percentile_chart(
+        bybit,
+        left_metric="oi_change_4w_pct",
+        right_metric="oi_change_4w_percentile",
+        title="BTC Bybit Positioning - OI Change 4W and Trailing Percentile",
+        left_name="OI Change 4W",
+        right_name="OI Percentile",
+        left_color="#60a5fa",
+        right_color="#facc15",
+        left_axis_title="OI Change 4W",
+        right_axis_title="Trailing Percentile",
+        left_multiplier=100.0,
+        left_suffix="%",
+    )
+
+
+def _render_btc_dual_axis_percentile_chart(
+    data: pd.DataFrame,
+    left_metric: str,
+    right_metric: str,
+    title: str,
+    left_name: str,
+    right_name: str,
+    left_color: str,
+    right_color: str,
+    left_axis_title: str,
+    right_axis_title: str,
+    left_multiplier: float = 1.0,
+    left_suffix: str = "",
+    x_range: list[pd.Timestamp] | None = None,
+) -> None:
+    if data.empty or not all(column in data.columns for column in ["date", left_metric, right_metric]):
+        st.info(f"No data available for {title}.")
+        return
+    d = _btc_filter_to_x_range(data, x_range)
+    if d.empty:
+        d = data.dropna(subset=["date"]).copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d[left_metric] = pd.to_numeric(d[left_metric], errors="coerce") * left_multiplier
+    d[right_metric] = pd.to_numeric(d[right_metric], errors="coerce")
+    d = d.dropna(subset=["date"]).sort_values("date")
+    if d[[left_metric, right_metric]].dropna(how="all").empty:
+        st.info(f"No data available for {title}.")
+        return
+    latest_date = _frame_date_max(d)
+    status = "CURRENT" if latest_date != "n/a" else "PARTIAL_DATA"
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=d["date"],
+            y=d[left_metric],
+            mode="lines",
+            name=left_name,
+            line={"color": left_color, "width": 1.8},
+            hovertemplate=f"Week: %{{x|%Y-%m-%d}}<br>{left_name}: %{{y:.2f}}{left_suffix}<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=d["date"],
+            y=d[right_metric],
+            mode="lines",
+            name=right_name,
+            yaxis="y2",
+            line={"color": right_color, "width": 1.8, "dash": "dash"},
+            hovertemplate=f"Week: %{{x|%Y-%m-%d}}<br>{right_name}: %{{y:.0f}}<extra></extra>",
+        )
+    )
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+    fig.update_layout(
+        yaxis={"title": left_axis_title},
+        yaxis2={
+            "title": right_axis_title,
+            "overlaying": "y",
+            "side": "right",
+            "range": [0, 100],
+            "showgrid": False,
+            "color": "#cbd5e1",
+            "linecolor": "#475569",
+        },
+        annotations=[
+            {
+                "text": f"Last Updated: {latest_date} - {status}",
+                "xref": "paper",
+                "yref": "paper",
+                "x": 0,
+                "y": 1.12,
+                "showarrow": False,
+                "font": {"color": "#cbd5e1", "size": 11},
+                "xanchor": "left",
+            }
+        ],
+    )
+    if x_range:
+        fig.update_xaxes(range=x_range)
+    st.plotly_chart(_style_liquidity_plotly(fig, 320, title), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _render_btc_etf_flows_chart(etf: pd.DataFrame) -> None:
+    if etf.empty:
+        st.info("No BTC ETF flow history.")
+        return
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=etf["date"], y=etf["ETF_Flow_1W"], name="1W", marker_color="#38bdf8"))
+    fig.add_trace(go.Scatter(x=etf["date"], y=etf["ETF_Flow_4W"], mode="lines", name="4W", line={"color": "#facc15", "width": 1.7}))
+    fig.add_trace(go.Scatter(x=etf["date"], y=etf["ETF_Flow_13W"], mode="lines", name="13W", line={"color": "#22c55e", "width": 1.7}))
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+    fig.update_layout(yaxis={"title": "Net flow, USD"})
+    st.plotly_chart(_style_liquidity_plotly(fig, 300, "BTC ETF Flows"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _render_btc_open_interest_chart(bybit: pd.DataFrame) -> None:
+    if bybit.empty:
+        st.info("No BTC Open Interest history.")
+        return
+    d = bybit.copy()
+    fig = go.Figure()
+    if "open_interest_usd" in d.columns:
+        fig.add_trace(go.Scatter(x=d["date"], y=pd.to_numeric(d["open_interest_usd"], errors="coerce"), mode="lines", name="OI USD", line={"color": "#38bdf8", "width": 1.8}))
+    for col, label, color in [("oi_change_1w_pct", "OI Change 1W", "#facc15"), ("oi_change_4w_pct", "OI Change 4W", "#f97316"), ("oi_change_13w_pct", "OI Change 13W", "#ef4444")]:
+        if col in d.columns:
+            fig.add_trace(go.Scatter(x=d["date"], y=pd.to_numeric(d[col], errors="coerce") * 100.0, mode="lines", name=label, yaxis="y2", line={"color": color, "width": 1.4}))
+    fig.update_layout(yaxis={"title": "OI USD"}, yaxis2={"title": "Change, %", "overlaying": "y", "side": "right", "showgrid": False})
+    st.plotly_chart(_style_liquidity_plotly(fig, 300, "BTC Open Interest"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _render_btc_funding_chart(bybit: pd.DataFrame) -> None:
+    if bybit.empty:
+        st.info("No BTC Funding history.")
+        return
+    d = bybit.copy()
+    fig = go.Figure()
+    for col, label, color in [("funding_1d", "Funding 1D", "#38bdf8"), ("funding_7d", "Funding 7D", "#facc15"), ("funding_28d", "Funding 28D", "#22c55e")]:
+        if col in d.columns:
+            fig.add_trace(go.Scatter(x=d["date"], y=pd.to_numeric(d[col], errors="coerce") * 100.0, mode="lines", name=label, line={"color": color, "width": 1.5}))
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+    fig.update_layout(yaxis={"title": "Funding, %"})
+    st.plotly_chart(_style_liquidity_plotly(fig, 260, "BTC Funding"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _render_btc_basis_chart(bybit: pd.DataFrame) -> None:
+    if bybit.empty:
+        st.info("No BTC Basis / Premium history.")
+        return
+    d = bybit.copy()
+    fig = go.Figure()
+    for col, label, color in [("perp_premium_pct", "Current", "#38bdf8"), ("perp_premium_7d_avg", "1W avg", "#facc15"), ("perp_premium_28d_avg", "4W avg", "#22c55e")]:
+        if col in d.columns:
+            values = pd.to_numeric(d[col], errors="coerce")
+            if values.notna().any():
+                fig.add_trace(go.Scatter(x=d["date"], y=values, mode="lines", name=label, line={"color": color, "width": 1.5}))
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+    fig.update_layout(yaxis={"title": "Premium, %"})
+    st.plotly_chart(_style_liquidity_plotly(fig, 250, "BTC Perpetual Basis / Premium"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _btc_bottom_monitor(snapshot: dict[str, Any]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"Signal": "Drawdown from Oct 2025 top", "State": fmt_plain_percent(snapshot["drawdown_from_top"])},
+            {"Signal": "BTC Alpha", "State": _liquidity_fmt_score_state(snapshot["btc_alpha"])},
+            {"Signal": "Global Liquidity Direction", "State": snapshot["liquidity_direction"]},
+            {"Signal": "ETF / Derivatives", "State": snapshot["tactical_flow_state"]},
+            {"Signal": "Macro Risk", "State": f"{_liquidity_fmt_number(snapshot['forward_macro_risk'], 1)} / {snapshot['forward_macro_risk_state']}"},
+            {"Signal": "Cycle Bottom Status", "State": snapshot["cycle_bottom_status"]},
+        ]
+    )
+
+
+def _render_btc_cycle_multiples_chart() -> None:
+    data = pd.DataFrame(
+        [
+            {"Cycle": "2015-2017", "Metric": "Bottom->Top", "Multiple": 114.0},
+            {"Cycle": "2015-2017", "Metric": "Bottom->Halving", "Multiple": 3.8},
+            {"Cycle": "2015-2017", "Metric": "Halving->Top", "Multiple": 30.0},
+            {"Cycle": "2018-2021", "Metric": "Bottom->Top", "Multiple": 21.5},
+            {"Cycle": "2018-2021", "Metric": "Bottom->Halving", "Multiple": 2.7},
+            {"Cycle": "2018-2021", "Metric": "Halving->Top", "Multiple": 7.9},
+            {"Cycle": "2022-2025", "Metric": "Bottom->Top", "Multiple": 8.0},
+            {"Cycle": "2022-2025", "Metric": "Bottom->Halving", "Multiple": 4.1},
+            {"Cycle": "2022-2025", "Metric": "Halving->Top", "Multiple": 2.0},
+        ]
+    )
+    fig = go.Figure()
+    colors = {"Bottom->Halving": "#22c55e", "Halving->Top": "#facc15", "Bottom->Top": "#38bdf8"}
+    for metric in data["Metric"].drop_duplicates():
+        d = data[data["Metric"].eq(metric)]
+        fig.add_trace(go.Bar(x=d["Cycle"], y=d["Multiple"], name=metric, marker_color=colors.get(metric, "#cbd5e1")))
+    fig.update_layout(barmode="group", yaxis={"title": "Multiple, x"})
+    st.plotly_chart(_style_liquidity_plotly(fig, 300, "BTC Mature Cycle Multiples"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _btc_valuation_table(snapshot: dict[str, Any]) -> pd.DataFrame:
+    bottom_ok = snapshot["cycle_bottom_status"] in {"CANDIDATE_BOTTOM", "BOTTOM_CONFIRMED"}
+    low, base, high = snapshot["expected_multiple"]
+    bottom = snapshot["candidate_bottom"]
+    return pd.DataFrame(
+        [
+            {"Metric": "Current Price", "Value": fmt_money_compact(snapshot["btc_price"])},
+            {"Metric": "Current Drawdown from Cycle Top", "Value": fmt_plain_percent(snapshot["drawdown_from_top"])},
+            {"Metric": "Candidate Cycle Bottom", "Value": fmt_money_compact(bottom) if np.isfinite(bottom) else "n/a"},
+            {"Metric": "Bottom Confidence", "Value": snapshot["cycle_bottom_status"]},
+            {"Metric": "Expected Bottom->Top Multiple", "Value": f"{low:.1f}x / {base:.1f}x / {high:.1f}x"},
+            {"Metric": "Projected Top Low", "Value": fmt_money_compact(bottom * low) if bottom_ok and np.isfinite(bottom) else "N/A - Cycle Bottom Not Confirmed"},
+            {"Metric": "Projected Top Base", "Value": fmt_money_compact(bottom * base) if bottom_ok and np.isfinite(bottom) else "N/A - Cycle Bottom Not Confirmed"},
+            {"Metric": "Projected Top High", "Value": fmt_money_compact(bottom * high) if bottom_ok and np.isfinite(bottom) else "N/A - Cycle Bottom Not Confirmed"},
+        ]
+    )
+
+
+def _btc_cycle_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"Cycle": "2015-2017", "Halving Date": "2016-07-09", "Halving Price": "$650", "Cycle Top Date": "2017-12-17", "Cycle Top Price": "$19,666", "Days Halving->Top": 526, "Halving->Top Multiple": "30.3x", "Cycle Bottom": "2015-01-14", "Bottom->Top Multiple": "114x"},
+            {"Cycle": "2018-2021", "Halving Date": "2020-05-11", "Halving Price": "$8,600", "Cycle Top Date": "2021-11-10", "Cycle Top Price": "$69,000", "Days Halving->Top": 548, "Halving->Top Multiple": "8.0x", "Cycle Bottom": "2018-12-15", "Bottom->Top Multiple": "21.5x"},
+            {"Cycle": "2022-2025", "Halving Date": "2024-04-20", "Halving Price": "$63,800", "Cycle Top Date": "2025-10-01", "Cycle Top Price": "$126,000", "Days Halving->Top": 529, "Halving->Top Multiple": "2.0x", "Cycle Bottom": "2022-11-21", "Bottom->Top Multiple": "8.0x"},
+        ]
+    )
+
+
+def _btc_data_quality_table(price: pd.DataFrame, etf: pd.DataFrame, bybit: pd.DataFrame, liquidity: dict[str, Any]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"Block": "BTC Price", "History Start": _frame_date_min(price), "Last Observation": _frame_date_max(price), "Status": "CURRENT" if not price.empty else "MISSING"},
+            {"Block": "BTC ETF Flow", "History Start": _frame_date_min(etf), "Last Observation": _frame_date_max(etf), "Status": "CURRENT" if not etf.empty else "PARTIAL_DATA"},
+            {"Block": "Bybit OI", "History Start": _frame_date_min(bybit.dropna(subset=["open_interest_usd"]) if "open_interest_usd" in bybit.columns else pd.DataFrame()), "Last Observation": _frame_date_max(bybit), "Status": "CURRENT" if not bybit.empty else "PARTIAL_DATA"},
+            {"Block": "Funding", "History Start": _frame_date_min(bybit.dropna(subset=["funding_28d"]) if "funding_28d" in bybit.columns else pd.DataFrame()), "Last Observation": _frame_date_max(bybit), "Status": "CURRENT" if not bybit.empty else "PARTIAL_DATA"},
+            {"Block": "Basis / Premium", "History Start": _frame_date_min(bybit.dropna(subset=["perp_premium_pct"]) if "perp_premium_pct" in bybit.columns else pd.DataFrame()), "Last Observation": _frame_date_max(bybit.dropna(subset=["perp_premium_pct"]) if "perp_premium_pct" in bybit.columns else pd.DataFrame()), "Status": "CURRENT" if "perp_premium_pct" in bybit.columns and bybit["perp_premium_pct"].notna().any() else "PARTIAL_DATA"},
+            {"Block": "Global Liquidity", "History Start": "see Global Liquidity Regime", "Last Observation": str(liquidity.get("date", "n/a")), "Status": str(liquidity.get("data_status", "n/a"))},
+        ]
+    )
+
+
+def _frame_date_min(frame: pd.DataFrame) -> str:
+    if frame.empty or "date" not in frame.columns:
+        return "n/a"
+    return _liquidity_fmt_date(pd.to_datetime(frame["date"], errors="coerce").min())
+
+
+def _frame_date_max(frame: pd.DataFrame) -> str:
+    if frame.empty or "date" not in frame.columns:
+        return "n/a"
+    return _liquidity_fmt_date(pd.to_datetime(frame["date"], errors="coerce").max())
+
+
+def _liquidity_prepare_dates(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "date" not in frame.columns:
+        return frame
+    out = frame.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    return out.dropna(subset=["date"]).sort_values("date")
+
+
+def _liquidity_latest_row(frame: pd.DataFrame) -> dict[str, Any]:
+    if frame.empty:
+        return {}
+    return frame.dropna(how="all").tail(1).to_dict("records")[0]
+
+
+def _liquidity_latest_row_with_value(frame: pd.DataFrame, column: str) -> dict[str, Any]:
+    if frame.empty or column not in frame.columns:
+        return {}
+    rows = frame.dropna(subset=[column]).dropna(how="all")
+    if rows.empty:
+        return {}
+    return rows.tail(1).to_dict("records")[0]
+
+
+def _liquidity_fmt_number(value: Any, decimals: int = 1) -> str:
+    try:
+        number = float(value)
+        if not np.isfinite(number):
+            return "n/a"
+        return f"{number:,.{decimals}f}"
+    except Exception:
+        return "n/a"
+
+
+def _liquidity_fmt_trillions(value: Any) -> str:
+    try:
+        number = float(value)
+        if not np.isfinite(number):
+            return "n/a"
+        return f"${number / 1000.0:,.2f}T"
+    except Exception:
+        return "n/a"
+
+
+def _liquidity_fmt_bn(value: Any) -> str:
+    try:
+        number = float(value)
+        if not np.isfinite(number):
+            return "n/a"
+        return f"${number:,.0f}B"
+    except Exception:
+        return "n/a"
+
+
+def _liquidity_fmt_pct(value: Any) -> str:
+    try:
+        number = float(value)
+        if not np.isfinite(number):
+            return "n/a"
+        return f"{number * 100.0:+.1f}%"
+    except Exception:
+        return "n/a"
+
+
+def _liquidity_line_chart(
+    frame: pd.DataFrame,
+    title: str,
+    series_map: dict[str, tuple[str, float]],
+    y_title: str,
+    height: int = 260,
+    zero_line: bool = False,
+) -> None:
+    if frame.empty or "date" not in frame.columns:
+        st.info(f"No data for {title}.")
+        return
+    rows = []
+    for label, (column, divisor) in series_map.items():
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce") / divisor
+        for date, value in zip(frame["date"], values):
+            if pd.notna(date) and np.isfinite(value):
+                rows.append({"Date": date, "Series": label, "Value": float(value)})
+    chart_df = pd.DataFrame(rows)
+    if chart_df.empty:
+        st.info(f"No data for {title}.")
+        return
+    base = alt.Chart(chart_df).encode(
+        x=alt.X("Date:T", axis=alt.Axis(title=None, format="%b'%y", labelFontSize=9, labelOverlap=True)),
+        y=alt.Y("Value:Q", axis=alt.Axis(title=y_title)),
+        color=alt.Color("Series:N", legend=alt.Legend(title=None)),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Date", format="%Y-%m-%d"),
+            alt.Tooltip("Series:N"),
+            alt.Tooltip("Value:Q", format=",.2f"),
+        ],
+    )
+    line = base.mark_line(strokeWidth=1.7)
+    points = base.mark_circle(size=18, opacity=0.45)
+    layers = [line, points]
+    if zero_line:
+        layers.insert(0, alt.Chart(chart_df).mark_rule(color="#64748b").encode(y=alt.datum(0)))
+    st.altair_chart(alt.layer(*layers).properties(height=height, title=title), use_container_width=True)
+
+
+def _render_liquidity_regional_chart(monthly: pd.DataFrame) -> None:
+    mode = st.radio(
+        "Regional M2 Contribution",
+        ["LEVEL", "12M CHANGE CONTRIBUTION"],
+        horizontal=True,
+        key="global_liquidity_regional_mode",
+    )
+    if mode == "LEVEL":
+        mapping = {
+            "US": ("us_m2_usd_bn", 1000.0),
+            "Euro Area": ("ea_m2_usd_bn", 1000.0),
+            "China": ("china_m2_usd_bn", 1000.0),
+            "Japan": ("japan_m2_usd_bn", 1000.0),
+        }
+        y_title = "USD trillions"
+    else:
+        mapping = {
+            "US": ("us_contribution_12m", 0.01),
+            "Euro Area": ("ea_contribution_12m", 0.01),
+            "China": ("china_contribution_12m", 0.01),
+            "Japan": ("japan_contribution_12m", 0.01),
+        }
+        y_title = "% of 12M change"
+    rows = []
+    for region, (column, divisor) in mapping.items():
+        if column not in monthly.columns:
+            continue
+        values = pd.to_numeric(monthly[column], errors="coerce") / divisor
+        for date, value in zip(monthly["date"], values):
+            if pd.notna(date) and np.isfinite(value):
+                rows.append({"Date": date, "Region": region, "Value": float(value)})
+    chart_df = pd.DataFrame(rows)
+    if chart_df.empty:
+        st.info("No regional Global M2 data.")
+        return
+    chart = (
+        alt.Chart(chart_df)
+        .mark_area(opacity=0.8)
+        .encode(
+            x=alt.X("Date:T", axis=alt.Axis(title=None, format="%b'%y", labelFontSize=9, labelOverlap=True)),
+            y=alt.Y("Value:Q", stack="zero", axis=alt.Axis(title=y_title)),
+            color=alt.Color("Region:N", legend=alt.Legend(title=None)),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date", format="%Y-%m-%d"),
+                alt.Tooltip("Region:N"),
+                alt.Tooltip("Value:Q", format=",.2f"),
+            ],
+        )
+        .properties(height=300, title=f"Regional M2 Contribution - {mode}")
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def _build_liquidity_regional_table(raw: pd.DataFrame, monthly: pd.DataFrame) -> pd.DataFrame:
+    region_config = [
+        ("US", "M2SL", None, "us_m2_usd_bn", "us_m2_share"),
+        ("Euro Area", "M.U2.Y.V.M20.X.1.U2.2300.Z01.E", "DEXUSEU", "ea_m2_usd_bn", "ea_m2_share"),
+        ("China", "Money & Quasi-money (M2)", "DEXCHUS", "china_m2_usd_bn", "china_m2_share"),
+        ("Japan", "MD02'MAM1NAM2M2MO", "DEXJPUS", "japan_m2_usd_bn", "japan_m2_share"),
+    ]
+    rows = []
+    for region, series_id, fx_id, usd_col, share_col in region_config:
+        source = raw[raw["series_id"].eq(series_id)].copy() if not raw.empty else pd.DataFrame()
+        source = source.dropna(subset=["raw_value", "observation_date"]) if not source.empty else source
+        latest_source = source.sort_values("observation_date").tail(1).to_dict("records")[0] if not source.empty else {}
+        latest_region = _liquidity_latest_row_with_value(monthly, usd_col)
+        latest_share = _liquidity_latest_row_with_value(monthly, share_col)
+        fx_value = "1.00" if fx_id is None else _liquidity_latest_raw_value(raw, fx_id)
+        rows.append(
+            {
+                "Region": region,
+                "M2 Local": _liquidity_fmt_number(latest_source.get("raw_value"), 2),
+                "FX": fx_value,
+                "M2 USD": _liquidity_fmt_trillions(latest_region.get(usd_col)),
+                "Share of Global M2": _liquidity_fmt_pct(latest_share.get(share_col)),
+                "1M": _liquidity_fmt_region_growth(monthly, usd_col, 1),
+                "3M": _liquidity_fmt_region_growth(monthly, usd_col, 3),
+                "6M": _liquidity_fmt_region_growth(monthly, usd_col, 6),
+                "12M": _liquidity_fmt_region_growth(monthly, usd_col, 12),
+                "Last Update": str(latest_source.get("download_timestamp", "n/a")),
+                "Status": str(latest_source.get("data_status", "ERROR")),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _liquidity_latest_raw_value(raw: pd.DataFrame, series_id: str) -> str:
+    if raw.empty:
+        return "n/a"
+    source = raw[raw["series_id"].eq(series_id)].dropna(subset=["raw_value", "observation_date"]).copy()
+    if source.empty:
+        return "n/a"
+    return _liquidity_fmt_number(source.sort_values("observation_date")["raw_value"].iloc[-1], 4)
+
+
+def _liquidity_fmt_region_growth(monthly: pd.DataFrame, column: str, periods: int) -> str:
+    if monthly.empty or column not in monthly.columns:
+        return "n/a"
+    values = pd.to_numeric(monthly[column], errors="coerce").dropna()
+    if len(values) <= periods:
+        return "n/a"
+    return _liquidity_fmt_pct(values.iloc[-1] / values.iloc[-periods - 1] - 1.0)
+
+
+def _build_liquidity_cb_table(raw: pd.DataFrame, monthly: pd.DataFrame) -> pd.DataFrame:
+    cb_config = [
+        ("Fed", "WALCL", "FRED / WALCL", "fed_assets_usd_bn", "fed_cb_share"),
+        ("ECB", "ILM.W.U2.C.T000000.Z5.Z01", "ECB Data API / ILM.W.U2.C.T000000.Z5.Z01", "ecb_assets_usd_bn", "ecb_cb_share"),
+        ("BoJ", "BS01'MABJMTA", "BOJ Time-Series API / BS01 MABJMTA", "boj_assets_usd_bn", "boj_cb_share"),
+        ("PBoC", "PBOC_TOTAL_ASSETS", "PBoC / Balance Sheet of Monetary Authority", "pboc_assets_usd_bn", "pboc_cb_share"),
+    ]
+    rows = []
+    for central_bank, series_id, source_label, usd_col, share_col in cb_config:
+        source = raw[raw["series_id"].eq(series_id)].copy() if not raw.empty else pd.DataFrame()
+        source = source.dropna(subset=["observation_date"]) if not source.empty else source
+        latest_source = source.sort_values("observation_date").tail(1).to_dict("records")[0] if not source.empty else {}
+        latest_value = _liquidity_latest_row_with_value(monthly, usd_col)
+        latest_share = _liquidity_latest_row_with_value(monthly, share_col)
+        rows.append(
+            {
+                "Central Bank": central_bank,
+                "Source": source_label,
+                "Source Series": series_id,
+                "Native Frequency": str(latest_source.get("frequency", "n/a")),
+                "Source Unit": str(latest_source.get("unit", "n/a")),
+                "Raw Value": _liquidity_fmt_number(latest_source.get("raw_value"), 2),
+                "USD Value": _liquidity_fmt_trillions(latest_value.get(usd_col)),
+                "Share of Global CB": _liquidity_fmt_pct(latest_share.get(share_col)),
+                "1M": _liquidity_fmt_region_growth(monthly, usd_col, 1),
+                "3M": _liquidity_fmt_region_growth(monthly, usd_col, 3),
+                "6M": _liquidity_fmt_region_growth(monthly, usd_col, 6),
+                "12M": _liquidity_fmt_region_growth(monthly, usd_col, 12),
+                "Last Observation": _liquidity_fmt_date(latest_source.get("observation_date")),
+                "Last Release": _liquidity_fmt_date(latest_source.get("release_date")),
+                "Last Update": str(latest_source.get("download_timestamp", "n/a")),
+                "Status": str(latest_source.get("data_status", "ERROR")),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _build_liquidity_quality_table(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw.empty:
+        return pd.DataFrame(columns=["Source", "Series ID", "Native Frequency", "History Start", "Last Observation", "Last Release", "Missing Data Count", "Status"])
+    quality = []
+    for (source, series_id), group in raw.groupby(["source", "series_id"], dropna=False):
+        observation_dates = pd.to_datetime(group["observation_date"], errors="coerce")
+        release_dates = pd.to_datetime(group["release_date"], errors="coerce")
+        quality.append(
+            {
+                "Source": source,
+                "Series ID": series_id,
+                "Native Frequency": str(group["frequency"].dropna().iloc[-1]) if group["frequency"].notna().any() else "n/a",
+                "History Start": _liquidity_fmt_date(observation_dates.min()),
+                "Last Observation": _liquidity_fmt_date(observation_dates.max()),
+                "Last Release": _liquidity_fmt_date(release_dates.max()),
+                "Missing Data Count": int(pd.to_numeric(group["raw_value"], errors="coerce").isna().sum()),
+                "Status": str(group["data_status"].dropna().iloc[-1]) if group["data_status"].notna().any() else "ERROR",
+            }
+        )
+    return pd.DataFrame(quality).sort_values(["Source", "Series ID"])
+
+
+def _liquidity_fmt_date(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    return pd.Timestamp(value).strftime("%Y-%m-%d")
+
+
+def fmt_plain_number(value: Any, decimals: int = 1) -> str:
+    try:
+        number = float(value)
+        if not np.isfinite(number):
+            return "n/a"
+        return f"{number:,.{decimals}f}"
+    except Exception:
+        return "n/a"
+
+
+def fmt_plain_percent(value: Any) -> str:
+    try:
+        number = float(value)
+        if not np.isfinite(number):
+            return "n/a"
+        return f"{number * 100:.2f}%"
+    except Exception:
+        return "n/a"
+
+
+def fmt_plain_percent_from_pct(value: Any) -> str:
+    try:
+        number = float(value)
+        if not np.isfinite(number):
+            return "n/a"
+        return f"{number:.3f}%"
+    except Exception:
+        return "n/a"
+
+
+def fmt_money_compact(value: Any) -> str:
+    try:
+        number = float(value)
+        if not np.isfinite(number):
+            return "n/a"
+        sign = "-" if number < 0 else ""
+        number = abs(number)
+        if number >= 1_000_000_000:
+            return f"{sign}${number / 1_000_000_000:.2f}B"
+        if number >= 1_000_000:
+            return f"{sign}${number / 1_000_000:.2f}M"
+        return f"{sign}${number:,.0f}"
+    except Exception:
+        return "n/a"
 
 
 def render_description_tab() -> None:
@@ -1631,7 +3929,7 @@ def render_top_alpha_status(
         if market
         else "n/a"
     )
-    overall_value = format_market_value(market.get("Overall_Transition_Status")) if market else "n/a"
+    overall_value = format_market_value(market.get("Final_Market_State", market.get("Overall_Transition_Status"))) if market else "n/a"
 
     entry_scores = pd.to_numeric(filtered_df.get("Entry_Risk_Score", pd.Series(dtype="float64")), errors="coerce").dropna()
     if entry_scores.empty:
@@ -1660,7 +3958,7 @@ def render_top_alpha_status(
 <div style="padding-top: 1.35rem; line-height: 1.1;">
   <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Fast Transition Risk</div>
   <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{fast_value}</div>
-  <div style="font-size: 0.68rem; color: #cbd5e1;">VIX + DXY</div>
+  <div style="font-size: 0.68rem; color: #cbd5e1;">VIX 70% + DXY 30%</div>
 </div>
 """,
             unsafe_allow_html=True,
@@ -1672,7 +3970,7 @@ def render_top_alpha_status(
 <div style="padding-top: 1.35rem; line-height: 1.1;">
   <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Macro Transition Risk</div>
   <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{macro_value}</div>
-  <div style="font-size: 0.68rem; color: #cbd5e1;">DXY + Fed liquidity + US2Y</div>
+  <div style="font-size: 0.68rem; color: #cbd5e1;">DXY 40% + Fed liquidity 30% + US2Y 30%</div>
 </div>
 """,
             unsafe_allow_html=True,
@@ -1682,9 +3980,9 @@ def render_top_alpha_status(
         st.markdown(
             f"""
 <div style="padding-top: 1.35rem; line-height: 1.1;">
-  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Overall Status</div>
+  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Final Market State</div>
   <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{overall_value}</div>
-  <div style="font-size: 0.68rem; color: #cbd5e1;">rules-based</div>
+  <div style="font-size: 0.68rem; color: #cbd5e1;">structural + risk layers</div>
 </div>
 """,
             unsafe_allow_html=True,
@@ -1783,7 +4081,7 @@ def extract_market_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
     return out
 
 
-@st.cache_data(show_spinner=False, ttl=AUTO_REFRESH_SECONDS)
+@st.cache_data(show_spinner=False, ttl=SLOW_REFRESH_SECONDS)
 def load_ohlcv_history(tickers: list, universe_signature: str) -> dict:
     _ = universe_signature
     data = {}
@@ -1840,7 +4138,49 @@ def get_fred_api_key_for_app() -> str | None:
         return None
 
 
-@st.cache_data(show_spinner=True, ttl=AUTO_REFRESH_SECONDS)
+def enrich_market_snapshot_with_global_liquidity(market: dict) -> dict:
+    enriched = dict(market or {})
+    try:
+        _, monthly, weekly = read_global_liquidity()
+        liquidity = _build_global_liquidity_regime_frame(
+            _liquidity_prepare_dates(monthly),
+            _liquidity_prepare_dates(weekly),
+        )
+        latest = _liquidity_latest_row_with_value(liquidity, "global_liquidity_score")
+    except Exception:
+        latest = {}
+
+    score = _safe_float(latest.get("global_liquidity_score"))
+    direction = _safe_float(latest.get("direction_13w"))
+    direction_state = str(latest.get("direction_13w_state", "DATA_INCOMPLETE"))
+    backdrop = classify_global_liquidity_backdrop(score, direction, direction_state)
+    final_state = calculate_overall_transition_status(
+        enriched.get("Fast_Transition_Risk"),
+        enriched.get("Macro_Transition_Risk"),
+        enriched.get("Negative_Confirmation_Count"),
+        structural_regime=str(enriched.get("Market_Regime", "UNKNOWN")),
+        global_liquidity_backdrop=backdrop,
+        global_liquidity_score=score,
+        global_liquidity_direction_13w=direction,
+        global_liquidity_direction_state=direction_state,
+    )
+    enriched.update(
+        {
+            "Global_Liquidity_Backdrop": backdrop,
+            "Global_Liquidity_Score": score,
+            "Global_Liquidity_Direction_13W": direction,
+            "Global_Liquidity_Direction_13W_State": direction_state,
+            "Long_Liquidity_Cycle": str(latest.get("long_cycle_phase", "DATA_INCOMPLETE")),
+            "Global_Liquidity_Last_Updated": str(latest.get("last_updated", "n/a")),
+            "Global_Liquidity_Data_Status": str(latest.get("data_status", "DATA_INCOMPLETE")),
+            "Overall_Transition_Status": final_state,
+            "Final_Market_State": final_state,
+        }
+    )
+    return enriched
+
+
+@st.cache_data(show_spinner=True, ttl=SLOW_REFRESH_SECONDS)
 def load_market_model_snapshot(cache_signature: str) -> dict:
     _ = cache_signature
     try:
@@ -1865,15 +4205,27 @@ def load_market_model_snapshot(cache_signature: str) -> dict:
         ) if not daily.empty else pd.DataFrame()
 
     fred_data = download_fred_market_data(api_key=get_fred_api_key_for_app())
-    return calculate_market_model(weekly, fred_data, config=market_model_config())
+    cfg = market_model_config()
+    market = calculate_market_model(weekly, fred_data, config=cfg)
+    fast_history = calculate_fast_transition_risk_history(
+        weekly_close(weekly.get("^VIX", pd.DataFrame())),
+        weekly_close(weekly.get("DX-Y.NYB", pd.DataFrame())),
+        cfg,
+    )
+    if not fast_history.empty:
+        latest_fast = fast_history.dropna(subset=["Fast_Transition_Risk"]).tail(1)
+        if not latest_fast.empty:
+            market["Fast_Risk_Direction_4W"] = latest_fast["Fast_Risk_Direction_4W"].iloc[0]
+            market["Fast_Risk_Direction_4W_State"] = latest_fast["Fast_Risk_Direction_4W_State"].iloc[0]
+    return enrich_market_snapshot_with_global_liquidity(market)
 
 
-@st.cache_data(show_spinner=True, ttl=AUTO_REFRESH_SECONDS)
+@st.cache_data(show_spinner=True, ttl=SLOW_REFRESH_SECONDS)
 def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
     _ = cache_signature
     try:
         px = yf.download(
-            ["^VIX", "DX-Y.NYB"],
+            list(YAHOO_MARKET_TICKERS),
             period="max",
             interval="1d",
             auto_adjust=False,
@@ -1885,7 +4237,7 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
         px = pd.DataFrame()
 
     weekly = {}
-    for ticker in ["^VIX", "DX-Y.NYB"]:
+    for ticker in YAHOO_MARKET_TICKERS:
         daily = extract_market_ohlcv_frame(px, ticker)
         weekly[ticker] = build_weekly_ohlcv_from_daily(
             daily[["Open", "High", "Low", "Close", "Volume"]],
@@ -1904,17 +4256,111 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
         fred_data,
         cfg,
     )
-    if fast.empty and macro.empty:
-        return pd.DataFrame(columns=["Date", "Fast_Transition_Risk", "Fast_Transition_State", "Macro_Transition_Risk", "Macro_Transition_State"])
+    confirmations = calculate_confirmations_history(weekly, fred_data, cfg)
+    if fast.empty and macro.empty and confirmations.empty:
+        return pd.DataFrame(
+            columns=[
+                "Date",
+                "Fast_Transition_Risk",
+                "Fast_Transition_State",
+                "Macro_Transition_Risk",
+                "Macro_Transition_State",
+                "Fast_Risk_Direction_4W",
+                "Fast_Risk_Direction_4W_State",
+                "Market_Regime",
+                "Global_Liquidity_Backdrop",
+                "Global_Liquidity_Score",
+                "Global_Liquidity_Direction_13W",
+                "Global_Liquidity_Direction_13W_State",
+                "Long_Liquidity_Cycle",
+                "Negative_Confirmation_Count",
+                "Overall_Transition_Status",
+                "Final_Market_State",
+            ]
+        )
 
     history = pd.merge(
-        fast[["Date", "Fast_Transition_Risk", "Fast_Transition_State"]] if not fast.empty else pd.DataFrame(columns=["Date"]),
+        fast[["Date", "Fast_Transition_Risk", "Fast_Transition_State", "Fast_Risk_Direction_4W", "Fast_Risk_Direction_4W_State"]] if not fast.empty else pd.DataFrame(columns=["Date"]),
         macro[["Date", "Macro_Transition_Risk", "Macro_Transition_State"]] if not macro.empty else pd.DataFrame(columns=["Date"]),
         on="Date",
         how="outer",
     ).sort_values("Date")
+    history = pd.merge(
+        history,
+        confirmations[["Date", "Negative_Confirmation_Count"]] if not confirmations.empty else pd.DataFrame(columns=["Date", "Negative_Confirmation_Count"]),
+        on="Date",
+        how="outer",
+    ).sort_values("Date")
     history["Date"] = pd.to_datetime(history["Date"])
-    return history.loc[(history["Date"] >= "2016-01-01") & (history["Date"] <= "2026-12-31")].reset_index(drop=True)
+    structural = _prepare_spy_weekly_regime_frame()
+    if not structural.empty:
+        structural_slice = structural[["Date", "Market_Regime"]].copy()
+        structural_slice["Date"] = pd.to_datetime(structural_slice["Date"], errors="coerce")
+        history = pd.merge(history, structural_slice.dropna(subset=["Date"]), on="Date", how="left").sort_values("Date")
+        history["Market_Regime"] = history["Market_Regime"].ffill()
+    try:
+        _, monthly, weekly_liquidity = read_global_liquidity()
+        liquidity = _build_global_liquidity_regime_frame(
+            _liquidity_prepare_dates(monthly),
+            _liquidity_prepare_dates(weekly_liquidity),
+        )
+    except Exception:
+        liquidity = pd.DataFrame()
+    if not liquidity.empty:
+        liquidity_slice = liquidity[
+            [
+                "date",
+                "global_liquidity_score",
+                "direction_13w",
+                "direction_13w_state",
+                "long_cycle_phase",
+            ]
+        ].copy()
+        liquidity_slice["Date"] = pd.to_datetime(liquidity_slice["date"], errors="coerce")
+        liquidity_slice = liquidity_slice.rename(
+            columns={
+                "global_liquidity_score": "Global_Liquidity_Score",
+                "direction_13w": "Global_Liquidity_Direction_13W",
+                "direction_13w_state": "Global_Liquidity_Direction_13W_State",
+                "long_cycle_phase": "Long_Liquidity_Cycle",
+            }
+        ).drop(columns=["date"], errors="ignore")
+        history = pd.merge(history, liquidity_slice.dropna(subset=["Date"]), on="Date", how="left").sort_values("Date")
+        for col in [
+            "Global_Liquidity_Score",
+            "Global_Liquidity_Direction_13W",
+            "Global_Liquidity_Direction_13W_State",
+            "Long_Liquidity_Cycle",
+        ]:
+            history[col] = history[col].ffill()
+    history["Global_Liquidity_Backdrop"] = history.apply(
+        lambda row: classify_global_liquidity_backdrop(
+            row.get("Global_Liquidity_Score"),
+            row.get("Global_Liquidity_Direction_13W"),
+            row.get("Global_Liquidity_Direction_13W_State"),
+        ),
+        axis=1,
+    )
+    history["Overall_Transition_Status"] = history.apply(
+        lambda row: calculate_overall_transition_status(
+            row.get("Fast_Transition_Risk"),
+            row.get("Macro_Transition_Risk"),
+            row.get("Negative_Confirmation_Count"),
+            structural_regime=row.get("Market_Regime", "UNKNOWN"),
+            global_liquidity_backdrop=row.get("Global_Liquidity_Backdrop"),
+            global_liquidity_score=row.get("Global_Liquidity_Score"),
+            global_liquidity_direction_13w=row.get("Global_Liquidity_Direction_13W"),
+            global_liquidity_direction_state=row.get("Global_Liquidity_Direction_13W_State"),
+        ),
+        axis=1,
+    )
+    history["Final_Market_State"] = history["Overall_Transition_Status"]
+    today_utc = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+    return history.loc[
+        (history["Date"] >= "2016-01-01")
+        & (history["Date"] <= "2026-12-31")
+        & (history["Date"] <= today_utc)
+    ].reset_index(drop=True)
 
 
 def prepare_candle_data(ohlcv: pd.DataFrame, period_mode: str, max_candles: int) -> pd.DataFrame:
@@ -2581,8 +5027,9 @@ def _render_spy_weekly_market_regime_chart() -> None:
             transition_history.loc[transition_history["NextDate"].isna(), "Date"] + pd.Timedelta(days=7)
         )
         risk_color = alt.Scale(
-            domain=["LOW", "WATCH", "DETERIORATING", "HIGH_RISK", "TRANSITION_ALERT", "MACRO_ALERT", "DATA_INCOMPLETE"],
-            range=["#22c55e", "#facc15", "#fb923c", "#ef4444", "#be123c", "#be123c", "#64748b"],
+            domain=[0, 50, 100],
+            range=["#00ff66", "#ffd400", "#ff1744"],
+            clamp=True,
         )
         for metric, state_col, title in [
             ("Fast_Transition_Risk", "Fast_Transition_State", "Fast Transition Risk"),
@@ -2598,7 +5045,7 @@ def _render_spy_weekly_market_regime_chart() -> None:
                     x=alt.X("Date:T", axis=alt.Axis(title=None, labels=False, ticks=False)),
                     x2="NextDate:T",
                     y=alt.Y(f"{metric}:Q", scale=alt.Scale(domain=[0, 100]), axis=alt.Axis(title=title, format=".0f")),
-                    color=alt.Color(f"{state_col}:N", scale=risk_color, legend=None),
+                    color=alt.Color(f"{metric}:Q", scale=risk_color, legend=None),
                     tooltip=[
                         alt.Tooltip("Date:T", title="Week", format="%Y-%m-%d"),
                         alt.Tooltip(f"{metric}:Q", title=title, format=".0f"),
@@ -2607,9 +5054,62 @@ def _render_spy_weekly_market_regime_chart() -> None:
                 )
                 .properties(height=105, title=title)
             )
-            threshold_60 = alt.Chart(risk_data).mark_rule(color="#f97316", strokeDash=[4, 3]).encode(y=alt.datum(60))
-            threshold_80 = alt.Chart(risk_data).mark_rule(color="#ef4444", strokeDash=[4, 3]).encode(y=alt.datum(80))
-            transition_charts.append(risk_bar + threshold_60 + threshold_80)
+            levels = [10, 20, 40, 60] if metric == "Fast_Transition_Risk" else [20, 40, 60, 80]
+            threshold_layers = [
+                alt.Chart(risk_data).mark_rule(color=color, strokeDash=[4, 3], opacity=0.85).encode(y=alt.datum(level))
+                for level, color in zip(levels, ["#22c55e", "#facc15", "#f97316", "#ef4444"])
+            ]
+            transition_charts.append(risk_bar + threshold_layers[0] + threshold_layers[1] + threshold_layers[2] + threshold_layers[3])
+
+        status_data = transition_history.dropna(subset=["Overall_Transition_Status"]).copy()
+        if not status_data.empty:
+            status_data["StatusBand"] = "Final Market State"
+            status_color = alt.Scale(
+                domain=[
+                    "BULL",
+                    "RECOVERY",
+                    "BULL_LIQUIDITY_WARNING",
+                    "BULL_WITH_WARNING",
+                    "DETERIORATING",
+                    "CORRECTION",
+                    "STRESS",
+                    "DATA_INCOMPLETE",
+                ],
+                range=[
+                    "#00ff66",
+                    "#8cff3d",
+                    "#ffd400",
+                    "#f59e0b",
+                    "#fb923c",
+                    "#ff1744",
+                    "#be123c",
+                    "#64748b",
+                ],
+            )
+            status_band = (
+                alt.Chart(status_data)
+                .mark_rect(opacity=0.92)
+                .encode(
+                    x=alt.X("Date:T", axis=alt.Axis(title=None, labels=False, ticks=False)),
+                    x2="NextDate:T",
+                    y=alt.Y("StatusBand:N", axis=alt.Axis(title=None, labelAngle=0)),
+                    color=alt.Color(
+                        "Overall_Transition_Status:N",
+                        scale=status_color,
+                        legend=alt.Legend(title="Overall Status"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("Date:T", title="Week", format="%Y-%m-%d"),
+                        alt.Tooltip("Overall_Transition_Status:N", title="Overall Status"),
+                        alt.Tooltip("Fast_Transition_Risk:Q", title="Fast Risk", format=".0f"),
+                        alt.Tooltip("Macro_Transition_Risk:Q", title="Macro Risk", format=".0f"),
+                        alt.Tooltip("Global_Liquidity_Backdrop:N", title="Liquidity Backdrop"),
+                        alt.Tooltip("Negative_Confirmation_Count:Q", title="Negative Confirmations", format=".1f"),
+                    ],
+                )
+                .properties(height=54, title="Final Market State")
+            )
+            transition_charts.append(status_band)
 
     chart = alt.vconcat(price_chart, *transition_charts, spacing=8).resolve_scale(x="shared")
     st.altair_chart(chart, use_container_width=True)
@@ -2659,15 +5159,176 @@ def render_market_detail_table(rows: list[tuple[str, str]]) -> None:
 
 
 def render_market_formula(title: str, formula: str) -> None:
+    safe_title = html.escape(title)
+    safe_formula = html.escape(formula)
     st.markdown(
         f"""
 <div style="margin-top: 0.35rem; margin-bottom: 1.4rem; color: #cbd5e1; font-size: 0.78rem; line-height: 1.35;">
-  <div style="color: #94a3b8; font-weight: 800; margin-bottom: 0.25rem;">{title}</div>
-  <pre style="white-space: pre-wrap; background: #111827; border: 1px solid #293241; border-radius: 6px; padding: 0.7rem; margin: 0;">{formula}</pre>
+  <div style="color: #94a3b8; font-weight: 800; margin-bottom: 0.25rem;">{safe_title}</div>
+  <pre style="white-space: pre-wrap; background: #111827; border: 1px solid #293241; border-radius: 6px; padding: 0.7rem; margin: 0;">{safe_formula}</pre>
 </div>
 """,
         unsafe_allow_html=True,
     )
+
+
+def overall_status_logic_text(market: dict) -> str:
+    fast = market.get("Fast_Transition_Risk")
+    macro = market.get("Macro_Transition_Risk")
+    negative = market.get("Negative_Confirmation_Count")
+    structural = format_market_value(market.get("Market_Regime"))
+    backdrop = format_market_value(market.get("Global_Liquidity_Backdrop"))
+    liquidity_score = market.get("Global_Liquidity_Score")
+    liquidity_direction = market.get("Global_Liquidity_Direction_13W")
+    liquidity_direction_state = format_market_value(market.get("Global_Liquidity_Direction_13W_State"))
+    status = format_market_value(market.get("Final_Market_State", market.get("Overall_Transition_Status")))
+    fast_text = format_market_value(fast, "score")
+    macro_text = format_market_value(macro, "score")
+    negative_text = format_market_value(negative)
+
+    try:
+        fast_value = float(fast)
+        macro_value = float(macro)
+        negative_value = float(negative)
+    except Exception:
+        fast_value = np.nan
+        macro_value = np.nan
+        negative_value = np.nan
+
+    liquidity_warning = backdrop in {"LIQUIDITY_WARNING", "NEGATIVE", "STRONGLY_NEGATIVE"} or _safe_float(liquidity_score) < 40.0 or _safe_float(liquidity_direction) < -10.0
+    fast_warning = np.isfinite(fast_value) and fast_value >= 20.0
+    macro_warning = np.isfinite(macro_value) and macro_value >= 20.0
+
+    if structural == "STRESS":
+        matched_rule = "STRESS: Structural Regime is STRESS."
+    elif structural == "CORRECTION":
+        matched_rule = "CORRECTION: Structural Regime is CORRECTION."
+    elif not np.isfinite(fast_value) or not np.isfinite(macro_value) or not np.isfinite(negative_value):
+        matched_rule = "DATA_INCOMPLETE: one or more required inputs are missing."
+    elif sum([fast_warning, macro_warning, liquidity_warning]) >= 2:
+        matched_rule = "DETERIORATING: at least two primary warning layers are active."
+    elif (fast_warning or macro_warning) and negative_value >= 3.0:
+        matched_rule = "DETERIORATING: one primary warning is amplified by 3+ negative confirmations."
+    elif fast_warning or macro_warning:
+        matched_rule = "BULL_WITH_WARNING: structure remains bullish, but fast or macro risk is above 20."
+    elif liquidity_warning:
+        matched_rule = "BULL_LIQUIDITY_WARNING: structure remains bullish, but medium-term liquidity is weakening."
+    else:
+        matched_rule = "BULL: bullish structure without active primary warning layers."
+
+    return (
+        f"Current inputs:\n"
+        f"Structural Regime = {structural}\n"
+        f"Fast Transition Risk = {fast_text}\n"
+        f"Macro Transition Risk = {macro_text}\n"
+        f"Global Liquidity Backdrop = {backdrop}\n"
+        f"Global Liquidity Score = {format_market_value(liquidity_score, 'score')}\n"
+        f"Global Liquidity Direction 13W = {format_market_value(liquidity_direction, 'score')} / {liquidity_direction_state}\n"
+        f"Negative Confirmations = {negative_text}\n"
+        f"Current Final Market State = {status}\n\n"
+        f"Matched rule:\n"
+        f"{matched_rule}\n\n"
+        f"Rule priority, first match wins:\n"
+        f"1. STRESS if Structural Regime is STRESS.\n"
+        f"2. CORRECTION if Structural Regime is CORRECTION.\n"
+        f"3. DETERIORATING if two or more primary warning layers are active.\n"
+        f"4. DETERIORATING if one primary warning is confirmed by 3+ negative confirmations.\n"
+        f"5. BULL_WITH_WARNING if Fast or Macro Transition Risk >= 20.\n"
+        f"6. BULL_LIQUIDITY_WARNING if liquidity is warning/negative or direction is rapidly deteriorating.\n"
+        f"7. BULL otherwise.\n\n"
+        f"Confirmations are an amplifier only; they are not a standalone regime trigger."
+    )
+
+
+def market_regime_interpretation_text(market: dict) -> str:
+    structural = format_market_value(market.get("Market_Regime"))
+    final_state = format_market_value(market.get("Final_Market_State", market.get("Overall_Transition_Status")))
+    fast = f"{format_market_value(market.get('Fast_Transition_Risk'), 'score')} / {format_market_value(market.get('Fast_Transition_State'))}"
+    fast_direction = f"{format_market_value(market.get('Fast_Risk_Direction_4W'), 'score')} / {format_market_value(market.get('Fast_Risk_Direction_4W_State'))}"
+    macro = f"{format_market_value(market.get('Macro_Transition_Risk'), 'score')} / {format_market_value(market.get('Macro_Transition_State'))}"
+    backdrop = format_market_value(market.get("Global_Liquidity_Backdrop"))
+    liquidity = f"{format_market_value(market.get('Global_Liquidity_Score'), 'score')} / {format_market_value(market.get('Global_Liquidity_Direction_13W_State'))}"
+    confirmations = format_market_value(market.get("Negative_Confirmation_Count"))
+    long_cycle = format_market_value(market.get("Long_Liquidity_Cycle"))
+    if final_state == "BULL_LIQUIDITY_WARNING":
+        implication = "Market structure remains bullish, but medium-term liquidity support is weakening materially. This is not the same as technical deterioration."
+    elif final_state == "DETERIORATING":
+        implication = "Multiple primary warning layers are active, so forward risk/reward is deteriorating even if price structure has not yet broken."
+    elif final_state in {"CORRECTION", "STRESS"}:
+        implication = "Structural price action has already moved out of a bull regime, so structural regime has priority over liquidity or confirmation layers."
+    elif final_state == "BULL_WITH_WARNING":
+        implication = "Market structure remains bullish, but near-term or macro transition risk is above the watch threshold."
+    else:
+        implication = "Market structure remains bullish without a strong primary warning combination."
+    return (
+        f"The market is currently in a structural {structural} regime.\n\n"
+        f"Fast Transition Risk is {fast}; 4W direction is {fast_direction}. This block is a 1-4 week stress detector.\n\n"
+        f"Macro Transition Risk is {macro}. This block captures developing 4-12 week macro pressure from DXY, Fed Net Liquidity and US2Y.\n\n"
+        f"Global Liquidity Backdrop is {backdrop}; score/direction is {liquidity}, with long-cycle context {long_cycle}. This layer is a medium-term 8-26W+ expected-return backdrop.\n\n"
+        f"Negative confirmations count is {confirmations}. Confirmations can amplify an existing primary warning but do not trigger deterioration alone.\n\n"
+        f"Current final state: {final_state}. {implication}"
+    )
+
+
+def _render_market_global_liquidity_backdrop_chart() -> None:
+    try:
+        _, monthly, weekly = read_global_liquidity()
+        frame = _build_global_liquidity_regime_frame(
+            _liquidity_prepare_dates(monthly),
+            _liquidity_prepare_dates(weekly),
+        )
+    except Exception:
+        frame = pd.DataFrame()
+    if frame.empty:
+        st.info("No Global Liquidity data available.")
+        return
+    d = _liquidity_filter_range(frame, "5Y")
+    if d.empty:
+        st.info("No Global Liquidity data available for the selected range.")
+        return
+    fig = go.Figure()
+    series = [
+        ("global_liquidity_score", "Global Liquidity Score", "#38bdf8", 2.0),
+        ("m2_impulse", "M2 Impulse", "#22c55e", 1.3),
+        ("cb_impulse", "CB Impulse", "#facc15", 1.3),
+        ("usnl_impulse", "USNL Impulse", "#f97316", 1.3),
+    ]
+    for column, label, color, width in series:
+        if column in d.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=d["date"],
+                    y=pd.to_numeric(d[column], errors="coerce"),
+                    mode="lines",
+                    name=label,
+                    line={"color": color, "width": width},
+                )
+            )
+    if "direction_13w" in d.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=d["date"],
+                y=pd.to_numeric(d["direction_13w"], errors="coerce"),
+                mode="lines",
+                name="Direction 13W",
+                yaxis="y2",
+                line={"color": "#e879f9", "width": 1.5, "dash": "dash"},
+            )
+        )
+    for level in [20, 40, 60, 80]:
+        fig.add_hline(y=level, line={"color": "#94a3b8", "dash": "dot", "width": 1}, opacity=0.45)
+    fig.update_layout(
+        yaxis={"title": "Score", "range": [0, 100]},
+        yaxis2={
+            "title": "Direction 13W",
+            "overlaying": "y",
+            "side": "right",
+            "showgrid": False,
+            "color": "#cbd5e1",
+            "linecolor": "#475569",
+        },
+    )
+    st.plotly_chart(_style_liquidity_plotly(fig, 320, "Global Liquidity Backdrop"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
 
 
 def render_market_regime_tab(market: dict) -> None:
@@ -2675,25 +5336,51 @@ def render_market_regime_tab(market: dict) -> None:
 
     summary_cols = st.columns(5)
     with summary_cols[0]:
-        render_market_metric("Structural Market Regime", format_market_value(market.get("Market_Regime")), "SPY weekly")
+        render_market_metric("Structural Regime", format_market_value(market.get("Market_Regime")), "SPY weekly")
     with summary_cols[1]:
-        render_market_metric(
-            "Fast Transition Risk",
-            f"{format_market_value(market.get('Fast_Transition_Risk'), 'score')} / {format_market_value(market.get('Fast_Transition_State'))}",
-            "VIX + DXY",
-        )
+        render_market_metric("Final Market State", format_market_value(market.get("Final_Market_State", market.get("Overall_Transition_Status"))), "rule hierarchy")
     with summary_cols[2]:
         render_market_metric(
             "Macro Transition Risk",
             f"{format_market_value(market.get('Macro_Transition_Risk'), 'score')} / {format_market_value(market.get('Macro_Transition_State'))}",
-            "DXY + Fed liquidity + US2Y",
+            "DXY 40% + Fed liquidity 30% + US2Y 30%",
         )
     with summary_cols[3]:
-        render_market_metric("Overall Status", format_market_value(market.get("Overall_Transition_Status")), "rules-based")
+        render_market_metric(
+            "Fast Transition Risk",
+            f"{format_market_value(market.get('Fast_Transition_Risk'), 'score')} / {format_market_value(market.get('Fast_Transition_State'))}",
+            "VIX 70% + DXY 30%",
+        )
     with summary_cols[4]:
-        render_market_metric("Alpha Confidence", format_market_value(market.get("Alpha_Confidence"), "score"), "regime-adjusted")
+        render_market_metric(
+            "Fast Risk Direction 4W",
+            f"{format_market_value(market.get('Fast_Risk_Direction_4W'), 'score')} / {format_market_value(market.get('Fast_Risk_Direction_4W_State'))}",
+            "acceleration only",
+        )
+
+    summary_cols = st.columns(2)
+    with summary_cols[0]:
+        render_market_metric("Long Liquidity Cycle", format_market_value(market.get("Long_Liquidity_Cycle")), "context only")
+    with summary_cols[1]:
+        render_market_metric("Global Liquidity Backdrop", format_market_value(market.get("Global_Liquidity_Backdrop")), "8-26W+ backdrop")
+
+    summary_cols = st.columns(4)
+    with summary_cols[0]:
+        render_market_metric("Negative Confirmations", format_market_value(market.get("Negative_Confirmation_Count")), "amplifier only")
+    with summary_cols[1]:
+        render_market_metric("WTI Confirmation", format_market_value(market.get("WTI_Confirmation")), "oil pressure")
+    with summary_cols[2]:
+        render_market_metric("10Y Real Yield Confirmation", format_market_value(market.get("Real_Yield_10Y_Confirmation")), "real-rate pressure")
+    with summary_cols[3]:
+        render_market_metric("RSI Divergence", format_market_value(market.get("RSI_Divergence")), "SPY weekly RSI14")
+
+    st.markdown("### Market Regime Interpretation")
+    render_market_formula("Interpretation", market_regime_interpretation_text(market))
 
     _render_spy_weekly_market_regime_chart()
+
+    st.markdown("### Current Final Market State Logic")
+    render_market_formula("Logic", overall_status_logic_text(market))
 
     st.markdown("### Structural Market Regime")
     render_market_detail_table(
@@ -2733,7 +5420,9 @@ def render_market_regime_tab(market: dict) -> None:
         "VIX_Z26 = (VIX - MedianVIX26) / (1.4826 * MADVIX26)\n"
         "VIX_Risk = piecewise_score(VIX_Z26)\n"
         "DXY_Risk = piecewise_score(DXY_26W_Return)\n"
-        "FastTransitionRisk = clip(0.70 * VIX_Risk + 0.30 * DXY_Risk, 0, 100)",
+        "FastTransitionRisk = clip(0.70 * VIX_Risk + 0.30 * DXY_Risk, 0, 100)\n"
+        "FastRiskDirection4W = FastTransitionRisk_t - FastTransitionRisk_t_minus_4W\n"
+        "Fast states: LOW <=10, NORMAL <=20, WATCH <=40, HIGH <=60, EXTREME >60",
     )
 
     st.markdown("### Macro Transition Risk")
@@ -2759,6 +5448,25 @@ def render_market_regime_tab(market: dict) -> None:
         "US2Y_Risk = piecewise_score(US2Y_Change13W_bp)\n"
         "MacroTransitionRisk = clip(0.40 * DXY_Risk + 0.30 * FedLiquidity_Risk + 0.30 * US2Y_Risk, 0, 100)",
     )
+
+    st.markdown("### Global Liquidity Backdrop")
+    render_market_detail_table(
+        [
+            ("Global Liquidity Backdrop", format_market_value(market.get("Global_Liquidity_Backdrop"))),
+            ("Global Liquidity Score", format_market_value(market.get("Global_Liquidity_Score"), "score")),
+            ("Global Liquidity Direction 13W", f"{format_market_value(market.get('Global_Liquidity_Direction_13W'), 'score')} / {format_market_value(market.get('Global_Liquidity_Direction_13W_State'))}"),
+            ("Long Liquidity Cycle", format_market_value(market.get("Long_Liquidity_Cycle"))),
+            ("Data Status", format_market_value(market.get("Global_Liquidity_Data_Status"))),
+            ("Last Updated", format_market_value(market.get("Global_Liquidity_Last_Updated"))),
+        ]
+    )
+    render_market_formula(
+        "Formula",
+        "GlobalLiquidityScore = 0.50 * M2Impulse + 0.25 * CBImpulse + 0.25 * USNLImpulse\n"
+        "GlobalLiquidityDirection13W = GlobalLiquidityScore_t - GlobalLiquidityScore_t_minus_13W\n"
+        "GlobalLiquidityBackdrop is a separate medium-term backdrop and does not directly change Structural Regime.",
+    )
+    _render_market_global_liquidity_backdrop_chart()
 
     st.markdown("### Confirmations")
     render_market_detail_table(
@@ -2888,6 +5596,10 @@ def main():
     )
     if "universe_map" not in st.session_state:
         st.session_state["universe_map"] = load_universe_map()
+    if "performance_refresh_nonce" not in st.session_state:
+        st.session_state["performance_refresh_nonce"] = 0
+    if "slow_refresh_nonce" not in st.session_state:
+        st.session_state["slow_refresh_nonce"] = 0
     universe_map = st.session_state["universe_map"]
 
     st.markdown(
@@ -3008,9 +5720,11 @@ def main():
     with top_hard_refresh_col:
         hard_refresh = st.button("Hard Refresh Data", use_container_width=True)
     if refresh:
-        st.cache_data.clear()
+        st.session_state["performance_refresh_nonce"] += 1
         st.rerun()
     if hard_refresh:
+        st.session_state["performance_refresh_nonce"] += 1
+        st.session_state["slow_refresh_nonce"] += 1
         st.cache_data.clear()
         if hasattr(st, "cache_resource"):
             st.cache_resource.clear()
@@ -3031,6 +5745,8 @@ def main():
             f"{selected_universe_name}:{str(selected_universe)}",
             divergence_cfg,
             divergence_signature,
+            st.session_state["performance_refresh_nonce"],
+            st.session_state["slow_refresh_nonce"],
         )
         market_snapshot = load_market_model_snapshot(market_signature)
     refresh_text = "n/a"
@@ -3083,8 +5799,36 @@ def main():
     if flow_unavailable:
         st.warning("Fund flow data unavailable")
 
-    table_tab, charts_tab, graphs_tab, market_regime_tab, alpha_tab, inputs_tab, description_tab, tester_tab = st.tabs(
-        ["Table", "Charts", "Graphs", "Market Regime", "Alpha Engine", "Inputs", "Description", "Tester"]
+    (
+        table_tab,
+        charts_tab,
+        graphs_tab,
+        ai_dashboard_tab,
+        market_regime_tab,
+        global_liquidity_tab,
+        gold_regime_tab,
+        btc_regime_tab,
+        crypto_derivatives_tab,
+        alpha_tab,
+        inputs_tab,
+        description_tab,
+        tester_tab,
+    ) = st.tabs(
+        [
+            "Table",
+            "Charts",
+            "Graphs",
+            "AI Dashboard",
+            "Market Regime",
+            "Global Liquidity Regime",
+            "Gold Regime",
+            "BTC Regime",
+            "Crypto Derivatives",
+            "Alpha Engine",
+            "Inputs",
+            "Description",
+            "Tester",
+        ]
     )
     with table_tab:
         gb = GridOptionsBuilder.from_dataframe(table_display_df)
@@ -3296,8 +6040,18 @@ def main():
         else:
             graph_ordered_df = base_df
         render_graphs_tab(graph_ordered_df.drop(columns=["__row_id__"], errors="ignore"), selected_universe, selected_universe_name)
+    with ai_dashboard_tab:
+        render_ai_dashboard_tab()
     with market_regime_tab:
         render_market_regime_tab(market_snapshot)
+    with global_liquidity_tab:
+        render_global_liquidity_dashboard_tab()
+    with gold_regime_tab:
+        render_gold_regime_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), get_fred_api_key_for_app())
+    with btc_regime_tab:
+        render_btc_regime_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), market_snapshot)
+    with crypto_derivatives_tab:
+        render_crypto_derivatives_tab()
     with alpha_tab:
         render_alpha_engine_tab(table_df.drop(columns=["__row_id__"], errors="ignore"))
     with inputs_tab:

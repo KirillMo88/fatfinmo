@@ -5,6 +5,7 @@ import numpy as np
 from fund_flows import (
     FundFlowObservation,
     calculate_fund_flow_metrics,
+    fund_flow_proxy_tickers,
     get_fund_flow_metrics,
     normalize_ticker_for_etf_com,
     parse_etf_com_fund_flow_payload,
@@ -16,6 +17,13 @@ def test_normalize_ticker_for_etf_com_rejects_unsupported_symbols():
     assert normalize_ticker_for_etf_com("BRK.B") == "BRK-B"
     assert normalize_ticker_for_etf_com("BTC-USD") is None
     assert normalize_ticker_for_etf_com("^VIX") is None
+
+
+def test_fund_flow_proxy_tickers_maps_crypto_assets():
+    assert fund_flow_proxy_tickers("BTC-USD") == ("IBIT", "FBTC", "GBTC")
+    assert fund_flow_proxy_tickers("eth-usd") == ("ETHA", "ETH")
+    assert fund_flow_proxy_tickers("SOL-USD") == ("BSOL", "ASOL")
+    assert fund_flow_proxy_tickers("SPY") == ()
 
 
 def test_parse_etf_com_payload_accepts_nested_rows_and_money_suffixes():
@@ -115,3 +123,30 @@ def test_get_fund_flow_metrics_uses_aum_fetcher_when_payload_has_no_aum(tmp_path
 
     assert metrics is not None
     assert np.isclose(metrics.flow_3m_pct, 6.0)
+
+
+def test_get_fund_flow_metrics_aggregates_crypto_proxy_etfs(tmp_path):
+    calls = []
+
+    def fake_fetcher(ticker, start_date, end_date):
+        calls.append(ticker)
+        return [
+            FundFlowObservation(ticker, date(2026, 2, 1), net_flow=10_000_000.0, aum=None),
+            FundFlowObservation(ticker, date(2026, 3, 1), net_flow=20_000_000.0, aum=None),
+            FundFlowObservation(ticker, date(2026, 4, 1), net_flow=30_000_000.0, aum=None),
+        ]
+
+    metrics = get_fund_flow_metrics(
+        "BTC-USD",
+        cache_path=tmp_path / "fund_flows.sqlite",
+        today=date(2026, 4, 1),
+        fetcher=fake_fetcher,
+        aum_fetcher=lambda ticker: 1_000_000_000.0,
+    )
+
+    assert metrics is not None
+    assert calls == ["IBIT", "FBTC", "GBTC"]
+    assert np.isclose(metrics.flow_1m_pct, 3.0)
+    assert np.isclose(metrics.flow_3m_pct, 6.0)
+    assert metrics.source == "etf.com:IBIT+FBTC+GBTC"
+    assert metrics.method == "proxy_latest_aum_fallback"

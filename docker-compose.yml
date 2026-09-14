@@ -17,6 +17,8 @@ services:
     volumes:
       - ./persistent/custom_universe_lists.json:/app/custom_universe_lists.json
       - ./persistent/finance_cache:/app/persistent/finance_cache
+      - ./persistent/bybit_derivatives:/app/persistent/bybit_derivatives
+      - ./persistent/global_liquidity:/app/persistent/global_liquidity
 
   tester:
     build: .

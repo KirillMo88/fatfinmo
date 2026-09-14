@@ -50,6 +50,11 @@ AUM_KEYS = (
     "netAssets",
 )
 UNSUPPORTED_TICKER_SUFFIXES = ("-USD", "-USDT", "-EUR", "-GBP", "=X")
+FUND_FLOW_PROXY_TICKERS = {
+    "BTC-USD": ("IBIT", "FBTC", "GBTC"),
+    "ETH-USD": ("ETHA", "ETH"),
+    "SOL-USD": ("BSOL", "ASOL"),
+}
 
 
 @dataclass(frozen=True)
@@ -91,6 +96,11 @@ def normalize_ticker_for_etf_com(ticker: str) -> str | None:
         logger.info("ticker unsupported for ETF.com fund flows: %s", ticker)
         return None
     return normalized.replace(".", "-")
+
+
+def fund_flow_proxy_tickers(ticker: str) -> tuple[str, ...]:
+    normalized = str(ticker or "").strip().upper()
+    return FUND_FLOW_PROXY_TICKERS.get(normalized, ())
 
 
 def fetch_etf_com_fund_flow_history(
@@ -189,6 +199,17 @@ def get_fund_flow_metrics(
     fetcher: Callable[[str, date, date], list[FundFlowObservation]] | None = None,
     aum_fetcher: Callable[[str], float | None] | None = None,
 ) -> FundFlowMetrics | None:
+    proxy_tickers = fund_flow_proxy_tickers(ticker)
+    if proxy_tickers:
+        return _get_proxy_fund_flow_metrics(
+            str(ticker or "").strip().upper(),
+            proxy_tickers,
+            cache_path=cache_path,
+            today=today,
+            fetcher=fetcher,
+            aum_fetcher=aum_fetcher,
+        )
+
     provider_ticker = normalize_ticker_for_etf_com(ticker)
     if provider_ticker is None:
         return None
@@ -196,6 +217,72 @@ def get_fund_flow_metrics(
     cache = FundFlowCache(cache_path or default_fund_flow_cache_path())
     today_date = today or datetime.now(timezone.utc).date()
     fetcher = fetcher or fetch_etf_com_fund_flow_history
+
+    observations, fallback_aum = _load_provider_fund_flow_inputs(
+        provider_ticker,
+        cache,
+        today_date,
+        fetcher,
+        aum_fetcher or fetch_yahoo_total_assets,
+    )
+    return calculate_fund_flow_metrics(observations, fallback_aum=fallback_aum)
+
+
+def _get_proxy_fund_flow_metrics(
+    ticker: str,
+    proxy_tickers: Iterable[str],
+    cache_path: Path | None = None,
+    today: date | None = None,
+    fetcher: Callable[[str, date, date], list[FundFlowObservation]] | None = None,
+    aum_fetcher: Callable[[str], float | None] | None = None,
+) -> FundFlowMetrics | None:
+    cache = FundFlowCache(cache_path or default_fund_flow_cache_path())
+    today_date = today or datetime.now(timezone.utc).date()
+    fetcher = fetcher or fetch_etf_com_fund_flow_history
+    aum_fetcher = aum_fetcher or fetch_yahoo_total_assets
+
+    all_observations: list[FundFlowObservation] = []
+    fallback_aums: list[float] = []
+    for proxy in proxy_tickers:
+        provider_ticker = normalize_ticker_for_etf_com(proxy)
+        if provider_ticker is None:
+            continue
+        observations, fallback_aum = _load_provider_fund_flow_inputs(
+            provider_ticker,
+            cache,
+            today_date,
+            fetcher,
+            aum_fetcher,
+        )
+        all_observations.extend(observations)
+        if fallback_aum is not None and np.isfinite(fallback_aum) and fallback_aum > 0:
+            fallback_aums.append(float(fallback_aum))
+
+    if not all_observations:
+        logger.info("Fund Flow proxy calculation unavailable: %s has no ETF observations", ticker)
+        return None
+
+    aggregate_observations = _aggregate_proxy_observations(ticker, all_observations)
+    fallback_aum = float(sum(fallback_aums)) if fallback_aums else None
+    metrics = calculate_fund_flow_metrics(aggregate_observations, fallback_aum=fallback_aum)
+    if metrics is None:
+        return None
+    return FundFlowMetrics(
+        flow_1m_pct=metrics.flow_1m_pct,
+        flow_3m_pct=metrics.flow_3m_pct,
+        latest_date=metrics.latest_date,
+        source=f"{ETF_COM_SOURCE}:{'+'.join(proxy_tickers)}",
+        method=f"proxy_{metrics.method}",
+    )
+
+
+def _load_provider_fund_flow_inputs(
+    provider_ticker: str,
+    cache: "FundFlowCache",
+    today_date: date,
+    fetcher: Callable[[str, date, date], list[FundFlowObservation]],
+    aum_fetcher: Callable[[str], float | None],
+) -> tuple[list[FundFlowObservation], float | None]:
 
     if cache.should_attempt_update(provider_ticker, today_date):
         latest_cached = cache.latest_observation_date(provider_ticker)
@@ -231,8 +318,36 @@ def get_fund_flow_metrics(
         logger.info("cached observations used: %s count=%s", provider_ticker, len(observations))
     fallback_aum = None
     if observations and all(obs.aum is None for obs in observations):
-        fallback_aum = (aum_fetcher or fetch_yahoo_total_assets)(provider_ticker)
-    return calculate_fund_flow_metrics(observations, fallback_aum=fallback_aum)
+        fallback_aum = aum_fetcher(provider_ticker)
+    return observations, fallback_aum
+
+
+def _aggregate_proxy_observations(ticker: str, observations: Iterable[FundFlowObservation]) -> list[FundFlowObservation]:
+    df = _observations_to_frame(observations)
+    if df.empty:
+        return []
+    grouped = (
+        df.groupby("date", as_index=False)
+        .agg(
+            net_flow=("net_flow", "sum"),
+            aum=("aum", lambda values: values.sum(min_count=1)),
+        )
+        .sort_values("date")
+    )
+    out: list[FundFlowObservation] = []
+    for row in grouped.itertuples(index=False):
+        raw_aum = row.aum
+        aum = None if pd.isna(raw_aum) else float(raw_aum)
+        out.append(
+            FundFlowObservation(
+                ticker=ticker,
+                date=pd.Timestamp(row.date).date(),
+                net_flow=float(row.net_flow),
+                aum=aum,
+                source=ETF_COM_SOURCE,
+            )
+        )
+    return out
 
 
 def fetch_yahoo_total_assets(ticker: str) -> float | None:

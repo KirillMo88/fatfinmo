@@ -92,6 +92,7 @@ def calculate_market_model(
         fast.get("Fast_Transition_Risk"),
         macro.get("Macro_Transition_Risk"),
         confirmations.get("Negative_Confirmation_Count"),
+        structural_regime=structural.get("Market_Regime", "UNKNOWN"),
     )
     alpha_confidence = calculate_alpha_confidence(
         structural.get("Market_Regime", "UNKNOWN"),
@@ -105,6 +106,7 @@ def calculate_market_model(
         **macro,
         **confirmations,
         "Overall_Transition_Status": overall_status,
+        "Final_Market_State": overall_status,
         "Alpha_Confidence": alpha_confidence,
     }
 
@@ -126,10 +128,12 @@ def calculate_fast_transition_risk(vix: pd.Series, dxy: pd.Series, config: dict 
         state = "DATA_INCOMPLETE"
     else:
         risk = float(np.clip(float(cfg["vix_weight"]) * vix_risk + float(cfg["dxy_weight"]) * dxy_risk, 0.0, 100.0))
-        state = transition_state(risk, alert_label="TRANSITION_ALERT")
+        state = fast_transition_state(risk)
     return {
         "Fast_Transition_Risk": risk,
         "Fast_Transition_State": state,
+        "Fast_Risk_Direction_4W": np.nan,
+        "Fast_Risk_Direction_4W_State": "DATA_INCOMPLETE",
         "VIX_Z26": vix_z,
         "VIX_Risk": vix_risk,
         "DXY_Return_13W": dxy_13w,
@@ -153,14 +157,19 @@ def calculate_fast_transition_risk_history(vix: pd.Series, dxy: pd.Series, confi
     dxy_risk = piecewise_score_series(dxy_26w, cfg["dxy_risk_points"])
     risk = (float(cfg["vix_weight"]) * vix_risk + float(cfg["dxy_weight"]) * dxy_risk).clip(0.0, 100.0)
     incomplete = vix_risk.isna() | dxy_risk.isna()
-    state = risk.map(lambda value: transition_state(value, alert_label="TRANSITION_ALERT"))
+    state = risk.map(fast_transition_state)
     state.loc[incomplete] = "DATA_INCOMPLETE"
     risk.loc[incomplete] = np.nan
+    direction_4w = risk - risk.shift(4)
+    direction_state = direction_4w.map(fast_risk_direction_state)
+    direction_state.loc[direction_4w.isna()] = "DATA_INCOMPLETE"
     return pd.DataFrame(
         {
             "Date": index,
             "Fast_Transition_Risk": risk.values,
             "Fast_Transition_State": state.values,
+            "Fast_Risk_Direction_4W": direction_4w.values,
+            "Fast_Risk_Direction_4W_State": direction_state.values,
             "VIX_Z26": vix_z.values,
             "VIX_Risk": vix_risk.values,
             "DXY_Return_13W": dxy_13w.values,
@@ -330,25 +339,138 @@ def calculate_confirmations(yahoo_weekly: dict[str, pd.DataFrame], fred_data: pd
     }
 
 
-def calculate_overall_transition_status(fast_risk: float, macro_risk: float, negative_confirmations: float) -> str:
-    fast = float(fast_risk) if np.isfinite(fast_risk) else np.nan
-    macro = float(macro_risk) if np.isfinite(macro_risk) else np.nan
-    negative = float(negative_confirmations) if np.isfinite(negative_confirmations) else np.nan
+def calculate_confirmations_history(yahoo_weekly: dict[str, pd.DataFrame], fred_data: pd.DataFrame | None, config: dict | None = None) -> pd.DataFrame:
+    cfg = (config or MARKET_MODEL_CONFIG)["confirmations"]
+    wti = weekly_close(yahoo_weekly.get("CL=F", pd.DataFrame()))
+    spy = weekly_close(yahoo_weekly.get("SPY", pd.DataFrame()))
+    iwm = weekly_close(yahoo_weekly.get("IWM", pd.DataFrame()))
+    xli = weekly_close(yahoo_weekly.get("XLI", pd.DataFrame()))
+    xlp = weekly_close(yahoo_weekly.get("XLP", pd.DataFrame()))
+    fred_weekly = fred_series_weekly(fred_data)
+    real_yield = fred_weekly.get("DFII10", pd.Series(dtype="float64"))
+
+    wti_13w = wti.pct_change(int(cfg["wti_window"])) if not wti.empty else pd.Series(dtype="float64")
+    real_yield_change_13w_bp = (
+        (real_yield - real_yield.shift(int(cfg["real_yield_window"]))) * 100.0
+        if not real_yield.empty
+        else pd.Series(dtype="float64")
+    )
+    iwm_spy_13w = ratio_return_series(iwm, spy, int(cfg["iwm_spy_window"]))
+    xli_xlp_13w = ratio_return_series(xli, xlp, int(cfg["xli_xlp_window"]))
+    rsi_divergence = calculate_rsi_divergence_history(spy, cfg)
+
+    index = union_series_index([wti_13w, real_yield_change_13w_bp, iwm_spy_13w, xli_xlp_13w, rsi_divergence])
+    if index.empty:
+        return pd.DataFrame(columns=["Date", "Negative_Confirmation_Count"])
+
+    frame = pd.DataFrame(index=index)
+    frame["WTI_13W_Return"] = pd.to_numeric(wti_13w, errors="coerce").reindex(index)
+    frame["Real_Yield_10Y_Change_13W_bp"] = pd.to_numeric(real_yield_change_13w_bp, errors="coerce").reindex(index)
+    frame["IWM_SPY_13W_Return"] = pd.to_numeric(iwm_spy_13w, errors="coerce").reindex(index)
+    frame["XLI_XLP_13W_Return"] = pd.to_numeric(xli_xlp_13w, errors="coerce").reindex(index)
+    frame["WTI_Confirmation"] = frame["WTI_13W_Return"].map(classify_wti_confirmation)
+    frame["Real_Yield_10Y_Confirmation"] = frame["Real_Yield_10Y_Change_13W_bp"].map(classify_real_yield_confirmation)
+    frame["IWM_SPY_Confirmation"] = frame["IWM_SPY_13W_Return"].map(classify_ratio_confirmation)
+    frame["XLI_XLP_Confirmation"] = frame["XLI_XLP_13W_Return"].map(classify_ratio_confirmation)
+    frame["RSI_Divergence"] = rsi_divergence.reindex(index).fillna("NONE")
+
+    confirmation_cols = [
+        "WTI_Confirmation",
+        "Real_Yield_10Y_Confirmation",
+        "IWM_SPY_Confirmation",
+        "XLI_XLP_Confirmation",
+    ]
+    frame["Negative_Confirmation_Count"] = frame[confirmation_cols].isin({"NEGATIVE", "STRONG_NEGATIVE"}).sum(axis=1).astype(float)
+    frame.loc[frame["RSI_Divergence"].isin({"MODERATE", "STRONG"}), "Negative_Confirmation_Count"] += 1.0
+    frame.loc[frame["RSI_Divergence"] == "MILD", "Negative_Confirmation_Count"] += 0.5
+
+    return frame.reset_index().rename(columns={"index": "Date"})
+
+
+def calculate_overall_transition_status(
+    fast_risk: float,
+    macro_risk: float,
+    negative_confirmations: float,
+    structural_regime: str = "BULL",
+    global_liquidity_backdrop: str = "NEUTRAL",
+    global_liquidity_score: float = np.nan,
+    global_liquidity_direction_13w: float = np.nan,
+    global_liquidity_direction_state: str = "",
+) -> str:
+    fast = safe_numeric(fast_risk)
+    macro = safe_numeric(macro_risk)
+    negative = safe_numeric(negative_confirmations)
+    liquidity_score = safe_numeric(global_liquidity_score)
+    liquidity_direction = safe_numeric(global_liquidity_direction_13w)
+    liquidity_state = str(global_liquidity_direction_state or "").upper()
+    backdrop = str(global_liquidity_backdrop or "NEUTRAL").upper()
+    structural = str(structural_regime or "UNKNOWN").upper()
+
+    if structural == "STRESS":
+        return "STRESS"
+    if structural == "CORRECTION":
+        return "CORRECTION"
+    if structural not in {"BULL", "BULL_HIGH_VOL"}:
+        return "DATA_INCOMPLETE"
     if not np.isfinite(fast) or not np.isfinite(macro) or not np.isfinite(negative):
         return "DATA_INCOMPLETE"
-    if fast > 80.0 or (fast > 60.0 and macro > 60.0):
-        return "TRANSITION_ALERT"
-    if fast > 60.0 and macro > 40.0:
-        return "HIGH_RISK"
-    if fast > 40.0 or macro > 60.0 or negative >= 3.0:
+
+    liquidity_warning = (
+        backdrop in {"LIQUIDITY_WARNING", "NEGATIVE", "STRONGLY_NEGATIVE"}
+        or (np.isfinite(liquidity_score) and liquidity_score < 40.0)
+        or (np.isfinite(liquidity_direction) and liquidity_direction < -10.0)
+        or liquidity_state == "DETERIORATING_FAST"
+    )
+    fast_warning = fast >= 20.0
+    macro_warning = macro >= 20.0
+    primary_count = int(fast_warning) + int(macro_warning) + int(liquidity_warning)
+    if primary_count >= 2:
         return "DETERIORATING"
-    if (20.0 < fast <= 40.0) or macro > 40.0:
-        return "TRANSITION_WATCH"
-    if fast <= 40.0 and 20.0 < macro <= 40.0:
-        return "MACRO_WATCH"
-    if fast <= 20.0 and macro <= 20.0 and negative <= 1.0:
-        return "STABLE"
-    return "WATCH"
+    if (fast_warning or macro_warning) and negative >= 3.0:
+        return "DETERIORATING"
+    if fast_warning or macro_warning:
+        return "BULL_WITH_WARNING"
+    if liquidity_warning:
+        return "BULL_LIQUIDITY_WARNING"
+    return "BULL"
+
+
+def classify_global_liquidity_backdrop(score: float, direction: float, direction_state: str = "") -> str:
+    value = safe_numeric(score)
+    delta = safe_numeric(direction)
+    state = str(direction_state or "").upper()
+    if not state and np.isfinite(delta):
+        if delta > 10.0:
+            state = "ACCELERATING"
+        elif delta > 5.0:
+            state = "IMPROVING"
+        elif delta >= -5.0:
+            state = "STABLE"
+        elif delta >= -10.0:
+            state = "DETERIORATING"
+        else:
+            state = "DETERIORATING_FAST"
+    if not np.isfinite(value) or not state:
+        return "DATA_INCOMPLETE"
+    if value < 20.0 and state == "DETERIORATING_FAST":
+        return "STRONGLY_NEGATIVE"
+    if value > 60.0 and state in {"IMPROVING", "ACCELERATING"}:
+        return "SUPPORTIVE"
+    if value > 60.0 and state in {"DETERIORATING", "DETERIORATING_FAST"}:
+        return "SUPPORTIVE_BUT_WEAKENING"
+    if 40.0 <= value <= 60.0 and state == "STABLE":
+        return "NEUTRAL"
+    if 40.0 <= value <= 60.0 and state == "DETERIORATING_FAST":
+        return "LIQUIDITY_WARNING"
+    if value < 40.0 and state in {"IMPROVING", "ACCELERATING"}:
+        return "EARLY_REACCELERATION"
+    if value < 40.0 and state in {"DETERIORATING", "DETERIORATING_FAST"}:
+        return "NEGATIVE"
+    if value > 60.0:
+        return "SUPPORTIVE"
+    if value >= 40.0:
+        return "LIQUIDITY_WARNING" if state in {"DETERIORATING", "DETERIORATING_FAST"} else "NEUTRAL"
+    return "EARLY_REACCELERATION" if state in {"IMPROVING", "ACCELERATING"} else "NEGATIVE"
 
 
 def calculate_alpha_confidence(regime: str, fast_risk: float, macro_risk: float, config: dict | None = None) -> float:
@@ -375,6 +497,14 @@ def transition_confidence_modifier(risk: float, bands: list[tuple[float, float]]
     return float(bands[-1][1])
 
 
+def safe_numeric(value) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    return numeric if np.isfinite(numeric) else np.nan
+
+
 def transition_state(score: float, alert_label: str) -> str:
     if not np.isfinite(score):
         return "DATA_INCOMPLETE"
@@ -387,6 +517,32 @@ def transition_state(score: float, alert_label: str) -> str:
     if score <= 80.0:
         return "HIGH_RISK"
     return alert_label
+
+
+def fast_transition_state(score: float) -> str:
+    if not np.isfinite(score):
+        return "DATA_INCOMPLETE"
+    if score <= 10.0:
+        return "LOW"
+    if score <= 20.0:
+        return "NORMAL"
+    if score <= 40.0:
+        return "WATCH"
+    if score <= 60.0:
+        return "HIGH"
+    return "EXTREME"
+
+
+def fast_risk_direction_state(delta_4w: float) -> str:
+    if not np.isfinite(delta_4w):
+        return "DATA_INCOMPLETE"
+    if delta_4w > 20.0:
+        return "RAPID_DETERIORATION"
+    if delta_4w > 10.0:
+        return "DETERIORATING"
+    if delta_4w < -10.0:
+        return "IMPROVING"
+    return "STABLE"
 
 
 def weekly_close(frame: pd.DataFrame) -> pd.Series:
@@ -415,6 +571,18 @@ def ratio_return(numerator: pd.Series, denominator: pd.Series, window: int) -> f
         return np.nan
     ratio = (numerator / denominator.reindex(numerator.index, method="ffill")).replace([np.inf, -np.inf], np.nan).dropna()
     return safe_last(ratio.pct_change(window)) if not ratio.empty else np.nan
+
+
+def ratio_return_series(numerator: pd.Series, denominator: pd.Series, window: int) -> pd.Series:
+    if numerator.empty or denominator.empty:
+        return pd.Series(dtype="float64")
+    index = union_series_index([numerator, denominator])
+    if index.empty:
+        return pd.Series(dtype="float64")
+    numerator_values = pd.to_numeric(numerator, errors="coerce").sort_index().reindex(index).ffill()
+    denominator_values = pd.to_numeric(denominator, errors="coerce").sort_index().reindex(index).ffill()
+    ratio = (numerator_values / denominator_values).replace([np.inf, -np.inf], np.nan)
+    return ratio.pct_change(window)
 
 
 def calculate_rsi_divergence(close: pd.Series, cfg: dict) -> str:
@@ -448,6 +616,18 @@ def calculate_rsi_divergence(close: pd.Series, cfg: dict) -> str:
             if price_gain > 0.0 and rsi_drop >= 3.0:
                 return "MILD"
     return "NONE"
+
+
+def calculate_rsi_divergence_history(close: pd.Series, cfg: dict) -> pd.Series:
+    prices = pd.to_numeric(close, errors="coerce").dropna().sort_index()
+    if prices.empty:
+        return pd.Series(dtype="object")
+    min_points = int(cfg["rsi_period"]) + 20
+    values = []
+    for current_date in prices.index:
+        history = prices.loc[:current_date]
+        values.append(calculate_rsi_divergence(history, cfg) if len(history) >= min_points else "NONE")
+    return pd.Series(values, index=prices.index, dtype="object")
 
 
 def classify_wti_confirmation(value: float) -> str:

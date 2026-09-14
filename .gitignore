@@ -8,3 +8,7 @@ __pycache__/
 persistent/
 hermes/
 *.pyc
+exports/*.csv
+exports/*.xls
+exports/*.xlsx
+exports/__pycache__/
