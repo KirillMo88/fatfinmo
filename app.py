@@ -40,6 +40,7 @@ from market_model import (
     weekly_close,
 )
 from table_export import dataframe_to_excel_xls_bytes
+from ai_dashboard import AI_UNIVERSE
 from ai_dashboard_tab import render_ai_dashboard_tab
 from gold_regime_tab import render_gold_regime_tab
 from global_liquidity import (
@@ -88,6 +89,7 @@ ETF_UNIVERSE_FULL = {
         "Tech": ["BLOK", "BUG", "DTCR", "SKYY", "SOXX", "TINY"],
         "Transport": ["BOAT"],
     },
+    "AI": AI_UNIVERSE,
     "Bonds": {
         "Bonds": ["SHY", "IEF", "TLT", "TIP", "EMB", "HYG", "JNK"],
     },

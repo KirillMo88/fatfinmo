@@ -24,6 +24,8 @@ REPORT_COLUMNS = [
     "RSI_14",
 ]
 ANALYSIS_TICKERS = ("QQQ", "GLD", "BTC-USD")
+USD_KRW_TICKER = "KRW=X"
+KRW_QUOTED_TICKERS = {"000660.KS", "005930.KS", "006930.KS"}
 
 
 def extract_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -58,6 +60,41 @@ def drop_incomplete_daily_bar(
     return out
 
 
+def is_krw_quoted_ticker(ticker: str) -> bool:
+    return str(ticker or "").strip().upper() in KRW_QUOTED_TICKERS
+
+
+def load_usd_krw_history(period: str = "10y") -> pd.DataFrame:
+    try:
+        raw = yf.download(
+            USD_KRW_TICKER,
+            period=period,
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            threads=False,
+        )
+    except Exception:
+        raw = pd.DataFrame()
+    return drop_incomplete_daily_bar(extract_ohlcv_frame(raw, USD_KRW_TICKER))
+
+
+def convert_krw_ohlcv_to_usd(frame: pd.DataFrame, usd_krw: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or usd_krw.empty:
+        return frame
+    out = frame.copy().sort_index()
+    fx_close = pd.to_numeric(usd_krw.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna().sort_index()
+    if fx_close.empty:
+        return out
+    aligned_fx = fx_close.reindex(out.index, method="ffill")
+    if aligned_fx.replace([np.inf, -np.inf], np.nan).dropna().empty:
+        return out
+    for column in ["Open", "High", "Low", "Close"]:
+        if column in out.columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce") / aligned_fx
+    return out
+
+
 def download_completed_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
     for attempt in range(3):
         try:
@@ -70,6 +107,8 @@ def download_completed_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
                 threads=False,
             )
             frame = drop_incomplete_daily_bar(extract_ohlcv_frame(raw, ticker))
+            if is_krw_quoted_ticker(ticker):
+                frame = convert_krw_ohlcv_to_usd(frame, load_usd_krw_history(period=period))
             if not frame.empty:
                 return frame
         except Exception:

@@ -9,7 +9,14 @@ import pandas as pd
 import yfinance as yf
 
 from alpha_engine import calculate_sma200d_robust_z_36m
-from finance_core import drop_incomplete_daily_bar, extract_ohlcv_frame
+from finance_core import (
+    USD_KRW_TICKER,
+    convert_krw_ohlcv_to_usd,
+    drop_incomplete_daily_bar,
+    extract_ohlcv_frame,
+    is_krw_quoted_ticker,
+    load_usd_krw_history,
+)
 from screener_metrics import historical_momentum_52w_metrics, sma200w_distance_percentile
 
 
@@ -87,8 +94,6 @@ PERFORMANCE_WINDOWS: dict[str, int] = {
 }
 
 BENCHMARK_TICKERS = ["SPY", "QQQ"]
-USD_KRW_TICKER = "KRW=X"
-KRW_QUOTED_TICKERS = {"000660.KS", "005930.KS", "006930.KS"}
 
 COMPANY_COLUMNS = [
     "Group",
@@ -269,25 +274,6 @@ def load_yahoo_fundamental_row(ticker: str, usd_krw_rate: float = np.nan) -> dic
     }
 
 
-def is_krw_quoted_ticker(ticker: str) -> bool:
-    return str(ticker).upper() in KRW_QUOTED_TICKERS
-
-
-def load_usd_krw_history() -> pd.DataFrame:
-    try:
-        raw = yf.download(
-            USD_KRW_TICKER,
-            period="max",
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-            threads=False,
-        )
-    except Exception:
-        raw = pd.DataFrame()
-    return drop_incomplete_daily_bar(extract_ohlcv_frame(raw, USD_KRW_TICKER))
-
-
 def load_latest_usd_krw_rate() -> float:
     try:
         raw = yf.download(
@@ -303,24 +289,6 @@ def load_latest_usd_krw_rate() -> float:
     frame = drop_incomplete_daily_bar(extract_ohlcv_frame(raw, USD_KRW_TICKER))
     close = pd.to_numeric(frame.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
     return float(close.iloc[-1]) if not close.empty else np.nan
-
-
-def convert_krw_ohlcv_to_usd(frame: pd.DataFrame, usd_krw: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty or usd_krw.empty:
-        return frame
-    out = frame.copy().sort_index()
-    fx_close = pd.to_numeric(usd_krw.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna().sort_index()
-    if fx_close.empty:
-        return out
-    aligned_fx = fx_close.reindex(out.index, method="ffill")
-    valid = aligned_fx.replace([np.inf, -np.inf], np.nan).dropna()
-    if valid.empty:
-        return out
-    for column in ["Open", "High", "Low", "Close"]:
-        if column in out.columns:
-            values = pd.to_numeric(out[column], errors="coerce")
-            out[column] = values / aligned_fx
-    return out
 
 
 def convert_krw_value_to_usd(ticker: str, value: float, usd_krw_rate: float) -> float:

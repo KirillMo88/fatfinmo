@@ -93,6 +93,74 @@
         "BOAT"
       ]
     },
+    "AI": {
+      "Hyperscalers": [
+        "MSFT",
+        "AMZN",
+        "GOOGL",
+        "META",
+        "ORCL",
+        "PLTR"
+      ],
+      "AI Compute": [
+        "NVDA",
+        "AMD",
+        "AVGO",
+        "MRVL",
+        "ARM"
+      ],
+      "Networking": [
+        "ANET",
+        "CSCO",
+        "CRDO",
+        "ALAB",
+        "COHR",
+        "LITE"
+      ],
+      "Memory": [
+        "MU",
+        "000660.KS",
+        "005930.KS"
+      ],
+      "Manufacturing": [
+        "TSM",
+        "INTC"
+      ],
+      "Semiconductor Equipment": [
+        "ASML",
+        "AMAT",
+        "LRCX",
+        "KLAC",
+        "CDNS",
+        "SNPS"
+      ],
+      "AI Servers": [
+        "CLS",
+        "DELL",
+        "HPE"
+      ],
+      "Power & Cooling": [
+        "VRT",
+        "ETN",
+        "JCI",
+        "NVT"
+      ],
+      "Grid": [
+        "GEV",
+        "PWR",
+        "HUBB",
+        "POWL"
+      ],
+      "Power Producers": [
+        "CEG",
+        "TLN",
+        "VST"
+      ],
+      "Data Center Owners": [
+        "EQIX",
+        "DLR"
+      ]
+    },
     "Bonds": {
       "Bonds": [
         "SHY",
