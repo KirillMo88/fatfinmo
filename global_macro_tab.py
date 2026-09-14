@@ -29,6 +29,7 @@ HORIZON_WEEKS = {
     "12M": 52,
     "36M": 156,
 }
+CHANGE_COLUMNS = list(HORIZON_WEEKS.keys())
 ChangeType = Literal["percent", "bps", "absolute", "state"]
 CurrentFormat = Literal["number", "percent", "bps", "usd_tn", "usd_bn", "integer"]
 
@@ -97,7 +98,7 @@ def render_global_macro_tab(api_key: str | None = None) -> None:
         if block_df.empty:
             continue
         st.markdown(f"### {block}")
-        st.dataframe(_style_global_macro_table(block_df), use_container_width=True, hide_index=True)
+        st.dataframe(_style_global_macro_table(block_df, block), use_container_width=True, hide_index=True)
 
 
 def _render_tradingview_mcp_panel() -> None:
@@ -603,14 +604,74 @@ def _render_global_macro_summary(snapshot: pd.DataFrame) -> None:
             )
 
 
-def _style_global_macro_table(frame: pd.DataFrame) -> Any:
+def _style_global_macro_table(frame: pd.DataFrame, block: str = "") -> Any:
     return frame.style.set_properties(
         **{
             "background-color": "#0f131a",
             "color": "#e5e7eb",
             "border-color": "#263241",
         }
-    )
+    ).apply(lambda row: _macro_change_color_row(row, block), axis=1)
+
+
+def _macro_change_color_row(row: pd.Series, block: str = "") -> list[str]:
+    direction = _macro_direction(row, block)
+    styles = [""] * len(row)
+    if direction == 0:
+        return styles
+    for idx, column in enumerate(row.index):
+        if column not in CHANGE_COLUMNS:
+            continue
+        value = _parse_change_value(row.get(column))
+        if not np.isfinite(value):
+            continue
+        score = value * direction
+        styles[idx] = _heatmap_style(score)
+    return styles
+
+
+def _macro_direction(row: pd.Series, block: str = "") -> int:
+    block = str(block or row.get("Block", ""))
+    instrument = str(row.get("Instrument", ""))
+    if block in {"Markets", "Global Liquidity"}:
+        return 1
+    if "PMI" in instrument or "Chicago Fed National Activity Index" in instrument or instrument == "Copper":
+        return 1
+    if (
+        block in {"Inflation", "Rates & Curves", "Risk / Financial Conditions"}
+        or instrument in {"U.S. Dollar Index", "WTI Crude Oil", "U.S. Initial Jobless Claims"}
+    ):
+        return -1
+    return 0
+
+
+def _parse_change_value(value: Any) -> float:
+    if value is None:
+        return math.nan
+    text = str(value).strip()
+    if not text or text.lower() == "n/a":
+        return math.nan
+    text = text.replace(",", "").replace("%", "").replace("bp", "").strip()
+    try:
+        return float(text)
+    except Exception:
+        return math.nan
+
+
+def _heatmap_style(score: float) -> str:
+    if not np.isfinite(score):
+        return ""
+    if score >= 5.0:
+        return "background-color: #16a34a; color: #ffffff"
+    if score >= 2.0:
+        return "background-color: #4ade80; color: #111827"
+    if score > 0.0:
+        return "background-color: #86efac; color: #111827"
+    if score == 0.0:
+        return "background-color: #f8fafc; color: #111827"
+    if score > -2.0:
+        return "background-color: #fdba74; color: #111827"
+    return "background-color: #ef4444; color: #ffffff"
 
 
 def _series_from_frame(frame: pd.DataFrame, date_col: str, value_col: str) -> pd.Series:
@@ -796,7 +857,7 @@ def _format_change(current: Any, previous: Any, change_type: ChangeType) -> str:
             return "n/a"
         return f"{(cur / prev - 1.0) * 100.0:+.1f}%"
     if change_type == "bps":
-        return f"{(cur - prev) * 100.0:+.0f} bp"
+        return f"{cur - prev:+.2f}%"
     if change_type == "absolute":
         return f"{cur - prev:+.2f}"
     return "n/a"
