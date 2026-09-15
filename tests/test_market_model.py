@@ -4,12 +4,14 @@ import pandas as pd
 from alpha_engine import classify_opportunity_state
 from market_model import (
     calculate_alpha_confidence,
+    calculate_credit_stress_confirmation_history,
     calculate_confirmations_history,
     calculate_fast_transition_risk,
     calculate_fast_transition_risk_history,
     calculate_macro_transition_risk,
     calculate_macro_transition_risk_history,
     calculate_overall_transition_status,
+    classify_credit_state,
     classify_global_liquidity_backdrop,
     fast_transition_state,
     transition_state,
@@ -61,6 +63,37 @@ def test_macro_transition_risk_uses_dxy_liquidity_and_us2y():
     assert result["Macro_Transition_State"] != "DATA_INCOMPLETE"
     assert result["Fed_Liquidity_Risk"] > 10.0
     assert result["US2Y_Risk"] > 10.0
+
+
+def test_macro_transition_risk_includes_global_m2_risk_component():
+    dates = pd.date_range("2020-01-03", periods=190, freq="W-FRI")
+    fred = pd.DataFrame(
+        [
+            *({"Series_ID": "FED_LIQUIDITY", "Date": date, "Value": 1000.0 - i * 2.0} for i, date in enumerate(dates)),
+            *({"Series_ID": "DGS2", "Date": date, "Value": 1.0 + i * 0.01} for i, date in enumerate(dates)),
+        ]
+    )
+    dxy = pd.Series(np.linspace(100.0, 112.0, len(dates)), index=dates)
+    global_m2 = pd.Series(np.r_[np.linspace(1000.0, 1250.0, 120), np.linspace(1250.0, 1220.0, 70)], index=dates)
+
+    result = calculate_macro_transition_risk(dxy, fred, global_m2=global_m2)
+
+    assert np.isfinite(result["Global_M2_26W"])
+    assert np.isfinite(result["Global_M2_Bull_Score_26W"])
+    assert np.isfinite(result["Global_M2_Risk_26W"])
+    assert result["Macro_Transition_State"] != "DATA_INCOMPLETE"
+
+
+def test_credit_stress_confirmation_classifies_widening_history():
+    dates = pd.date_range("2020-01-03", periods=190, freq="W-FRI")
+    values = np.r_[np.linspace(3.5, 3.0, 130), np.linspace(3.0, 6.0, 60)]
+    fred = pd.DataFrame({"Series_ID": "BAMLH0A0HYM2", "Date": dates, "Value": values})
+
+    history = calculate_credit_stress_confirmation_history(fred)
+
+    assert history["Credit_State"].iloc[-1] in {"WIDENING", "SEVERE_WIDENING"}
+    assert classify_credit_state(39.9) == "BENIGN"
+    assert classify_credit_state(60.0) == "WATCH"
 
 
 def test_transition_risk_history_returns_weekly_scores():
@@ -121,6 +154,20 @@ def test_overall_status_and_alpha_confidence_include_transition_risk():
             global_liquidity_direction_state="DETERIORATING_FAST",
         )
         == "BULL_LIQUIDITY_WARNING"
+    )
+    assert (
+        calculate_overall_transition_status(
+            5.0,
+            18.0,
+            1.0,
+            structural_regime="BULL",
+            global_liquidity_backdrop="LIQUIDITY_WARNING",
+            global_liquidity_score=44.0,
+            global_liquidity_direction_13w=-24.0,
+            global_liquidity_direction_state="DETERIORATING_FAST",
+            credit_state="WIDENING",
+        )
+        == "DETERIORATING"
     )
     assert calculate_alpha_confidence("BULL", 65.0, 65.0) == 50.0
     assert calculate_alpha_confidence("STRESS", 10.0, 10.0) == 20.0

@@ -690,6 +690,8 @@ def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
             subset=["observation_date", "series_id"],
             keep="last",
         )
+        if len(frame) < 36:
+            raise RuntimeError(f"PBoC parser returned partial M2 history: {len(frame)} observations")
         return frame[RAW_COLUMNS]
     except Exception as exc:
         fallback = china_m2_fred_tradingview_fallback_raw(api_key=api_key, official_error=str(exc))

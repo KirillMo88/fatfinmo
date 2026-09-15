@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
+from global_liquidity import read_global_liquidity
 
 
 GOLD_X_AXIS_DATE_FORMAT = "%b'%y"
@@ -19,6 +20,63 @@ GOLD_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
 @st.cache_data(show_spinner=True, ttl=21600)
 def load_gold_regime_snapshot(gold_alpha: float | None, fred_api_key: str | None) -> Any:
     return build_gold_regime_snapshot(gold_alpha=gold_alpha, fred_api_key=fred_api_key, config=gold_regime_config())
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def load_gold_global_m2_context() -> dict[str, Any]:
+    try:
+        _, monthly, weekly = read_global_liquidity()
+    except Exception as exc:
+        return {"status": "DATA_UNAVAILABLE", "error": str(exc)}
+
+    source = weekly if weekly is not None and not weekly.empty else monthly
+    if source is None or source.empty or "global_m2_usd_bn" not in source.columns:
+        return {"status": "DATA_UNAVAILABLE"}
+
+    frame = source.copy()
+    date_col = "date" if "date" in frame.columns else "observation_date" if "observation_date" in frame.columns else None
+    if date_col is None:
+        return {"status": "DATA_UNAVAILABLE"}
+    frame[date_col] = pd.to_datetime(frame[date_col], errors="coerce")
+    frame["global_m2_usd_bn"] = pd.to_numeric(frame["global_m2_usd_bn"], errors="coerce")
+    frame = frame.dropna(subset=[date_col, "global_m2_usd_bn"]).sort_values(date_col)
+    if frame.empty:
+        return {"status": "DATA_UNAVAILABLE"}
+
+    weekly_m2 = frame.set_index(date_col)["global_m2_usd_bn"].resample("W-FRI").last().ffill()
+    growth_13w = weekly_m2.pct_change(13, fill_method=None)
+    growth_26w = weekly_m2.pct_change(26, fill_method=None)
+    latest_date = weekly_m2.dropna().index.max()
+    latest_13w = safe_series_last(growth_13w)
+    latest_26w = safe_series_last(growth_26w)
+    acceleration = latest_13w - latest_26w if np.isfinite(latest_13w) and np.isfinite(latest_26w) else np.nan
+
+    impulse = np.nan
+    if "global_m2_impulse" in frame.columns:
+        impulse_values = pd.to_numeric(frame["global_m2_impulse"], errors="coerce").dropna()
+        if not impulse_values.empty:
+            impulse = float(impulse_values.iloc[-1])
+
+    if np.isfinite(latest_13w) and latest_13w < 0 and np.isfinite(acceleration) and acceleration < 0:
+        state = "CONTRACTING"
+    elif np.isfinite(acceleration) and acceleration > 0 and np.isfinite(latest_13w) and latest_13w > 0:
+        state = "ACCELERATING"
+    elif np.isfinite(latest_13w) and latest_13w > 0:
+        state = "STABLE"
+    elif np.isfinite(latest_13w):
+        state = "DECELERATING"
+    else:
+        state = "DATA_INCOMPLETE"
+
+    return {
+        "date": latest_date,
+        "global_m2_growth_13w": latest_13w,
+        "global_m2_growth_26w": latest_26w,
+        "global_m2_acceleration": acceleration,
+        "global_m2_impulse": impulse,
+        "context_state": state,
+        "status": "CURRENT",
+    }
 
 
 def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = None) -> None:
@@ -42,6 +100,7 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
     render_gold_history_chart(snapshot, selected_range)
     render_signal_explanation(current)
     render_macro_detail(current)
+    render_global_monetary_liquidity_context(current)
     render_flow_detail(current, snapshot)
     render_structural_demand(current, snapshot)
     render_freshness(snapshot)
@@ -508,6 +567,26 @@ def render_macro_detail(current: dict[str, Any]) -> None:
     )
 
 
+def render_global_monetary_liquidity_context(current: dict[str, Any]) -> None:
+    st.markdown("### Global Monetary Liquidity Context")
+    context = load_gold_global_m2_context()
+    if context.get("status") == "DATA_UNAVAILABLE":
+        st.info("Global monetary liquidity context is unavailable.")
+        return
+    render_table(
+        [
+            ("Global M2 13W Growth", fmt_percent(context.get("global_m2_growth_13w"))),
+            ("Global M2 26W Growth", fmt_percent(context.get("global_m2_growth_26w"))),
+            ("Global M2 Acceleration", fmt_percentage_points(context.get("global_m2_acceleration"))),
+            ("Global M2 Impulse", fmt_score(context.get("global_m2_impulse"))),
+            ("Long Liquidity Cycle Phase", fmt_text(current.get("long_liquidity_cycle"))),
+            ("Context State", fmt_text(context.get("context_state"))),
+            ("Mode", "INFORMATIONAL / DOES NOT CHANGE GOLD FINAL REGIME"),
+            ("Last Observation", fmt_date(context.get("date"))),
+        ]
+    )
+
+
 def render_flow_detail(current: dict[str, Any], snapshot: Any) -> None:
     st.markdown("### Positioning & Flows")
     st.markdown("#### ETF Flows")
@@ -848,6 +927,13 @@ def render_history_table(history: pd.DataFrame) -> None:
 
 def render_table(rows: list[tuple[str, str]]) -> None:
     st.dataframe(pd.DataFrame(rows, columns=["Metric", "Value"]), hide_index=True, use_container_width=True)
+
+
+def safe_series_last(series: pd.Series) -> float:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if values.empty:
+        return np.nan
+    return float(values.iloc[-1])
 
 
 def fmt_number(value: Any, decimals: int = 1) -> str:

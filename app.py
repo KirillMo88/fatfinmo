@@ -34,6 +34,7 @@ from fund_flows import FundFlowCache, default_fund_flow_cache_path, get_fund_flo
 from market_model import (
     YAHOO_MARKET_TICKERS,
     calculate_confirmations_history,
+    calculate_credit_stress_confirmation_history,
     calculate_fast_transition_risk_history,
     calculate_macro_transition_risk_history,
     calculate_market_model,
@@ -2485,9 +2486,9 @@ def render_btc_regime_tab(table_df: pd.DataFrame, market_snapshot: dict) -> None
     with summary_cols[0]:
         render_market_metric("BTC REGIME", snapshot["final_state"], snapshot["final_note"])
     with summary_cols[1]:
-        render_market_metric("BTC Structural Macro", _liquidity_fmt_score_state(snapshot["structural_macro"]), "Liquidity 40% + DXY 40% + US2Y 20%")
+        render_market_metric("BTC Structural Macro", _liquidity_fmt_score_state(snapshot["structural_macro"]), "Global M2 13W 40% + DXY 40% + US2Y 20%")
     with summary_cols[2]:
-        render_market_metric("BTC Forward Macro Risk", f"{_liquidity_fmt_number(snapshot['forward_macro_risk'], 1)} / {snapshot['forward_macro_risk_state']}", "DXY 55% + US2Y 30% + liquidity 15%")
+        render_market_metric("BTC Forward Macro Risk", f"{_liquidity_fmt_number(snapshot['forward_macro_risk'], 1)} / {snapshot['forward_macro_risk_state']}", "M2 35% + DXY 30% + US2Y 20% + Credit 15%")
     with summary_cols[3]:
         render_market_metric("BTC Alpha", _liquidity_fmt_score_state(snapshot["btc_alpha"]), "existing Alpha Engine")
 
@@ -2505,7 +2506,8 @@ def render_btc_regime_tab(table_df: pd.DataFrame, market_snapshot: dict) -> None
     st.dataframe(_btc_halving_liquidity_matrix(snapshot), use_container_width=True, hide_index=True)
 
     st.markdown("### BTC Macro Regime")
-    btc_macro_frame = _build_btc_macro_frame(liquidity, market_snapshot, btc_x_range)
+    market_history = load_market_transition_history("btc-regime-market-transition-history")
+    btc_macro_frame = _build_btc_macro_frame(liquidity, market_snapshot, market_history, btc_x_range)
     _render_btc_macro_score_chart(btc_macro_frame, "BTCStructuralMacro", "BTC Structural Macro", "#22c55e")
     _render_btc_macro_score_chart(btc_macro_frame, "BTCForwardMacroRisk", "BTC Forward Macro Risk", "#ef4444")
     st.markdown("### BTC Trend / Alpha")
@@ -2651,17 +2653,21 @@ def _build_btc_regime_snapshot(
     phase = _btc_halving_phase(months_since_halving)
     liq_score = _safe_float(liquidity.get("global_liquidity_score"))
     liq_direction = str(liquidity.get("direction_13w_state", "DATA_INCOMPLETE"))
+    btc_m2_growth_13w = _safe_float(liquidity.get("m2_13w"))
+    btc_m2_bull = _safe_float(liquidity.get("m2_13w_pctl"))
+    btc_m2_risk = 100.0 - btc_m2_bull if np.isfinite(btc_m2_bull) else np.nan
     dxy_risk = _safe_float(market.get("Macro_DXY_Risk", market.get("DXY_Risk")))
     us2y_risk = _safe_float(market.get("US2Y_Risk"))
-    liquidity_risk = 100.0 - liq_score if np.isfinite(liq_score) else np.nan
-    structural_macro = _weighted_mean([liq_score, 100.0 - dxy_risk, 100.0 - us2y_risk], [0.40, 0.40, 0.20])
-    forward_macro_risk = _weighted_mean([dxy_risk, us2y_risk, liquidity_risk], [0.55, 0.30, 0.15])
+    credit_risk = _safe_float(market.get("Credit_Risk"))
+    credit_state = str(market.get("Credit_State", "DATA_INCOMPLETE"))
+    structural_macro = _weighted_mean([btc_m2_bull, 100.0 - dxy_risk, 100.0 - us2y_risk], [0.40, 0.40, 0.20])
+    forward_macro_risk = _weighted_mean([btc_m2_risk, dxy_risk, us2y_risk, credit_risk], [0.35, 0.30, 0.20, 0.15])
     alpha = _safe_float(btc_row.get("Alpha_Score"))
     latest_etf = _liquidity_latest_row(etf)
     latest_bybit = _liquidity_latest_row(bybit)
     tactical_state, tactical_note = _btc_tactical_state(latest_etf, latest_bybit, alpha)
-    bottom_status, bottom_note = _btc_bottom_status(phase, liq_direction, alpha, latest_etf, latest_bybit, forward_macro_risk)
-    final_state, final_note = _btc_final_state(phase, liq_score, liq_direction, alpha, structural_macro, forward_macro_risk, tactical_state, bottom_status)
+    bottom_status, bottom_note = _btc_bottom_status(phase, liq_direction, alpha, latest_etf, latest_bybit, forward_macro_risk, credit_state)
+    final_state, final_note = _btc_final_state(phase, liq_score, liq_direction, alpha, structural_macro, forward_macro_risk, tactical_state, bottom_status, btc_m2_bull, credit_state)
     multiple = _btc_expected_multiple(liq_score, liq_direction)
     candidate_bottom = _btc_candidate_bottom(price)
     drawdown = (latest_price / BTC_CURRENT_CYCLE_TOP_PRICE - 1.0) if np.isfinite(latest_price) else np.nan
@@ -2676,10 +2682,15 @@ def _build_btc_regime_snapshot(
         "global_liquidity_label": str(liquidity.get("final_regime_label", "n/a")),
         "global_liquidity_score": liq_score,
         "liquidity_direction": liq_direction,
+        "btc_global_m2_growth_13w": btc_m2_growth_13w,
+        "btc_global_m2_bull": btc_m2_bull,
+        "btc_global_m2_risk": btc_m2_risk,
         "long_cycle_phase": str(liquidity.get("long_cycle_phase", "n/a")),
         "structural_macro": structural_macro,
         "forward_macro_risk": forward_macro_risk,
         "forward_macro_risk_state": _btc_risk_state(forward_macro_risk),
+        "credit_risk": credit_risk,
+        "credit_state": credit_state,
         "btc_alpha": alpha,
         "tactical_flow_state": tactical_state,
         "tactical_note": tactical_note,
@@ -2776,12 +2787,23 @@ def _btc_tactical_state(etf: dict[str, Any], bybit: dict[str, Any], alpha: float
     return "NEUTRAL", "mixed or partial tactical data"
 
 
-def _btc_bottom_status(phase: str, liq_direction: str, alpha: float, etf: dict[str, Any], bybit: dict[str, Any], macro_risk: float) -> tuple[str, str]:
+def _btc_bottom_status(
+    phase: str,
+    liq_direction: str,
+    alpha: float,
+    etf: dict[str, Any],
+    bybit: dict[str, Any],
+    macro_risk: float,
+    credit_state: str = "",
+) -> tuple[str, str]:
     if phase not in {"POST_PEAK_BEAR", "ACCUMULATION_PRE_HALVING"}:
         return "NO_BOTTOM_SIGNAL", "bottom module inactive outside bear/accumulation phases"
     signals = []
+    credit_widening = str(credit_state or "").upper() in {"WIDENING", "SEVERE_WIDENING"}
     if liq_direction in {"IMPROVING", "ACCELERATING", "STABLE"}:
         signals.append("liquidity improving/stable")
+    if credit_state and not credit_widening:
+        signals.append("credit not widening")
     if np.isfinite(alpha) and alpha >= 50:
         signals.append("BTC Alpha stabilizing")
     if _safe_float(etf.get("ETF_Flow_4W")) > 0:
@@ -2793,6 +2815,8 @@ def _btc_bottom_status(phase: str, liq_direction: str, alpha: float, etf: dict[s
     if np.isfinite(macro_risk) and macro_risk <= 40:
         signals.append("macro risk contained")
     count = len(signals)
+    if credit_widening and count >= 4:
+        return "BOTTOMING_NOT_CONFIRMED", ", ".join(signals + [f"credit {credit_state}"])
     if count >= 5:
         return "BOTTOM_CONFIRMED", ", ".join(signals)
     if count >= 4:
@@ -2813,16 +2837,27 @@ def _btc_final_state(
     forward_risk: float,
     tactical: str,
     bottom: str,
+    btc_m2_bull: float = np.nan,
+    credit_state: str = "",
 ) -> tuple[str, str]:
     deteriorating = liq_direction in {"DETERIORATING", "DETERIORATING_FAST"}
+    m2_weak = np.isfinite(btc_m2_bull) and btc_m2_bull < 40.0
+    m2_improving = np.isfinite(btc_m2_bull) and btc_m2_bull >= 60.0
+    credit_widening = str(credit_state or "").upper() in {"WIDENING", "SEVERE_WIDENING"}
     tactical_weak = tactical in {"FLOW_DIVERGENCE", "OVERHEATED", "DELEVERAGING"}
-    if phase == "LATE_BULL_PEAK_WINDOW" and sum([deteriorating, np.isfinite(alpha) and alpha < 60, tactical_weak, np.isfinite(forward_risk) and forward_risk > 60]) >= 2:
+    if phase == "LATE_BULL_PEAK_WINDOW" and sum([deteriorating or m2_weak, np.isfinite(alpha) and alpha < 60, tactical_weak, np.isfinite(forward_risk) and forward_risk > 60, credit_widening]) >= 2:
         return "TOP_RISK_HIGH", "late bull window with multiple deterioration warnings"
+    if (deteriorating or m2_weak) and credit_widening:
+        return "MACRO_CREDIT_STRESS", "Global M2 momentum is weak/deteriorating and credit is widening"
+    if deteriorating or m2_weak:
+        return "MACRO_HEADWIND", "Global M2 momentum is weak/deteriorating, but credit is not confirming stress"
     if phase == "POST_PEAK_BEAR" and np.isfinite(alpha) and alpha < 50 and liq_direction not in {"IMPROVING", "ACCELERATING"}:
         return "POST_CYCLE_BEAR", "post-peak phase; trend/alpha weak; liquidity not improving"
     if bottom in {"BOTTOMING_WATCH", "CANDIDATE_BOTTOM", "BOTTOM_CONFIRMED"}:
         return "BOTTOMING_WATCH", "bottom module has multiple confirmations"
-    if phase == "ACCUMULATION_PRE_HALVING" and liq_direction in {"IMPROVING", "ACCELERATING"} and np.isfinite(alpha) and alpha >= 60 and tactical in {"SUPPORTIVE", "STRONG_CONFIRMATION"}:
+    if bottom == "BOTTOMING_NOT_CONFIRMED":
+        return "BOTTOMING_WATCH", "bottom setup exists but credit widening prevents confirmation"
+    if phase == "ACCUMULATION_PRE_HALVING" and (liq_direction in {"IMPROVING", "ACCELERATING"} or m2_improving) and not credit_widening and np.isfinite(alpha) and alpha >= 60 and tactical in {"SUPPORTIVE", "STRONG_CONFIRMATION"}:
         return "STRONG_EARLY_BULL_SETUP", "accumulation timing confirmed by liquidity, alpha and flows"
     if phase in {"POST_HALVING_EARLY", "BULL_EXPANSION"} and np.isfinite(alpha) and alpha >= 70 and np.isfinite(liq_score) and liq_score >= 60 and not deteriorating and np.isfinite(structural_macro) and structural_macro >= 60 and np.isfinite(forward_risk) and forward_risk <= 40 and tactical in {"SUPPORTIVE", "STRONG_CONFIRMATION"}:
         return "HIGH_CONVICTION_BULL", "cycle, liquidity, macro, trend and flows aligned"
@@ -2884,6 +2919,8 @@ def _btc_interpretation_text(s: dict[str, Any]) -> str:
         f"and {top_text} months after the fixed October 2025 cycle top.\n\n"
         f"Global Liquidity is {s['global_liquidity_label']} with score {fmt_plain_number(s['global_liquidity_score'], 1)} "
         f"and 13W direction {s['liquidity_direction']}. The long liquidity cycle is {s['long_cycle_phase']}.\n\n"
+        f"BTC-specific liquidity uses Global M2 13W momentum: bull score {fmt_plain_number(s.get('btc_global_m2_bull'), 1)} "
+        f"and 13W growth {fmt_plain_percent(s.get('btc_global_m2_growth_13w'))}. Credit state is {s.get('credit_state', 'n/a')}.\n\n"
         f"BTC Structural Macro is {fmt_plain_number(s['structural_macro'], 1)}, Forward Macro Risk is "
         f"{fmt_plain_number(s['forward_macro_risk'], 1)} / {s['forward_macro_risk_state']}, and BTC Alpha is {fmt_plain_number(s['btc_alpha'], 1)}.\n\n"
         f"Tactical flows are {s['tactical_flow_state']} ({s['tactical_note']}). Cycle Bottom Status is {s['cycle_bottom_status']} ({s['bottom_note']}).\n\n"
@@ -2980,6 +3017,8 @@ def _btc_halving_liquidity_matrix(snapshot: dict[str, Any]) -> pd.DataFrame:
     phase = snapshot["halving_phase"]
     direction = snapshot["liquidity_direction"]
     score = snapshot["global_liquidity_score"]
+    btc_m2_bull = snapshot.get("btc_global_m2_bull")
+    credit_state = snapshot.get("credit_state", "n/a")
     strong = np.isfinite(score) and score >= 60
     weak = np.isfinite(score) and score < 40
     improving = direction in {"IMPROVING", "ACCELERATING"}
@@ -2994,7 +3033,18 @@ def _btc_halving_liquidity_matrix(snapshot: dict[str, Any]) -> pd.DataFrame:
         state = "BOTTOMING_WATCH" if improving else "BEARISH_DELEVERAGING" if deteriorating or weak else "POST_PEAK_NEUTRAL"
     else:
         state = "STRONG_EARLY_BULL_SETUP" if improving else "WEAK_ACCUMULATION" if deteriorating else "ACCUMULATION"
-    return pd.DataFrame([{"Halving Phase": phase, "Global Liquidity Score": fmt_plain_number(score, 1), "Direction": direction, "Structural Interpretation": state}])
+    return pd.DataFrame(
+        [
+            {
+                "Halving Phase": phase,
+                "Global Liquidity Score": fmt_plain_number(score, 1),
+                "BTC Global M2 13W Bull": fmt_plain_number(btc_m2_bull, 1),
+                "Direction": direction,
+                "Credit State": credit_state,
+                "Structural Interpretation": state,
+            }
+        ]
+    )
 
 
 def _btc_x_range(frame: pd.DataFrame) -> list[pd.Timestamp] | None:
@@ -3014,15 +3064,51 @@ def _btc_filter_to_x_range(frame: pd.DataFrame, x_range: list[pd.Timestamp] | No
     return out.dropna(subset=["date"]).loc[lambda data: (data["date"] >= x_range[0]) & (data["date"] <= x_range[1])].copy()
 
 
-def _build_btc_macro_frame(liquidity: pd.DataFrame, market: dict, x_range: list[pd.Timestamp] | None) -> pd.DataFrame:
+def _build_btc_macro_frame(
+    liquidity: pd.DataFrame,
+    market: dict,
+    market_history: pd.DataFrame | None,
+    x_range: list[pd.Timestamp] | None,
+) -> pd.DataFrame:
     frame = _btc_filter_to_x_range(liquidity, x_range)
     if frame.empty:
         return frame
-    dxy_risk = _safe_float(market.get("Macro_DXY_Risk", market.get("DXY_Risk")))
-    us2y_risk = _safe_float(market.get("US2Y_Risk"))
     frame = frame.copy()
-    frame["BTCStructuralMacro"] = pd.to_numeric(frame["global_liquidity_score"], errors="coerce").map(lambda value: _weighted_mean([value, 100.0 - dxy_risk, 100.0 - us2y_risk], [0.40, 0.40, 0.20]))
-    frame["BTCForwardMacroRisk"] = pd.to_numeric(frame["global_liquidity_score"], errors="coerce").map(lambda value: _weighted_mean([dxy_risk, us2y_risk, 100.0 - value], [0.55, 0.30, 0.15]))
+    if market_history is not None and not market_history.empty and "Date" in market_history.columns:
+        market_cols = [column for column in ["Date", "Macro_DXY_Risk", "US2Y_Risk", "Credit_Risk"] if column in market_history.columns]
+        mh = market_history[market_cols].copy()
+        mh["date"] = pd.to_datetime(mh["Date"], errors="coerce")
+        mh = mh.dropna(subset=["date"]).drop(columns=["Date"], errors="ignore").sort_values("date")
+        frame = pd.merge_asof(
+            frame.sort_values("date"),
+            mh,
+            on="date",
+            direction="backward",
+        )
+    for column, fallback_key in [
+        ("Macro_DXY_Risk", "Macro_DXY_Risk"),
+        ("US2Y_Risk", "US2Y_Risk"),
+        ("Credit_Risk", "Credit_Risk"),
+    ]:
+        if column not in frame.columns:
+            frame[column] = np.nan
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(_safe_float(market.get(fallback_key)))
+    m2_source = frame["m2_13w_pctl"] if "m2_13w_pctl" in frame.columns else pd.Series(np.nan, index=frame.index)
+    m2_bull = pd.to_numeric(m2_source, errors="coerce")
+    m2_risk = 100.0 - m2_bull
+    dxy_risk = pd.to_numeric(frame["Macro_DXY_Risk"], errors="coerce")
+    us2y_risk = pd.to_numeric(frame["US2Y_Risk"], errors="coerce")
+    credit_risk = pd.to_numeric(frame["Credit_Risk"], errors="coerce")
+    frame["BTCGlobalM2Bull13W"] = m2_bull
+    frame["BTCGlobalM2Risk13W"] = m2_risk
+    frame["BTCStructuralMacro"] = [
+        _weighted_mean([m2, 100.0 - dxy, 100.0 - us2y], [0.40, 0.40, 0.20])
+        for m2, dxy, us2y in zip(m2_bull, dxy_risk, us2y_risk)
+    ]
+    frame["BTCForwardMacroRisk"] = [
+        _weighted_mean([m2, dxy, us2y, credit], [0.35, 0.30, 0.20, 0.15])
+        for m2, dxy, us2y, credit in zip(m2_risk, dxy_risk, us2y_risk, credit_risk)
+    ]
     return frame
 
 
@@ -4073,7 +4159,7 @@ def render_top_alpha_status(
 <div style="padding-top: 1.35rem; line-height: 1.1;">
   <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Macro Transition Risk</div>
   <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{macro_value}</div>
-  <div style="font-size: 0.68rem; color: #cbd5e1;">DXY 40% + Fed liquidity 30% + US2Y 30%</div>
+  <div style="font-size: 0.68rem; color: #cbd5e1;">DXY 40% + US2Y 30% + Global M2 20% + Fed liquidity 10%</div>
 </div>
 """,
             unsafe_allow_html=True,
@@ -4266,6 +4352,7 @@ def enrich_market_snapshot_with_global_liquidity(market: dict) -> dict:
         global_liquidity_score=score,
         global_liquidity_direction_13w=direction,
         global_liquidity_direction_state=direction_state,
+        credit_state=enriched.get("Credit_State", ""),
     )
     enriched.update(
         {
@@ -4281,6 +4368,26 @@ def enrich_market_snapshot_with_global_liquidity(market: dict) -> dict:
         }
     )
     return enriched
+
+
+def global_m2_weekly_series_for_market() -> pd.Series:
+    try:
+        _, monthly, weekly = read_global_liquidity()
+        liquidity = _build_global_liquidity_regime_frame(
+            _liquidity_prepare_dates(monthly),
+            _liquidity_prepare_dates(weekly),
+        )
+    except Exception:
+        return pd.Series(dtype="float64")
+    if liquidity.empty or "date" not in liquidity.columns or "global_m2_usd_bn" not in liquidity.columns:
+        return pd.Series(dtype="float64")
+    values = liquidity[["date", "global_m2_usd_bn"]].copy()
+    values["date"] = pd.to_datetime(values["date"], errors="coerce")
+    values["global_m2_usd_bn"] = pd.to_numeric(values["global_m2_usd_bn"], errors="coerce")
+    values = values.dropna(subset=["date", "global_m2_usd_bn"]).sort_values("date")
+    if values.empty:
+        return pd.Series(dtype="float64")
+    return values.set_index("date")["global_m2_usd_bn"]
 
 
 @st.cache_data(show_spinner=True, ttl=SLOW_REFRESH_SECONDS)
@@ -4309,7 +4416,8 @@ def load_market_model_snapshot(cache_signature: str) -> dict:
 
     fred_data = download_fred_market_data(api_key=get_fred_api_key_for_app())
     cfg = market_model_config()
-    market = calculate_market_model(weekly, fred_data, config=cfg)
+    global_m2 = global_m2_weekly_series_for_market()
+    market = calculate_market_model(weekly, fred_data, config=cfg, global_m2=global_m2)
     fast_history = calculate_fast_transition_risk_history(
         weekly_close(weekly.get("^VIX", pd.DataFrame())),
         weekly_close(weekly.get("DX-Y.NYB", pd.DataFrame())),
@@ -4349,6 +4457,7 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
 
     cfg = market_model_config()
     fred_data = download_fred_market_data(api_key=get_fred_api_key_for_app())
+    global_m2 = global_m2_weekly_series_for_market()
     fast = calculate_fast_transition_risk_history(
         weekly_close(weekly.get("^VIX", pd.DataFrame())),
         weekly_close(weekly.get("DX-Y.NYB", pd.DataFrame())),
@@ -4358,9 +4467,11 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
         weekly_close(weekly.get("DX-Y.NYB", pd.DataFrame())),
         fred_data,
         cfg,
+        global_m2=global_m2,
     )
+    credit = calculate_credit_stress_confirmation_history(fred_data, cfg)
     confirmations = calculate_confirmations_history(weekly, fred_data, cfg)
-    if fast.empty and macro.empty and confirmations.empty:
+    if fast.empty and macro.empty and confirmations.empty and credit.empty:
         return pd.DataFrame(
             columns=[
                 "Date",
@@ -4376,6 +4487,13 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
                 "Global_Liquidity_Direction_13W",
                 "Global_Liquidity_Direction_13W_State",
                 "Long_Liquidity_Cycle",
+                "Credit_State",
+                "Credit_Risk",
+                "Credit_Level_State",
+                "Macro_DXY_Risk",
+                "US2Y_Risk",
+                "Global_M2_Bull_Score_26W",
+                "Global_M2_Risk_26W",
                 "Negative_Confirmation_Count",
                 "Overall_Transition_Status",
                 "Final_Market_State",
@@ -4384,7 +4502,24 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
 
     history = pd.merge(
         fast[["Date", "Fast_Transition_Risk", "Fast_Transition_State", "Fast_Risk_Direction_4W", "Fast_Risk_Direction_4W_State"]] if not fast.empty else pd.DataFrame(columns=["Date"]),
-        macro[["Date", "Macro_Transition_Risk", "Macro_Transition_State"]] if not macro.empty else pd.DataFrame(columns=["Date"]),
+        macro[
+            [
+                "Date",
+                "Macro_Transition_Risk",
+                "Macro_Transition_State",
+                "Global_M2_26W",
+                "Global_M2_Bull_Score_26W",
+                "Global_M2_Risk_26W",
+                "Macro_DXY_Risk",
+                "US2Y_Risk",
+            ]
+        ] if not macro.empty else pd.DataFrame(columns=["Date"]),
+        on="Date",
+        how="outer",
+    ).sort_values("Date")
+    history = pd.merge(
+        history,
+        credit[["Date", "Credit_Risk", "Credit_State", "HY_OAS", "HY_OAS_Change_13W", "HY_Level_Percentile", "Credit_Level_State"]] if not credit.empty else pd.DataFrame(columns=["Date"]),
         on="Date",
         how="outer",
     ).sort_values("Date")
@@ -4454,6 +4589,7 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
             global_liquidity_score=row.get("Global_Liquidity_Score"),
             global_liquidity_direction_13w=row.get("Global_Liquidity_Direction_13W"),
             global_liquidity_direction_state=row.get("Global_Liquidity_Direction_13W_State"),
+            credit_state=row.get("Credit_State", ""),
         ),
         axis=1,
     )
@@ -5299,6 +5435,8 @@ def overall_status_logic_text(market: dict) -> str:
         negative_value = np.nan
 
     liquidity_warning = backdrop in {"LIQUIDITY_WARNING", "NEGATIVE", "STRONGLY_NEGATIVE"} or _safe_float(liquidity_score) < 40.0 or _safe_float(liquidity_direction) < -10.0
+    credit_state = format_market_value(market.get("Credit_State"))
+    credit_widening = str(market.get("Credit_State", "")).upper() in {"WIDENING", "SEVERE_WIDENING"}
     fast_warning = np.isfinite(fast_value) and fast_value >= 20.0
     macro_warning = np.isfinite(macro_value) and macro_value >= 20.0
 
@@ -5312,6 +5450,8 @@ def overall_status_logic_text(market: dict) -> str:
         matched_rule = "DETERIORATING: at least two primary warning layers are active."
     elif (fast_warning or macro_warning) and negative_value >= 3.0:
         matched_rule = "DETERIORATING: one primary warning is amplified by 3+ negative confirmations."
+    elif (fast_warning or macro_warning or liquidity_warning) and credit_widening:
+        matched_rule = "DETERIORATING: one primary warning is confirmed by widening credit stress."
     elif fast_warning or macro_warning:
         matched_rule = "BULL_WITH_WARNING: structure remains bullish, but fast or macro risk is above 20."
     elif liquidity_warning:
@@ -5327,6 +5467,7 @@ def overall_status_logic_text(market: dict) -> str:
         f"Global Liquidity Backdrop = {backdrop}\n"
         f"Global Liquidity Score = {format_market_value(liquidity_score, 'score')}\n"
         f"Global Liquidity Direction 13W = {format_market_value(liquidity_direction, 'score')} / {liquidity_direction_state}\n"
+        f"Credit State = {credit_state}\n"
         f"Negative Confirmations = {negative_text}\n"
         f"Current Final Market State = {status}\n\n"
         f"Matched rule:\n"
@@ -5336,9 +5477,10 @@ def overall_status_logic_text(market: dict) -> str:
         f"2. CORRECTION if Structural Regime is CORRECTION.\n"
         f"3. DETERIORATING if two or more primary warning layers are active.\n"
         f"4. DETERIORATING if one primary warning is confirmed by 3+ negative confirmations.\n"
-        f"5. BULL_WITH_WARNING if Fast or Macro Transition Risk >= 20.\n"
-        f"6. BULL_LIQUIDITY_WARNING if liquidity is warning/negative or direction is rapidly deteriorating.\n"
-        f"7. BULL otherwise.\n\n"
+        f"5. DETERIORATING if one primary warning is confirmed by WIDENING / SEVERE_WIDENING credit.\n"
+        f"6. BULL_WITH_WARNING if Fast or Macro Transition Risk >= 20.\n"
+        f"7. BULL_LIQUIDITY_WARNING if liquidity is warning/negative or direction is rapidly deteriorating.\n"
+        f"8. BULL otherwise.\n\n"
         f"Confirmations are an amplifier only; they are not a standalone regime trigger."
     )
 
@@ -5351,6 +5493,7 @@ def market_regime_interpretation_text(market: dict) -> str:
     macro = f"{format_market_value(market.get('Macro_Transition_Risk'), 'score')} / {format_market_value(market.get('Macro_Transition_State'))}"
     backdrop = format_market_value(market.get("Global_Liquidity_Backdrop"))
     liquidity = f"{format_market_value(market.get('Global_Liquidity_Score'), 'score')} / {format_market_value(market.get('Global_Liquidity_Direction_13W_State'))}"
+    credit = f"{format_market_value(market.get('Credit_State'))} / {format_market_value(market.get('Credit_Level_State'))}"
     confirmations = format_market_value(market.get("Negative_Confirmation_Count"))
     long_cycle = format_market_value(market.get("Long_Liquidity_Cycle"))
     if final_state == "BULL_LIQUIDITY_WARNING":
@@ -5366,7 +5509,8 @@ def market_regime_interpretation_text(market: dict) -> str:
     return (
         f"The market is currently in a structural {structural} regime.\n\n"
         f"Fast Transition Risk is {fast}; 4W direction is {fast_direction}. This block is a 1-4 week stress detector.\n\n"
-        f"Macro Transition Risk is {macro}. This block captures developing 4-12 week macro pressure from DXY, Fed Net Liquidity and US2Y.\n\n"
+        f"Macro Transition Risk is {macro}. This block captures developing 4-12 week macro pressure from DXY, US2Y, Global M2 26W and Fed Net Liquidity.\n\n"
+        f"Credit stress confirmation is {credit}. Credit only escalates an existing primary warning; it does not enter Fast Transition Risk.\n\n"
         f"Global Liquidity Backdrop is {backdrop}; score/direction is {liquidity}, with long-cycle context {long_cycle}. This layer is a medium-term 8-26W+ expected-return backdrop.\n\n"
         f"Negative confirmations count is {confirmations}. Confirmations can amplify an existing primary warning but do not trigger deterioration alone.\n\n"
         f"Current final state: {final_state}. {implication}"
@@ -5446,7 +5590,7 @@ def render_market_regime_tab(market: dict) -> None:
         render_market_metric(
             "Macro Transition Risk",
             f"{format_market_value(market.get('Macro_Transition_Risk'), 'score')} / {format_market_value(market.get('Macro_Transition_State'))}",
-            "DXY 40% + Fed liquidity 30% + US2Y 30%",
+            "DXY 40% + US2Y 30% + Global M2 20% + Fed liquidity 10%",
         )
     with summary_cols[3]:
         render_market_metric(
@@ -5461,11 +5605,13 @@ def render_market_regime_tab(market: dict) -> None:
             "acceleration only",
         )
 
-    summary_cols = st.columns(2)
+    summary_cols = st.columns(3)
     with summary_cols[0]:
         render_market_metric("Long Liquidity Cycle", format_market_value(market.get("Long_Liquidity_Cycle")), "context only")
     with summary_cols[1]:
         render_market_metric("Global Liquidity Backdrop", format_market_value(market.get("Global_Liquidity_Backdrop")), "8-26W+ backdrop")
+    with summary_cols[2]:
+        render_market_metric("Credit Stress Confirmation", format_market_value(market.get("Credit_State")), format_market_value(market.get("Credit_Level_State")))
 
     summary_cols = st.columns(4)
     with summary_cols[0]:
@@ -5537,6 +5683,9 @@ def render_market_regime_tab(market: dict) -> None:
             ("Fed Liquidity Risk", format_market_value(market.get("Fed_Liquidity_Risk"), "score")),
             ("US2Y Change 13W", format_market_value(market.get("US2Y_Change_13W_bp"), "bp")),
             ("US2Y Risk", format_market_value(market.get("US2Y_Risk"), "score")),
+            ("Global M2 26W", format_market_value(market.get("Global_M2_26W"), "percent")),
+            ("Global M2 Bull Score 26W", format_market_value(market.get("Global_M2_Bull_Score_26W"), "score")),
+            ("Global M2 Risk 26W", format_market_value(market.get("Global_M2_Risk_26W"), "score")),
             ("DXY Risk", format_market_value(market.get("Macro_DXY_Risk"), "score")),
         ]
     )
@@ -5547,9 +5696,31 @@ def render_market_regime_tab(market: dict) -> None:
         "FedLiquidity26W = FedLiquidity / FedLiquidity.shift(26) - 1\n"
         "US2Y_Change13W_bp = (DGS2 - DGS2.shift(13)) * 100\n"
         "DXY_Risk = piecewise_score(DXY_26W_Return)\n"
+        "GlobalM2Growth26W = GlobalM2 / GlobalM2.shift(26) - 1\n"
+        "GlobalM2BullScore = trailing 3Y percentile(GlobalM2Growth26W)\n"
+        "GlobalM2Risk = 100 - GlobalM2BullScore\n"
         "FedLiquidity_Risk = piecewise_score(FedLiquidity26W)\n"
         "US2Y_Risk = piecewise_score(US2Y_Change13W_bp)\n"
-        "MacroTransitionRisk = clip(0.40 * DXY_Risk + 0.30 * FedLiquidity_Risk + 0.30 * US2Y_Risk, 0, 100)",
+        "MacroTransitionRisk = clip(0.40 * DXY_Risk + 0.30 * US2Y_Risk + 0.20 * GlobalM2Risk + 0.10 * FedLiquidity_Risk, 0, 100)",
+    )
+
+    st.markdown("### Credit Stress Confirmation")
+    render_market_detail_table(
+        [
+            ("HY OAS", format_market_value(market.get("HY_OAS"))),
+            ("HY OAS Change 13W", format_market_value(market.get("HY_OAS_Change_13W"))),
+            ("Credit Widening Percentile", format_market_value(market.get("Credit_Widening_Percentile", market.get("Credit_Risk")), "score")),
+            ("Credit State", format_market_value(market.get("Credit_State"))),
+            ("HY Level Percentile", format_market_value(market.get("HY_Level_Percentile"), "score")),
+            ("Credit Level State", format_market_value(market.get("Credit_Level_State"))),
+        ]
+    )
+    render_market_formula(
+        "Formula",
+        "HYOASChange13W = BAMLH0A0HYM2_t - BAMLH0A0HYM2_t_minus_13W\n"
+        "CreditRisk = trailing 3Y percentile(HYOASChange13W)\n"
+        "HYLevelPercentile = trailing 3Y percentile(HY OAS level)\n"
+        "Credit confirms/escalates existing macro/liquidity warnings only; it is not included in Fast Risk.",
     )
 
     st.markdown("### Global Liquidity Backdrop")

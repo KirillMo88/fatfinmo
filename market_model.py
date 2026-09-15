@@ -40,14 +40,24 @@ MARKET_MODEL_CONFIG = {
     },
     "macro_transition": {
         "dxy_weight": 0.40,
-        "fed_liquidity_weight": 0.30,
         "us2y_weight": 0.30,
+        "global_m2_weight": 0.20,
+        "fed_liquidity_weight": 0.10,
         "dxy_window": 26,
+        "global_m2_window": 26,
+        "global_m2_percentile_window": 156,
+        "global_m2_percentile_min_periods": 104,
         "liquidity_window": 26,
         "liquidity_short_window": 13,
         "us2y_window": 13,
         "fed_liquidity_risk_points": [(-0.12, 80.0), (-0.08, 65.0), (-0.05, 45.0), (-0.02, 25.0), (0.0, 10.0), (0.02, 5.0), (0.05, 0.0)],
         "us2y_risk_points": [(-75.0, 0.0), (-25.0, 5.0), (0.0, 10.0), (25.0, 25.0), (50.0, 45.0), (75.0, 65.0), (100.0, 85.0)],
+    },
+    "credit": {
+        "series_id": "BAMLH0A0HYM2",
+        "change_window": 13,
+        "percentile_window": 156,
+        "percentile_min_periods": 104,
     },
     "confirmations": {
         "wti_short_window": 4,
@@ -62,7 +72,7 @@ MARKET_MODEL_CONFIG = {
     },
 }
 
-FRED_MARKET_SERIES_IDS = ("WALCL", "RRPONTSYD", "WTREGEN", "DGS2", "DFII10")
+FRED_MARKET_SERIES_IDS = ("WALCL", "RRPONTSYD", "WTREGEN", "DGS2", "DFII10", "BAMLH0A0HYM2")
 YAHOO_MARKET_TICKERS = ("SPY", "IWM", "XLI", "XLP", "^VIX", "DX-Y.NYB", "CL=F")
 
 
@@ -74,6 +84,7 @@ def calculate_market_model(
     yahoo_weekly: dict[str, pd.DataFrame],
     fred_data: pd.DataFrame | None,
     config: dict | None = None,
+    global_m2: pd.Series | None = None,
 ) -> dict:
     cfg = config or MARKET_MODEL_CONFIG
     structural = calculate_structural_regime(yahoo_weekly.get("SPY", pd.DataFrame()), cfg)
@@ -86,13 +97,16 @@ def calculate_market_model(
         weekly_close(yahoo_weekly.get("DX-Y.NYB", pd.DataFrame())),
         fred_data,
         cfg,
+        global_m2=global_m2,
     )
+    credit = calculate_credit_stress_confirmation(fred_data, cfg)
     confirmations = calculate_confirmations(yahoo_weekly, fred_data, cfg)
     overall_status = calculate_overall_transition_status(
         fast.get("Fast_Transition_Risk"),
         macro.get("Macro_Transition_Risk"),
         confirmations.get("Negative_Confirmation_Count"),
         structural_regime=structural.get("Market_Regime", "UNKNOWN"),
+        credit_state=credit.get("Credit_State", ""),
     )
     alpha_confidence = calculate_alpha_confidence(
         structural.get("Market_Regime", "UNKNOWN"),
@@ -104,6 +118,7 @@ def calculate_market_model(
         **structural,
         **fast,
         **macro,
+        **credit,
         **confirmations,
         "Overall_Transition_Status": overall_status,
         "Final_Market_State": overall_status,
@@ -194,7 +209,12 @@ def calculate_vix_z(vix: pd.Series, window: int = 26, epsilon: float = 1e-9) -> 
     return ((values - rolling_median) / sigma).replace([np.inf, -np.inf], np.nan)
 
 
-def calculate_macro_transition_risk(dxy: pd.Series, fred_data: pd.DataFrame | None, config: dict | None = None) -> dict:
+def calculate_macro_transition_risk(
+    dxy: pd.Series,
+    fred_data: pd.DataFrame | None,
+    config: dict | None = None,
+    global_m2: pd.Series | None = None,
+) -> dict:
     full_cfg = config or MARKET_MODEL_CONFIG
     cfg = full_cfg["macro_transition"]
     dxy_26w = safe_last(dxy.pct_change(int(cfg["dxy_window"]))) if not dxy.empty else np.nan
@@ -210,12 +230,34 @@ def calculate_macro_transition_risk(dxy: pd.Series, fred_data: pd.DataFrame | No
     us2y_change_13w_bp = safe_last((us2y - us2y.shift(int(cfg["us2y_window"]))) * 100.0) if not us2y.empty else np.nan
     us2y_risk = scalar_piecewise_score(us2y_change_13w_bp, cfg["us2y_risk_points"])
 
-    components = [dxy_risk, fed_liquidity_risk, us2y_risk]
+    global_m2_values = clean_weekly_series(global_m2)
+    global_m2_26w = (
+        safe_last(global_m2_values.pct_change(int(cfg["global_m2_window"]), fill_method=None))
+        if not global_m2_values.empty
+        else np.nan
+    )
+    global_m2_bull_score = safe_last(
+        trailing_percentile(
+            global_m2_values.pct_change(int(cfg["global_m2_window"]), fill_method=None),
+            int(cfg["global_m2_percentile_window"]),
+            int(cfg["global_m2_percentile_min_periods"]),
+        )
+    ) if not global_m2_values.empty else np.nan
+    global_m2_risk = 100.0 - global_m2_bull_score if np.isfinite(global_m2_bull_score) else np.nan
+
+    components = [dxy_risk, us2y_risk, global_m2_risk, fed_liquidity_risk]
     if sum(np.isfinite(component) for component in components) < 2:
         risk = np.nan
         state = "DATA_INCOMPLETE"
     else:
-        weights = np.array([float(cfg["dxy_weight"]), float(cfg["fed_liquidity_weight"]), float(cfg["us2y_weight"])])
+        weights = np.array(
+            [
+                float(cfg["dxy_weight"]),
+                float(cfg["us2y_weight"]),
+                float(cfg["global_m2_weight"]),
+                float(cfg["fed_liquidity_weight"]),
+            ]
+        )
         values = np.array(components, dtype="float64")
         mask = np.isfinite(values)
         risk = float(np.clip(np.average(values[mask], weights=weights[mask]), 0.0, 100.0))
@@ -228,23 +270,33 @@ def calculate_macro_transition_risk(dxy: pd.Series, fred_data: pd.DataFrame | No
         "Fed_Liquidity_Risk": fed_liquidity_risk,
         "US2Y_Change_13W_bp": us2y_change_13w_bp,
         "US2Y_Risk": us2y_risk,
+        "Global_M2_26W": global_m2_26w,
+        "Global_M2_Bull_Score_26W": global_m2_bull_score,
+        "Global_M2_Risk_26W": global_m2_risk,
         "Macro_DXY_Risk": dxy_risk,
     }
 
 
-def calculate_macro_transition_risk_history(dxy: pd.Series, fred_data: pd.DataFrame | None, config: dict | None = None) -> pd.DataFrame:
+def calculate_macro_transition_risk_history(
+    dxy: pd.Series,
+    fred_data: pd.DataFrame | None,
+    config: dict | None = None,
+    global_m2: pd.Series | None = None,
+) -> pd.DataFrame:
     full_cfg = config or MARKET_MODEL_CONFIG
     cfg = full_cfg["macro_transition"]
     fred_weekly = fred_series_weekly(fred_data)
     liquidity = fred_weekly.get(FED_LIQUIDITY_SERIES_ID, pd.Series(dtype="float64"))
     us2y = fred_weekly.get("DGS2", pd.Series(dtype="float64"))
-    index = union_series_index([dxy, liquidity, us2y])
+    global_m2_values = clean_weekly_series(global_m2)
+    index = union_series_index([dxy, liquidity, us2y, global_m2_values])
     if index.empty:
         return pd.DataFrame(columns=["Date", "Macro_Transition_Risk", "Macro_Transition_State"])
 
     dxy_values = pd.to_numeric(dxy, errors="coerce").sort_index().reindex(index).ffill()
     liquidity_values = pd.to_numeric(liquidity, errors="coerce").sort_index().reindex(index).ffill()
     us2y_values = pd.to_numeric(us2y, errors="coerce").sort_index().reindex(index).ffill()
+    global_m2_values = global_m2_values.reindex(index).ffill()
 
     dxy_26w = dxy_values.pct_change(int(cfg["dxy_window"]))
     dxy_risk = piecewise_score_series(dxy_26w, full_cfg["fast_transition"]["dxy_risk_points"])
@@ -253,11 +305,23 @@ def calculate_macro_transition_risk_history(dxy: pd.Series, fred_data: pd.DataFr
     fed_liquidity_risk = piecewise_score_series(fed_liquidity_26w, cfg["fed_liquidity_risk_points"])
     us2y_change_13w_bp = (us2y_values - us2y_values.shift(int(cfg["us2y_window"]))) * 100.0
     us2y_risk = piecewise_score_series(us2y_change_13w_bp, cfg["us2y_risk_points"])
+    global_m2_26w = global_m2_values.pct_change(int(cfg["global_m2_window"]), fill_method=None)
+    global_m2_bull_score = trailing_percentile(
+        global_m2_26w,
+        int(cfg["global_m2_percentile_window"]),
+        int(cfg["global_m2_percentile_min_periods"]),
+    )
+    global_m2_risk = 100.0 - global_m2_bull_score
 
-    components = pd.concat([dxy_risk, fed_liquidity_risk, us2y_risk], axis=1)
-    components.columns = ["DXY_Risk", "Fed_Liquidity_Risk", "US2Y_Risk"]
+    components = pd.concat([dxy_risk, us2y_risk, global_m2_risk, fed_liquidity_risk], axis=1)
+    components.columns = ["DXY_Risk", "US2Y_Risk", "Global_M2_Risk_26W", "Fed_Liquidity_Risk"]
     weights = pd.Series(
-        [float(cfg["dxy_weight"]), float(cfg["fed_liquidity_weight"]), float(cfg["us2y_weight"])],
+        [
+            float(cfg["dxy_weight"]),
+            float(cfg["us2y_weight"]),
+            float(cfg["global_m2_weight"]),
+            float(cfg["fed_liquidity_weight"]),
+        ],
         index=components.columns,
     )
     finite_count = components.notna().sum(axis=1)
@@ -278,7 +342,72 @@ def calculate_macro_transition_risk_history(dxy: pd.Series, fred_data: pd.DataFr
             "Fed_Liquidity_Risk": fed_liquidity_risk.values,
             "US2Y_Change_13W_bp": us2y_change_13w_bp.values,
             "US2Y_Risk": us2y_risk.values,
+            "Global_M2_26W": global_m2_26w.values,
+            "Global_M2_Bull_Score_26W": global_m2_bull_score.values,
+            "Global_M2_Risk_26W": global_m2_risk.values,
             "Macro_DXY_Risk": dxy_risk.values,
+        }
+    )
+
+
+def calculate_credit_stress_confirmation(fred_data: pd.DataFrame | None, config: dict | None = None) -> dict:
+    history = calculate_credit_stress_confirmation_history(fred_data, config)
+    if history.empty:
+        return {
+            "HY_OAS": np.nan,
+            "HY_OAS_Change_13W": np.nan,
+            "Credit_Risk": np.nan,
+            "Credit_Widening_Percentile": np.nan,
+            "HY_Level_Percentile": np.nan,
+            "Credit_State": "DATA_INCOMPLETE",
+            "Credit_Level_State": "DATA_INCOMPLETE",
+        }
+    latest = history.dropna(subset=["Credit_Risk", "HY_OAS"], how="all").tail(1)
+    if latest.empty:
+        latest = history.tail(1)
+    row = latest.iloc[0]
+    return {
+        "HY_OAS": safe_numeric(row.get("HY_OAS")),
+        "HY_OAS_Change_13W": safe_numeric(row.get("HY_OAS_Change_13W")),
+        "Credit_Risk": safe_numeric(row.get("Credit_Risk")),
+        "Credit_Widening_Percentile": safe_numeric(row.get("Credit_Widening_Percentile")),
+        "HY_Level_Percentile": safe_numeric(row.get("HY_Level_Percentile")),
+        "Credit_State": str(row.get("Credit_State", "DATA_INCOMPLETE")),
+        "Credit_Level_State": str(row.get("Credit_Level_State", "DATA_INCOMPLETE")),
+    }
+
+
+def calculate_credit_stress_confirmation_history(fred_data: pd.DataFrame | None, config: dict | None = None) -> pd.DataFrame:
+    cfg = (config or MARKET_MODEL_CONFIG)["credit"]
+    fred_weekly = fred_series_weekly(fred_data)
+    hy_oas = fred_weekly.get(str(cfg["series_id"]).upper(), pd.Series(dtype="float64"))
+    if hy_oas.empty:
+        return pd.DataFrame(
+            columns=[
+                "Date",
+                "HY_OAS",
+                "HY_OAS_Change_13W",
+                "Credit_Risk",
+                "Credit_Widening_Percentile",
+                "HY_Level_Percentile",
+                "Credit_State",
+                "Credit_Level_State",
+            ]
+        )
+    hy_oas = clean_weekly_series(hy_oas)
+    change = hy_oas - hy_oas.shift(int(cfg["change_window"]))
+    widening = trailing_percentile(change, int(cfg["percentile_window"]), int(cfg["percentile_min_periods"]))
+    level = trailing_percentile(hy_oas, int(cfg["percentile_window"]), int(cfg["percentile_min_periods"]))
+    return pd.DataFrame(
+        {
+            "Date": hy_oas.index,
+            "HY_OAS": hy_oas.values,
+            "HY_OAS_Change_13W": change.values,
+            "Credit_Risk": widening.values,
+            "Credit_Widening_Percentile": widening.values,
+            "HY_Level_Percentile": level.values,
+            "Credit_State": widening.map(classify_credit_state).values,
+            "Credit_Level_State": level.map(classify_credit_level_state).values,
         }
     )
 
@@ -396,6 +525,7 @@ def calculate_overall_transition_status(
     global_liquidity_score: float = np.nan,
     global_liquidity_direction_13w: float = np.nan,
     global_liquidity_direction_state: str = "",
+    credit_state: str = "",
 ) -> str:
     fast = safe_numeric(fast_risk)
     macro = safe_numeric(macro_risk)
@@ -403,6 +533,7 @@ def calculate_overall_transition_status(
     liquidity_score = safe_numeric(global_liquidity_score)
     liquidity_direction = safe_numeric(global_liquidity_direction_13w)
     liquidity_state = str(global_liquidity_direction_state or "").upper()
+    credit = str(credit_state or "").upper()
     backdrop = str(global_liquidity_backdrop or "NEUTRAL").upper()
     structural = str(structural_regime or "UNKNOWN").upper()
 
@@ -424,9 +555,12 @@ def calculate_overall_transition_status(
     fast_warning = fast >= 20.0
     macro_warning = macro >= 20.0
     primary_count = int(fast_warning) + int(macro_warning) + int(liquidity_warning)
+    credit_widening = credit in {"WIDENING", "SEVERE_WIDENING"}
     if primary_count >= 2:
         return "DETERIORATING"
     if (fast_warning or macro_warning) and negative >= 3.0:
+        return "DETERIORATING"
+    if primary_count >= 1 and credit_widening:
         return "DETERIORATING"
     if fast_warning or macro_warning:
         return "BULL_WITH_WARNING"
@@ -471,6 +605,30 @@ def classify_global_liquidity_backdrop(score: float, direction: float, direction
     if value >= 40.0:
         return "LIQUIDITY_WARNING" if state in {"DETERIORATING", "DETERIORATING_FAST"} else "NEUTRAL"
     return "EARLY_REACCELERATION" if state in {"IMPROVING", "ACCELERATING"} else "NEGATIVE"
+
+
+def classify_credit_state(value: float) -> str:
+    if not np.isfinite(value):
+        return "DATA_INCOMPLETE"
+    if value < 40.0:
+        return "BENIGN"
+    if value < 60.0:
+        return "NORMAL"
+    if value < 75.0:
+        return "WATCH"
+    if value < 90.0:
+        return "WIDENING"
+    return "SEVERE_WIDENING"
+
+
+def classify_credit_level_state(value: float) -> str:
+    if not np.isfinite(value):
+        return "DATA_INCOMPLETE"
+    if value >= 80.0:
+        return "STRESSED_LEVEL"
+    if value >= 60.0:
+        return "ELEVATED_LEVEL"
+    return "BENIGN_LEVEL"
 
 
 def calculate_alpha_confidence(regime: str, fast_risk: float, macro_risk: float, config: dict | None = None) -> float:
@@ -564,6 +722,29 @@ def fred_series_weekly(fred_data: pd.DataFrame | None) -> dict[str, pd.Series]:
         if not values.empty:
             out[str(series_id)] = values.resample("W-FRI").last().ffill().dropna()
     return out
+
+
+def clean_weekly_series(series: pd.Series | None) -> pd.Series:
+    if series is None or series.empty:
+        return pd.Series(dtype="float64")
+    values = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().sort_index()
+    if values.empty:
+        return pd.Series(dtype="float64")
+    values.index = pd.to_datetime(values.index, errors="coerce")
+    values = values[values.index.notna()].sort_index()
+    return values.resample("W-FRI").last().ffill().dropna()
+
+
+def trailing_percentile(series: pd.Series, window: int = 156, min_periods: int = 104) -> pd.Series:
+    values = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    def rank_last(window_values: np.ndarray) -> float:
+        clean = window_values[np.isfinite(window_values)]
+        if len(clean) < min_periods or not np.isfinite(window_values[-1]):
+            return np.nan
+        return float((clean <= window_values[-1]).sum() / len(clean) * 100.0)
+
+    return values.rolling(window, min_periods=min_periods).apply(rank_last, raw=True)
 
 
 def ratio_return(numerator: pd.Series, denominator: pd.Series, window: int) -> float:
