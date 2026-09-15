@@ -205,6 +205,7 @@ def generate_cio_view(
     except Exception as exc:
         analyst = deterministic_cio_view(snapshot, "LLM_UNAVAILABLE")
         critic = None
+        final = analyst
         usage["analyst_error"] = brief_error(exc)
         status = "LLM_UNAVAILABLE"
     else:
