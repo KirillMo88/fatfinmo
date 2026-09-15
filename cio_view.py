@@ -719,7 +719,7 @@ def _render_asset_outlook(outlook: dict[str, Any]) -> None:
         with col:
             st.markdown(f"#### {ticker} - 3M Outlook")
             _metric_card("Bias", item.get("bias", item.get("bias_3m", "n/a")), f"Confidence {display_value(item.get('confidence', 'n/a'))}")
-            st.caption(str(item.get("expected_environment", "")))
+            st.markdown(safe_str(item.get("expected_environment", "")))
             st.markdown("**Top Supports**")
             st.markdown(items_markdown(item.get("top_supports", item.get("supporting_factors", []))))
             st.markdown("**Top Risks**")
