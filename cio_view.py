@@ -81,7 +81,38 @@ Different assets have different drivers. Do not use one universal macro model.
 Treat Global Liquidity differently for equities, Gold and BTC according to the
 supplied model architecture.
 
-Return only valid JSON matching the requested structure."""
+Return only valid JSON matching the requested structure.
+
+Required JSON keys:
+as_of_date, analysis_source, overall_system_state, dimensions, cross_regime_signals,
+asset_outlook_3m, scenarios, key_risks, what_would_change_view, data_quality_notes,
+critic_changes_summary.
+
+Dimension vocabularies:
+Growth = ACCELERATING/STABLE/SLOWING/CONTRACTING/UNKNOWN.
+Inflation = RISING/STABLE/FALLING/REACCELERATING/UNKNOWN.
+Liquidity state must include level and direction, not a single generic word.
+Rates = EASING/NEUTRAL/RESTRICTIVE/TIGHTENING/UNKNOWN.
+Financial Conditions = EASY/NEUTRAL/TIGHTENING/TIGHT/UNKNOWN.
+Credit = BENIGN/NORMAL/DETERIORATING/STRESSED/UNKNOWN.
+Risk Appetite = POSITIVE/NEUTRAL/NEGATIVE/UNKNOWN.
+Market Trend = BULL/BULL_WITH_WARNING/DETERIORATING/CORRECTION/STRESS/UNKNOWN.
+Systemic Stress = LOW/ELEVATED/HIGH/EXTREME/UNKNOWN.
+
+Asset driver rules:
+SPY prioritizes structural market regime, macro transition risk, liquidity score/direction,
+credit, breadth, DXY/rates. QQQ is more sensitive than SPY to liquidity, real yields,
+US2Y, DXY and financial conditions. GLD prioritizes Gold Alpha, Gold Structural Macro,
+Gold Forward Macro Risk, Gold Tactical Flow, ETF flows, COT positioning and rates; do not
+use Global Liquidity as a primary Gold trigger. BTC uses Halving Phase x Global Liquidity
+x Trend/Alpha x ETF flows x OI/funding/basis; halving phase alone is not directional.
+
+For each asset output bias_3m, confidence, expected_environment, top_supports, top_risks,
+more_bullish_if, more_bearish_if. Confidence must be 0.50-0.85; cap at 0.60 for important
+missing data and at 0.65 for major conflicts.
+
+Key risks must include status ACTIVE/WATCH/NOT_ACTIVE and trigger_to_escalate. Do not list
+an already-active condition as a future trigger."""
 
 
 @dataclass(frozen=True)
@@ -92,6 +123,9 @@ class CioRunResult:
     final_result: dict[str, Any]
     usage: dict[str, Any]
     status: str
+    analysis_source: str
+    analyst_status: str
+    critic_status: str
     generated_at: str
     next_scheduled_at: str
 
@@ -139,8 +173,18 @@ def load_or_build_cio_view(table_df: pd.DataFrame, market_snapshot: dict[str, An
         analyst_result=final,
         critic_result=None,
         final_result=final,
-        usage={"model": CIO_MODEL, "reasoning_effort": CIO_REASONING_EFFORT, "status": "NO_PREVIOUS_ANALYSIS"},
+        usage={
+            "model": CIO_MODEL,
+            "reasoning_effort": CIO_REASONING_EFFORT,
+            "openai_api": "SKIPPED",
+            "analyst": "SKIPPED",
+            "critic": "SKIPPED",
+            "status": "NO_PREVIOUS_ANALYSIS",
+        },
         status="CIO_VIEW_UNAVAILABLE",
+        analysis_source="DETERMINISTIC_FALLBACK",
+        analyst_status="SKIPPED",
+        critic_status="SKIPPED",
         generated_at=snapshot["as_of_date"],
         next_scheduled_at=next_weekly_timestamp(snapshot["as_of_date"]),
     )
@@ -161,25 +205,51 @@ def generate_cio_view(
         "model": CIO_MODEL,
         "reasoning_effort": CIO_REASONING_EFFORT,
         "critic_enabled": CIO_CRITIC_ENABLED,
+        "openai_api": "FAILED",
+        "analyst": "FAILED",
+        "critic": "SKIPPED" if not CIO_CRITIC_ENABLED else "FAILED",
         "estimated_cost": None,
     }
+    analyst: dict[str, Any]
+    critic: dict[str, Any] | None = None
+    analysis_source = "DETERMINISTIC_FALLBACK"
+    analyst_status = "FAILED"
+    critic_status = "SKIPPED" if not CIO_CRITIC_ENABLED else "FAILED"
     try:
         analyst = call_cio_llm(snapshot, CIO_REASONING_EFFORT)
         usage["analyst_usage"] = analyst.pop("_response_usage", None)
-        critic = call_cio_critic(snapshot, analyst) if CIO_CRITIC_ENABLED else None
-        if critic:
-            usage["critic_usage"] = critic.pop("_response_usage", None)
-        final = critic or analyst
+        usage["openai_api"] = "CONNECTED"
+        usage["analyst"] = "SUCCESS"
+        analyst_status = "SUCCESS"
+        analysis_source = "LLM_ANALYST"
         status = "CURRENT"
     except Exception as exc:
-        previous = cio_result_from_cache(cached, "STALE") if cached else None
-        if previous:
-            return previous
-        final = deterministic_cio_view(snapshot, "LLM_UNAVAILABLE")
-        analyst = final
+        analyst = deterministic_cio_view(snapshot, "LLM_UNAVAILABLE")
         critic = None
-        usage["error"] = str(exc)
+        usage["analyst_error"] = brief_error(exc)
         status = "LLM_UNAVAILABLE"
+    else:
+        if CIO_CRITIC_ENABLED:
+            try:
+                critic = call_cio_critic(snapshot, analyst)
+                usage["critic_usage"] = critic.pop("_response_usage", None)
+                usage["critic"] = "SUCCESS"
+                critic_status = "SUCCESS"
+                analysis_source = "LLM_CRITIC_CORRECTED"
+            except Exception as exc:
+                usage["critic"] = "FAILED"
+                usage["critic_error"] = brief_error(exc)
+                critic_status = "FAILED"
+        final = critic or analyst
+    final = normalize_cio_result(final, snapshot, analysis_source)
+    analyst = normalize_cio_result(analyst, snapshot, "LLM_ANALYST" if analyst_status == "SUCCESS" else "DETERMINISTIC_FALLBACK")
+    if critic:
+        critic = normalize_cio_result(critic, snapshot, "LLM_CRITIC_CORRECTED")
+    usage["analysis_source"] = analysis_source
+    usage["analyst_status"] = analyst_status
+    usage["critic_status"] = critic_status
+    usage["token_usage"] = summarize_token_usage(usage)
+    usage["estimated_cost"] = estimate_usage_cost(usage["token_usage"])
     usage["latency_seconds"] = round(time.time() - started, 2)
     generated_at = datetime.now(timezone.utc).isoformat()
     result = CioRunResult(
@@ -189,6 +259,9 @@ def generate_cio_view(
         final_result=final,
         usage=usage,
         status=status,
+        analysis_source=analysis_source,
+        analyst_status=analyst_status,
+        critic_status=critic_status,
         generated_at=generated_at,
         next_scheduled_at=next_weekly_timestamp(generated_at),
     )
@@ -205,7 +278,7 @@ def build_cio_snapshot(table_df: pd.DataFrame, market_snapshot: dict[str, Any], 
     btc = compact_btc_snapshot(table_df, market_snapshot, liquidity)
     assets = {ticker: asset_snapshot(ticker, table_df) for ticker in ASSET_TICKERS}
     data_quality = data_quality_snapshot(raw_liquidity, monthly_liquidity, weekly_liquidity, macro, gold, btc)
-    return {
+    snapshot = {
         "as_of_date": as_of,
         "market_regime": compact_market_snapshot(market_snapshot),
         "global_liquidity": liquidity,
@@ -215,6 +288,13 @@ def build_cio_snapshot(table_df: pd.DataFrame, market_snapshot: dict[str, Any], 
         "asset_market_data": assets,
         "data_quality": data_quality,
     }
+    validation_errors = validate_cio_snapshot(snapshot)
+    snapshot["snapshot_validation_errors"] = validation_errors
+    if validation_errors:
+        snapshot["data_quality"]["status"] = "PARTIAL_DATA"
+        snapshot["data_quality"].setdefault("invalid_scores", []).extend(validation_errors)
+        snapshot["data_quality"].setdefault("notes", []).append(f"{len(validation_errors)} score-like fields failed 0-100 validation.")
+    return snapshot
 
 
 def compact_market_snapshot(market: dict[str, Any]) -> dict[str, Any]:
@@ -291,9 +371,15 @@ def compact_gold_snapshot(table_df: pd.DataFrame, fred_api_key: str | None) -> d
         current = dict(snapshot.current or {})
         history = snapshot.history.copy() if hasattr(snapshot, "history") else pd.DataFrame()
         returns = price_returns_from_history(history, "gold_price")
+        current_alpha = clean_value(current.get("gold_alpha"))
+        gold_alpha_valid = is_score_like(current_alpha)
+        if not gold_alpha_valid and is_score_like(gold_alpha):
+            current_alpha = clean_value(gold_alpha)
+            gold_alpha_valid = True
         return {
             "final_state": clean_value(current.get("gold_regime")),
-            "gold_alpha": clean_value(current.get("gold_alpha")),
+            "gold_alpha": current_alpha if gold_alpha_valid else None,
+            "gold_alpha_valid": gold_alpha_valid,
             "structural_macro": clean_value(current.get("structural_macro_score")),
             "forward_macro_risk": clean_value(current.get("forward_macro_risk")),
             "tactical_flow": clean_value(current.get("tactical_flow_score")),
@@ -349,9 +435,12 @@ def compact_btc_snapshot(table_df: pd.DataFrame, market: dict[str, Any], liquidi
 
 def asset_snapshot(ticker: str, table_df: pd.DataFrame) -> dict[str, Any]:
     row = table_row(table_df, ticker)
+    current_price = latest_close(ticker)
+    if current_price is None:
+        current_price = first_valid(row, ["Current_Price", "Price", "Last", "Close", "WeeklyClose_Last"])
     out = {
         "ticker": ticker,
-        "current_price": latest_close(ticker),
+        "current_price": clean_value(current_price),
         "return_1m": clean_value(row.get("Perf_1M_%")),
         "return_3m": clean_value(row.get("Perf_3M_%")),
         "return_6m": clean_value(row.get("Perf_6M_%")),
@@ -372,7 +461,8 @@ def call_cio_llm(snapshot: dict[str, Any], reasoning_effort: str) -> dict[str, A
         f"Analyze this CIO snapshot as of {snapshot['as_of_date']}.\n\n"
         "Produce financial system assessment, dimension states, cross-regime signals, "
         "SPY/QQQ/GLD/BTC-USD 3M outlook, base/bull/bear scenarios, key risks, and what would change the view.\n"
-        "Use only supplied inputs.\n\n"
+        "Use only supplied inputs. Treat snapshot_validation_errors as invalid data, not normal valid scores. "
+        "Make SPY, QQQ, GLD and BTC-USD asset-specific; avoid generic reused supports/risks/triggers.\n\n"
         f"CIO Snapshot JSON:\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}"
     )
     response = client.responses.create(
@@ -395,7 +485,9 @@ def call_cio_critic(snapshot: dict[str, Any], analyst: dict[str, Any]) -> dict[s
     prompt = (
         "Audit the CIO analysis. Correct unsupported conclusions, missing-data inventions, "
         "driver mismatches for SPY/QQQ/GLD/BTC, overuse of short-term Fast Risk, misuse of Global Liquidity for Gold, "
-        "and confidence values that are too high. Return corrected final JSON only.\n\n"
+        "halving treated as deterministic BTC forecast, active risks incorrectly shown as future triggers, "
+        "SPY/QQQ not differentiated enough, invalid/null values treated as valid, and confidence values that are too high. "
+        "Return corrected final JSON only, with critic_changes_summary explaining material corrections.\n\n"
         f"Snapshot:\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}\n\n"
         f"Analyst JSON:\n{json.dumps(analyst, ensure_ascii=False, indent=2)}"
     )
@@ -420,11 +512,12 @@ def deterministic_cio_view(snapshot: dict[str, Any], status: str) -> dict[str, A
     label = deterministic_system_label(market, liquidity)
     return {
         "as_of_date": snapshot["as_of_date"],
+        "analysis_source": "DETERMINISTIC_FALLBACK",
         "overall_system_state": {
             "label": label,
-            "summary": "Deterministic fallback view generated from existing regime outputs; LLM synthesis has not produced a current weekly analysis.",
+            "summary": deterministic_system_summary(snapshot, label),
         },
-        "dimensions": fallback_dimensions(market, liquidity),
+        "dimensions": fallback_dimensions(snapshot),
         "cross_regime_signals": fallback_cross_regime_signals(market, liquidity, gold, btc),
         "asset_outlook_3m": {
             "SPY": fallback_asset_outlook("SPY", snapshot),
@@ -432,9 +525,10 @@ def deterministic_cio_view(snapshot: dict[str, Any], status: str) -> dict[str, A
             "GLD": fallback_asset_outlook("GLD", snapshot),
             "BTC-USD": fallback_asset_outlook("BTC-USD", snapshot),
         },
-        "scenarios": fallback_scenarios(),
+        "scenarios": fallback_scenarios(snapshot),
         "key_risks": fallback_key_risks(snapshot),
         "what_would_change_view": fallback_change_view(),
+        "critic_changes_summary": [],
         "data_quality_notes": [status, *snapshot.get("data_quality", {}).get("notes", [])],
     }
 
@@ -451,73 +545,119 @@ def deterministic_system_label(market: dict[str, Any], liquidity: dict[str, Any]
     return "LIQUIDITY_DIVERGENCE"
 
 
-def fallback_dimensions(market: dict[str, Any], liquidity: dict[str, Any]) -> dict[str, dict[str, str]]:
+def deterministic_system_summary(snapshot: dict[str, Any], label: str) -> str:
+    market = snapshot.get("market_regime", {})
+    liquidity = snapshot.get("global_liquidity", {})
+    return (
+        f"{label}: market structure is {market.get('structural_regime', 'UNKNOWN')} / "
+        f"{market.get('final_state', 'UNKNOWN')}; liquidity level is "
+        f"{state_from_liquidity_score(liquidity.get('global_liquidity_score'))} and direction is "
+        f"{liquidity.get('global_liquidity_direction', 'UNKNOWN')}; macro transition risk is "
+        f"{market.get('macro_transition_risk', 'n/a')}; systemic stress is estimated as "
+        f"{systemic_stress_state(market)}."
+    )
+
+
+def fallback_dimensions(snapshot: dict[str, Any]) -> dict[str, dict[str, str]]:
+    market = snapshot.get("market_regime", {})
+    liquidity = snapshot.get("global_liquidity", {})
+    macro = snapshot.get("global_macro", {})
+    growth_state = growth_dimension_state(macro)
+    inflation_state = inflation_dimension_state(macro)
+    rates_state = rates_dimension_state(macro)
+    fc_state = financial_conditions_state(macro, market)
+    credit_state = credit_dimension_state(macro)
+    liquidity_level = state_from_liquidity_score(liquidity.get("global_liquidity_score"))
+    liquidity_direction = str(liquidity.get("global_liquidity_direction", "UNKNOWN"))
     return {
-        "growth": {"state": "NEUTRAL", "explanation": "Use Global Macro PMI/claims block for the current weekly LLM view."},
-        "inflation": {"state": "NEUTRAL", "explanation": "Inflation block is available in the supplied snapshot."},
-        "liquidity": {"state": state_from_score(liquidity.get("global_liquidity_score")), "explanation": str(liquidity.get("global_liquidity_backdrop", "n/a"))},
-        "rates": {"state": "NEUTRAL", "explanation": "Rates and real-yield data are monitored in Global Macro."},
-        "financial_conditions": {"state": "NEUTRAL", "explanation": "VIX/MOVE/spreads are included in Global Macro."},
-        "credit": {"state": "NEUTRAL", "explanation": "Credit spread state requires LLM synthesis over supplied current/trend changes."},
-        "risk_appetite": {"state": state_from_risk(market.get("fast_transition_risk")), "explanation": str(market.get("fast_risk_state", "n/a"))},
-        "market_trend": {"state": str(market.get("structural_regime", "DATA_INCOMPLETE")), "explanation": str(market.get("final_state", "n/a"))},
-        "systemic_stress": {"state": state_from_risk(market.get("macro_transition_risk")), "explanation": str(market.get("macro_risk_state", "n/a"))},
+        "growth": {"state": growth_state, "explanation": "Derived from PMI, CFNAI and jobless-claims items when present."},
+        "inflation": {"state": inflation_state, "explanation": "Derived from breakevens, inflation expectations and WTI changes."},
+        "liquidity": {"state": liquidity_level, "level": liquidity_level, "direction": liquidity_direction, "explanation": f"Score {liquidity.get('global_liquidity_score', 'n/a')}; 13W direction {liquidity_direction}."},
+        "rates": {"state": rates_state, "explanation": "Derived from US2Y, 10Y real yield and curve pressure."},
+        "financial_conditions": {"state": fc_state, "explanation": "Derived from VIX/MOVE, credit spreads and fast transition risk."},
+        "credit": {"state": credit_state, "explanation": "Derived from HY/IG spread levels and changes."},
+        "risk_appetite": {"state": risk_appetite_state(market), "explanation": str(market.get("fast_risk_state", "n/a"))},
+        "market_trend": {"state": market_trend_state(market), "explanation": str(market.get("final_state", "n/a"))},
+        "systemic_stress": {"state": systemic_stress_state(market), "explanation": f"Macro risk {market.get('macro_transition_risk', 'n/a')}; fast risk {market.get('fast_transition_risk', 'n/a')}."},
     }
 
 
 def fallback_cross_regime_signals(market: dict[str, Any], liquidity: dict[str, Any], gold: dict[str, Any], btc: dict[str, Any]) -> list[dict[str, str]]:
     signals = []
-    if str(market.get("structural_regime", "")).upper() == "BULL" and "DETERIORATING" in str(liquidity.get("global_liquidity_direction", "")):
-        signals.append({"title": "PRICE_LIQUIDITY_DIVERGENCE", "description": "Market trend remains constructive while liquidity direction is deteriorating."})
-    if to_float(gold.get("tactical_flow")) >= 60 and to_float(gold.get("forward_macro_risk")) >= 60:
-        signals.append({"title": "GOLD_MACRO_FLOW_CONFLICT", "description": "Gold flow support is positive but forward macro risk is elevated."})
-    if str(btc.get("cycle_bottom_status", "")).endswith("WATCH"):
-        signals.append({"title": "BTC_BOTTOMING_NOT_CONFIRMED", "description": "BTC timing setup is active but confirmation set is incomplete."})
+    if str(market.get("structural_regime", "")).upper() == "BULL" and liquidity_direction_value(liquidity) < -10:
+        signals.append({"name": "PRICE_LIQUIDITY_DIVERGENCE", "title": "PRICE_LIQUIDITY_DIVERGENCE", "description": "Structural equity trend is still bull while global liquidity momentum is deteriorating.", "affected_assets": ["SPY", "QQQ", "BTC-USD"]})
+    if to_float(gold.get("gold_alpha")) >= 60 and to_float(gold.get("tactical_flow")) >= 60 and (to_float(gold.get("structural_macro")) < 40 or to_float(gold.get("forward_macro_risk")) > 60):
+        signals.append({"name": "GOLD_MACRO_FLOW_CONFLICT", "title": "GOLD_MACRO_FLOW_CONFLICT", "description": "Gold alpha/flows are supportive while structural macro or forward macro risk is not.", "affected_assets": ["GLD"]})
+    if str(btc.get("halving_phase")) in {"POST_PEAK_BEAR", "ACCUMULATION_PRE_HALVING"} and (to_float(btc.get("alpha")) >= 50 or str(btc.get("etf_flow_state")) == "POSITIVE") and "DETERIORATING" in str(btc.get("global_liquidity_direction")):
+        signals.append({"name": "BTC_CYCLE_LIQUIDITY_CONFLICT", "title": "BTC_CYCLE_LIQUIDITY_CONFLICT", "description": "BTC cycle/flow setup is improving while global liquidity direction remains adverse.", "affected_assets": ["BTC-USD"]})
+    if systemic_stress_state(market) == "LOW":
+        signals.append({"name": "NO_SYSTEMIC_CREDIT_STRESS", "title": "NO_SYSTEMIC_CREDIT_STRESS", "description": "Risk warning is currently more liquidity/macro than systemic stress.", "affected_assets": ["SPY", "QQQ", "BTC-USD"]})
     if not signals:
-        signals.append({"title": "NO_MAJOR_CONFLICT_DETECTED", "description": "Fallback synthesis did not identify a high-priority cross-regime conflict."})
+        signals.append({"name": "NO_HIGH_PRIORITY_CONFLICT", "title": "NO_HIGH_PRIORITY_CONFLICT", "description": "Rule fallback did not identify a high-priority cross-regime conflict.", "affected_assets": ASSET_TICKERS})
     return signals[:5]
 
 
 def fallback_asset_outlook(ticker: str, snapshot: dict[str, Any]) -> dict[str, Any]:
     asset = snapshot.get("asset_market_data", {}).get(ticker, {})
+    market = snapshot.get("market_regime", {})
+    liquidity = snapshot.get("global_liquidity", {})
+    gold = snapshot.get("gold_regime", {})
+    btc = snapshot.get("btc_regime", {})
     alpha = to_float(asset.get("alpha_score"))
-    bias = "NEUTRAL_POSITIVE" if alpha >= 60 else "NEUTRAL_NEGATIVE" if alpha < 40 and np.isfinite(alpha) else "NEUTRAL"
+    bias = asset_fallback_bias(ticker, snapshot, alpha)
+    supports, risks, bullish, bearish = asset_specific_lists(ticker, snapshot)
     return {
         "ticker": ticker,
         "bias_3m": bias,
-        "confidence": 0.55,
-        "supporting_factors": ["Existing deterministic regime outputs are available."],
-        "risk_factors": ["LLM synthesis is unavailable or stale."],
-        "expected_environment": "Use the latest successful CIO generation for a fuller qualitative view.",
-        "what_would_make_more_bullish": ["GlobalLiquidityDirection > 0", "Alpha Score > 60"],
-        "what_would_make_more_bearish": ["GlobalLiquidityDirection deteriorates", "Alpha Score < 40"],
+        "confidence": fallback_confidence(snapshot),
+        "expected_environment": asset_environment_text(ticker, market, liquidity, gold, btc),
+        "top_supports": supports,
+        "top_risks": risks,
+        "supporting_factors": supports,
+        "risk_factors": risks,
+        "more_bullish_if": bullish,
+        "more_bearish_if": bearish,
+        "what_would_make_more_bullish": bullish,
+        "what_would_make_more_bearish": bearish,
     }
 
 
-def fallback_scenarios() -> dict[str, dict[str, Any]]:
+def fallback_scenarios(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    market = snapshot.get("market_regime", {})
+    liquidity = snapshot.get("global_liquidity", {})
+    base_conditions = [
+        f"Market state remains {market.get('final_state', 'UNKNOWN')}",
+        f"Liquidity direction remains {liquidity.get('global_liquidity_direction', 'UNKNOWN')}",
+        f"Macro transition risk remains {market.get('macro_transition_risk', 'n/a')}",
+    ]
+    bull_conditions = dynamic_bull_conditions(snapshot)
+    bear_conditions = dynamic_bear_conditions(snapshot)
     return {
-        "base": {"scenario_conditions": ["Current major signals persist"], "system_implication": "Mixed regime; wait for LLM weekly synthesis.", "SPY": "NEUTRAL", "QQQ": "NEUTRAL", "GLD": "NEUTRAL", "BTC": "NEUTRAL"},
-        "bull": {"scenario_conditions": ["Liquidity direction improves", "Rates/DXY ease", "Credit remains benign"], "system_implication": "Risk appetite broadens.", "SPY": "POSITIVE", "QQQ": "POSITIVE", "GLD": "MIXED", "BTC": "POSITIVE"},
-        "bear": {"scenario_conditions": ["Liquidity deterioration continues", "DXY/rates rise", "Credit and volatility widen"], "system_implication": "Correction risk rises.", "SPY": "NEGATIVE", "QQQ": "NEGATIVE", "GLD": "MIXED", "BTC": "NEGATIVE"},
+        "base": {"scenario_conditions": base_conditions, "system_implication": deterministic_system_summary(snapshot, deterministic_system_label(market, liquidity)), "SPY": "CONSTRUCTIVE_CONSTRAINED", "QQQ": "HIGHER_SENSITIVITY", "GLD": "DRIVER_DEPENDENT", "BTC-USD": "CYCLE_LIQUIDITY_DEPENDENT"},
+        "bull": {"scenario_conditions": bull_conditions, "system_implication": "Risk appetite broadens if liquidity/rates improve without credit stress.", "SPY": "POSITIVE", "QQQ": "POSITIVE_HIGH_BETA", "GLD": "POSITIVE_IF_GOLD_DRIVERS_CONFIRM", "BTC-USD": "POSITIVE_IF_LIQUIDITY_AND_FLOWS_CONFIRM"},
+        "bear": {"scenario_conditions": bear_conditions, "system_implication": "Correction risk rises if liquidity deterioration spreads into macro/credit stress.", "SPY": "NEGATIVE", "QQQ": "MORE_NEGATIVE_THAN_SPY", "GLD": "MIXED_UNLESS_GOLD_FLOWS_HOLD", "BTC-USD": "NEGATIVE_IF_LIQUIDITY_AND_LEVERAGE_WORSEN"},
     }
 
 
 def fallback_key_risks(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    market = snapshot.get("market_regime", {})
+    liquidity = snapshot.get("global_liquidity", {})
+    liq_active = "DETERIORATING" in str(liquidity.get("global_liquidity_direction", "")) or liquidity_direction_value(liquidity) < -10
+    macro_watch = to_float(market.get("macro_transition_risk")) >= 30
     return [
-        {"rank": 1, "title": "Liquidity deterioration", "description": "Global liquidity direction remains a key cross-asset risk.", "affected_assets": ["SPY", "QQQ", "BTC-USD"], "trigger_to_watch": "GlobalLiquidityDirection13W < -5"},
-        {"rank": 2, "title": "Rates / USD pressure", "description": "Higher yields and a stronger DXY can pressure duration and crypto assets.", "affected_assets": ["QQQ", "BTC-USD", "GLD"], "trigger_to_watch": "US2Y / DXY 3M change"},
-        {"rank": 3, "title": "Credit stress", "description": "HY/IG spread widening would change the risk-on interpretation.", "affected_assets": ["SPY", "QQQ", "BTC-USD"], "trigger_to_watch": "HY OAS / IG OAS"},
+        {"rank": 1, "title": "Liquidity deterioration", "status": "ACTIVE" if liq_active else "WATCH", "description": "Global liquidity direction is the main cross-asset medium-term risk.", "affected_assets": ["SPY", "QQQ", "BTC-USD"], "trigger_to_escalate": "GlobalLiquidityScore < 40 or DETERIORATING_FAST persists another 4 weeks"},
+        {"rank": 2, "title": "Macro transition risk", "status": "ACTIVE" if macro_watch else "WATCH", "description": "DXY, Fed liquidity and US2Y can move macro pressure from warning to correction risk.", "affected_assets": ["SPY", "QQQ", "BTC-USD"], "trigger_to_escalate": "MacroTransitionRisk > 40 with DXY/US2Y rising"},
+        {"rank": 3, "title": "Credit stress", "status": "WATCH", "description": "Credit widening would turn a liquidity warning into broader risk-off stress.", "affected_assets": ["SPY", "QQQ", "BTC-USD"], "trigger_to_escalate": "HY/IG OAS widen while VIX/MOVE rise"},
+        {"rank": 4, "title": "Gold macro-flow conflict", "status": "ACTIVE" if any(s.get("name") == "GOLD_MACRO_FLOW_CONFLICT" for s in fallback_cross_regime_signals(market, liquidity, snapshot.get("gold_regime", {}), snapshot.get("btc_regime", {}))) else "WATCH", "description": "Gold can stay supported by flows while macro scores are fragile.", "affected_assets": ["GLD"], "trigger_to_escalate": "Gold Alpha < 50 and ETF/COT support weakens"},
     ]
 
 
 def fallback_change_view() -> dict[str, dict[str, list[str]]]:
-    common_bull = ["GlobalLiquidityDirection > 0", "US2Y falls", "DXY weakens"]
-    common_bear = ["GlobalLiquidityDirection < -10", "HY/IG spreads widen", "VIX/MOVE accelerate"]
     return {
-        "SPY": {"bullish_triggers": common_bull, "bearish_triggers": common_bear},
-        "QQQ": {"bullish_triggers": common_bull + ["10Y real yield falls"], "bearish_triggers": common_bear + ["10Y real yield rises"]},
-        "GLD": {"bullish_triggers": ["Gold Alpha > 60", "ETF Flow Score > 70", "real yields fall"], "bearish_triggers": ["Gold Alpha < 40", "ETF Flow Score < 30", "US2Y / DXY rise"]},
-        "BTC-USD": {"bullish_triggers": ["BTC Alpha > 60", "BTC ETF flows positive", "funding normalized"], "bearish_triggers": ["BTC Alpha < 40", "ETF flows turn negative", "OI/funding become overheated"]},
+        "SPY": {"bullish_triggers": ["GlobalLiquidityDirection > 0", "MacroTransitionRisk < 20", "HY/IG spreads stable or tightening", "Breadth confirmations improve"], "bearish_triggers": ["GlobalLiquidityScore < 40", "MacroTransitionRisk > 40", "HY/IG spreads widen", "Breadth deteriorates"]},
+        "QQQ": {"bullish_triggers": ["GlobalLiquidityDirection > 0", "10Y real yield falls", "US2Y falls", "QQQ Alpha > 60"], "bearish_triggers": ["Liquidity deteriorates further", "10Y real yield rises", "DXY strengthens", "QQQ Alpha < 40"]},
+        "GLD": {"bullish_triggers": ["Gold Alpha >= 70", "ETF Flow Score >= 70", "Real yield falling", "Structural Macro improving"], "bearish_triggers": ["Gold Alpha < 50", "ETF Flow < 40", "Structural Macro < 40", "Forward Macro Risk high and flows weaken"]},
+        "BTC-USD": {"bullish_triggers": ["Halving setup aligns with improving liquidity", "BTC Alpha > 60", "BTC ETF flows improve", "OI/funding/basis remain non-extreme"], "bearish_triggers": ["Global liquidity deteriorates", "BTC Alpha < 40", "ETF flows weaken", "OI/funding leverage rises without price confirmation"]},
     }
 
 
@@ -527,6 +667,7 @@ def _render_cio_top_cards(result: CioRunResult) -> None:
     snapshot = result.snapshot
     cards = [
         ("Overall System State", state.get("label", "n/a"), result.status),
+        ("Analysis Source", display_analysis_source(result.analysis_source), f"Analyst {result.analyst_status} / Critic {result.critic_status}"),
         ("Market Regime", snapshot.get("market_regime", {}).get("final_state", "n/a"), snapshot.get("market_regime", {}).get("structural_regime", "n/a")),
         ("Global Liquidity", snapshot.get("global_liquidity", {}).get("global_liquidity_backdrop", "n/a"), snapshot.get("global_liquidity", {}).get("global_liquidity_direction", "n/a")),
         ("Gold Regime", snapshot.get("gold_regime", {}).get("final_state", "n/a"), f"Alpha {snapshot.get('gold_regime', {}).get('gold_alpha', 'n/a')}"),
@@ -569,13 +710,13 @@ def _render_asset_outlook(outlook: dict[str, Any]) -> None:
             _metric_card("Bias", item.get("bias_3m", "n/a"), f"Confidence {item.get('confidence', 'n/a')}")
             st.caption(str(item.get("expected_environment", "")))
             st.markdown("**Top Supports**")
-            st.markdown(items_markdown(item.get("supporting_factors", [])))
+            st.markdown(items_markdown(item.get("top_supports", item.get("supporting_factors", []))))
             st.markdown("**Top Risks**")
-            st.markdown(items_markdown(item.get("risk_factors", [])))
+            st.markdown(items_markdown(item.get("top_risks", item.get("risk_factors", []))))
             st.markdown("**More Bullish If**")
-            st.markdown(items_markdown(item.get("what_would_make_more_bullish", [])))
+            st.markdown(items_markdown(item.get("more_bullish_if", item.get("what_would_make_more_bullish", []))))
             st.markdown("**More Bearish If**")
-            st.markdown(items_markdown(item.get("what_would_make_more_bearish", [])))
+            st.markdown(items_markdown(item.get("more_bearish_if", item.get("what_would_make_more_bearish", []))))
 
 
 def _render_scenarios(scenarios: dict[str, Any]) -> None:
@@ -600,9 +741,10 @@ def _render_key_risks(risks: list[Any]) -> None:
                 {
                     "Rank": risk.get("rank", idx),
                     "Risk": risk.get("title", "n/a"),
+                    "Status": risk.get("status", "n/a"),
                     "Description": risk.get("description", ""),
                     "Assets": ", ".join(map(str, risk.get("affected_assets", []))),
-                    "Trigger": risk.get("trigger_to_watch", ""),
+                    "Escalation Trigger": risk.get("trigger_to_escalate", risk.get("trigger_to_watch", "")),
                 }
             )
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -629,21 +771,44 @@ def _render_diagnostics(result: CioRunResult) -> None:
     st.json(
         {
             "status": result.status,
+            "openai_api": result.usage.get("openai_api"),
+            "analysis_source": result.analysis_source,
+            "analyst_status": result.analyst_status,
+            "critic_status": result.critic_status,
             "generated_at": result.generated_at,
             "next_scheduled_at": result.next_scheduled_at,
-            "usage": result.usage,
+            "http_api_error_message": result.usage.get("analyst_error") or result.usage.get("critic_error"),
+            "input_tokens": result.usage.get("token_usage", {}).get("input_tokens"),
+            "cached_input_tokens": result.usage.get("token_usage", {}).get("cached_input_tokens"),
+            "output_tokens": result.usage.get("token_usage", {}).get("output_tokens"),
+            "estimated_cost": result.usage.get("estimated_cost"),
+            "latency_seconds": result.usage.get("latency_seconds"),
             "monthly_cost_warning_usd": CIO_MONTHLY_COST_WARNING_USD,
         },
         expanded=False,
     )
-    with st.expander("A. Snapshot JSON sent to GPT", expanded=True):
+    if result.analysis_source == "DETERMINISTIC_FALLBACK":
+        st.warning("CIO View currently uses deterministic fallback. GPT synthesis was unavailable or has not been generated yet.")
+    with st.expander("A. Snapshot Validation Result", expanded=True):
+        st.json(result.snapshot.get("snapshot_validation_errors", []))
+    with st.expander("B. Snapshot JSON sent to GPT", expanded=True):
         st.json(result.snapshot)
-    with st.expander("B. Analyst result", expanded=True):
+    with st.expander("C. Analyst status/result", expanded=True):
+        st.caption(result.analyst_status)
         st.json(result.analyst_result)
-    with st.expander("C. Critic result", expanded=True):
+    with st.expander("D. Critic status/result", expanded=True):
+        st.caption(result.critic_status)
         st.json(result.critic_result or {})
-    with st.expander("D. Final result", expanded=True):
+    with st.expander("E. Final result", expanded=True):
         st.json(result.final_result)
+    with st.expander("F-I. Source, Token Usage, Estimated Cost, Validation Warnings", expanded=True):
+        st.json(
+            {
+                "analysis_source": result.analysis_source,
+                "usage": result.usage,
+                "validation_warnings": result.snapshot.get("snapshot_validation_errors", []),
+            }
+        )
 
 
 def _metric_card(label: Any, value: Any, detail: Any = "") -> None:
@@ -852,6 +1017,403 @@ def state_from_risk(value: Any) -> str:
     return "POSITIVE"
 
 
+SCORE_PATHS = {
+    "Alpha": [
+        ("gold_regime", "gold_alpha"),
+        ("btc_regime", "alpha"),
+        ("asset_market_data", "SPY", "alpha_score"),
+        ("asset_market_data", "QQQ", "alpha_score"),
+        ("asset_market_data", "GLD", "alpha_score"),
+        ("asset_market_data", "BTC-USD", "alpha_score"),
+    ],
+    "StructuralMacro": [("gold_regime", "structural_macro"), ("btc_regime", "structural_macro")],
+    "ForwardMacroRisk": [("gold_regime", "forward_macro_risk"), ("btc_regime", "forward_macro_risk")],
+    "TacticalFlow": [("gold_regime", "tactical_flow")],
+    "FastTransitionRisk": [("market_regime", "fast_transition_risk")],
+    "MacroTransitionRisk": [("market_regime", "macro_transition_risk")],
+    "GlobalLiquidityScore": [("global_liquidity", "global_liquidity_score"), ("btc_regime", "global_liquidity_score")],
+    "M2Impulse": [("global_liquidity", "m2_impulse")],
+    "CBImpulse": [("global_liquidity", "cb_impulse")],
+    "USNLImpulse": [("global_liquidity", "us_net_liquidity_impulse")],
+}
+
+
+def validate_cio_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    for field, paths in SCORE_PATHS.items():
+        for path in paths:
+            value = get_path(snapshot, path)
+            if value is None:
+                continue
+            number = to_float(value)
+            if not np.isfinite(number) or number < 0 or number > 100:
+                errors.append({"field": field, "path": ".".join(path), "value": clean_value(value), "issue": "INVALID_SCORE_RANGE_0_100"})
+                set_path(snapshot, path, None)
+    for ticker in ASSET_TICKERS:
+        asset = snapshot.get("asset_market_data", {}).get(ticker, {})
+        if asset.get("current_price") is None:
+            errors.append({"field": "AssetMarketData", "path": f"asset_market_data.{ticker}.current_price", "value": None, "issue": "MISSING_CURRENT_PRICE"})
+    return errors
+
+
+def get_path(data: dict[str, Any], path: tuple[str, ...]) -> Any:
+    current: Any = data
+    for part in path:
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def set_path(data: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+    current: Any = data
+    for part in path[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return
+        current = current[part]
+    if isinstance(current, dict):
+        current[path[-1]] = value
+
+
+def normalize_cio_result(result: dict[str, Any], snapshot: dict[str, Any], analysis_source: str) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        result = deterministic_cio_view(snapshot, "INVALID_CIO_RESULT")
+        analysis_source = "DETERMINISTIC_FALLBACK"
+    result.setdefault("as_of_date", snapshot.get("as_of_date"))
+    result["analysis_source"] = analysis_source
+    result.setdefault("overall_system_state", deterministic_cio_view(snapshot, "MISSING_OVERALL_STATE")["overall_system_state"])
+    result.setdefault("dimensions", fallback_dimensions(snapshot))
+    result.setdefault("cross_regime_signals", fallback_cross_regime_signals(snapshot.get("market_regime", {}), snapshot.get("global_liquidity", {}), snapshot.get("gold_regime", {}), snapshot.get("btc_regime", {})))
+    result.setdefault("asset_outlook_3m", {ticker: fallback_asset_outlook(ticker, snapshot) for ticker in ASSET_TICKERS})
+    result.setdefault("scenarios", fallback_scenarios(snapshot))
+    result.setdefault("key_risks", fallback_key_risks(snapshot))
+    result.setdefault("what_would_change_view", fallback_change_view())
+    result.setdefault("critic_changes_summary", [])
+    result.setdefault("data_quality_notes", snapshot.get("data_quality", {}).get("notes", []))
+    for ticker in ASSET_TICKERS:
+        result["asset_outlook_3m"].setdefault(ticker, fallback_asset_outlook(ticker, snapshot))
+        result["asset_outlook_3m"][ticker] = normalize_asset_outlook(result["asset_outlook_3m"][ticker], ticker, snapshot, analysis_source)
+    return result
+
+
+def normalize_asset_outlook(item: dict[str, Any], ticker: str, snapshot: dict[str, Any], source: str) -> dict[str, Any]:
+    fallback = fallback_asset_outlook(ticker, snapshot)
+    if not isinstance(item, dict):
+        item = {}
+    out = {**fallback, **item}
+    out["ticker"] = ticker
+    out["top_supports"] = list_from_any(out.get("top_supports", out.get("supporting_factors", fallback["top_supports"])))[:4]
+    out["top_risks"] = list_from_any(out.get("top_risks", out.get("risk_factors", fallback["top_risks"])))[:4]
+    out["more_bullish_if"] = list_from_any(out.get("more_bullish_if", out.get("what_would_make_more_bullish", fallback["more_bullish_if"])))[:4]
+    out["more_bearish_if"] = list_from_any(out.get("more_bearish_if", out.get("what_would_make_more_bearish", fallback["more_bearish_if"])))[:4]
+    out["supporting_factors"] = out["top_supports"]
+    out["risk_factors"] = out["top_risks"]
+    out["what_would_make_more_bullish"] = out["more_bullish_if"]
+    out["what_would_make_more_bearish"] = out["more_bearish_if"]
+    confidence = to_float(out.get("confidence"))
+    if not np.isfinite(confidence):
+        confidence = fallback["confidence"]
+    if source == "DETERMINISTIC_FALLBACK":
+        confidence = min(confidence, 0.55)
+    if snapshot.get("data_quality", {}).get("status") == "PARTIAL_DATA":
+        confidence = min(confidence, 0.60)
+    out["confidence"] = round(float(np.clip(confidence, 0.50, 0.85)), 2)
+    return out
+
+
+def list_from_any(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    return [value]
+
+
+def summarize_token_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    for key in ("analyst_usage", "critic_usage"):
+        block = usage.get(key) or {}
+        totals["input_tokens"] += int(block.get("input_tokens") or block.get("prompt_tokens") or 0)
+        details = block.get("input_tokens_details") or block.get("prompt_tokens_details") or {}
+        totals["cached_input_tokens"] += int(details.get("cached_tokens") or 0)
+        totals["output_tokens"] += int(block.get("output_tokens") or block.get("completion_tokens") or 0)
+        totals["total_tokens"] += int(block.get("total_tokens") or 0)
+    if totals["total_tokens"] == 0:
+        totals["total_tokens"] = totals["input_tokens"] + totals["output_tokens"]
+    return totals
+
+
+def estimate_usage_cost(token_usage: dict[str, Any]) -> float | None:
+    if not token_usage or not token_usage.get("total_tokens"):
+        return None
+    # Conservative placeholder until model-specific billing table is configured.
+    return None
+
+
+def brief_error(exc: Exception) -> str:
+    text = str(exc).replace(os.environ.get("OPENAI_API_KEY", ""), "[redacted]")
+    return text[:600]
+
+
+def display_analysis_source(source: str) -> str:
+    return {
+        "LLM_ANALYST": "LLM",
+        "LLM_CRITIC_CORRECTED": "Critic Corrected",
+        "DETERMINISTIC_FALLBACK": "Fallback",
+    }.get(str(source), str(source))
+
+
+def is_score_like(value: Any) -> bool:
+    number = to_float(value)
+    return np.isfinite(number) and 0 <= number <= 100
+
+
+def first_valid(row: dict[str, Any], columns: list[str]) -> Any:
+    for column in columns:
+        value = row.get(column)
+        if value is not None and not (isinstance(value, float) and math.isnan(value)):
+            return value
+    return None
+
+
+def liquidity_direction_value(liquidity: dict[str, Any]) -> float:
+    raw = to_float(liquidity.get("global_liquidity_direction_13w"))
+    if np.isfinite(raw):
+        return raw
+    state = str(liquidity.get("global_liquidity_direction", "")).upper()
+    if "DETERIORATING_FAST" in state:
+        return -20.0
+    if "DETERIORATING" in state:
+        return -10.0
+    if "ACCELERATING" in state or "IMPROVING" in state:
+        return 10.0
+    return 0.0
+
+
+def state_from_liquidity_score(value: Any) -> str:
+    score = to_float(value)
+    if not np.isfinite(score):
+        return "UNKNOWN"
+    if score >= 65:
+        return "SUPPORTIVE"
+    if score >= 45:
+        return "NEUTRAL"
+    if score >= 35:
+        return "DETERIORATING"
+    return "NEGATIVE"
+
+
+def market_trend_state(market: dict[str, Any]) -> str:
+    final = str(market.get("final_state", "")).upper()
+    structural = str(market.get("structural_regime", "")).upper()
+    if "STRESS" in final:
+        return "STRESS"
+    if "CORRECTION" in final or "BEAR" in structural:
+        return "CORRECTION"
+    if "WARNING" in final and structural == "BULL":
+        return "BULL_WITH_WARNING"
+    if structural == "BULL":
+        return "BULL"
+    if "DETERIOR" in final:
+        return "DETERIORATING"
+    return "UNKNOWN"
+
+
+def systemic_stress_state(market: dict[str, Any]) -> str:
+    macro = to_float(market.get("macro_transition_risk"))
+    fast = to_float(market.get("fast_transition_risk"))
+    risk = np.nanmax([macro, fast])
+    if not np.isfinite(risk):
+        return "UNKNOWN"
+    if risk >= 80:
+        return "EXTREME"
+    if risk >= 60:
+        return "HIGH"
+    if risk >= 35:
+        return "ELEVATED"
+    return "LOW"
+
+
+def risk_appetite_state(market: dict[str, Any]) -> str:
+    fast = to_float(market.get("fast_transition_risk"))
+    if not np.isfinite(fast):
+        return "UNKNOWN"
+    if fast >= 45:
+        return "NEGATIVE"
+    if fast >= 25:
+        return "NEUTRAL"
+    return "POSITIVE"
+
+
+def macro_item(macro: dict[str, Any], name: str) -> dict[str, Any]:
+    for item in macro.get("items", []):
+        if item.get("instrument") == name:
+            return item
+    return {}
+
+
+def change_value(item: dict[str, Any], key: str = "3m") -> float:
+    value = item.get(key)
+    if isinstance(value, str):
+        value = value.replace("%", "").replace("bp", "").replace(",", "").strip()
+    return to_float(value)
+
+
+def growth_dimension_state(macro: dict[str, Any]) -> str:
+    pmi_m = to_float(macro_item(macro, "U.S. ISM Manufacturing PMI").get("current"))
+    pmi_s = to_float(macro_item(macro, "U.S. ISM Services PMI").get("current"))
+    claims_3m = change_value(macro_item(macro, "U.S. Initial Jobless Claims"))
+    values = [v for v in [pmi_m, pmi_s] if np.isfinite(v)]
+    if not values and not np.isfinite(claims_3m):
+        return "UNKNOWN"
+    avg = np.mean(values) if values else math.nan
+    if np.isfinite(avg) and avg < 48:
+        return "CONTRACTING"
+    if np.isfinite(claims_3m) and claims_3m > 5:
+        return "SLOWING"
+    if np.isfinite(avg) and avg > 52:
+        return "ACCELERATING"
+    return "STABLE"
+
+
+def inflation_dimension_state(macro: dict[str, Any]) -> str:
+    breakeven = change_value(macro_item(macro, "U.S. 10-Year Breakeven Inflation Rate"))
+    wti = change_value(macro_item(macro, "WTI Crude Oil"))
+    if not np.isfinite(breakeven) and not np.isfinite(wti):
+        return "UNKNOWN"
+    if np.nanmax([breakeven, wti]) > 3:
+        return "REACCELERATING"
+    if np.nanmin([breakeven, wti]) < -3:
+        return "FALLING"
+    return "STABLE"
+
+
+def rates_dimension_state(macro: dict[str, Any]) -> str:
+    us2y = change_value(macro_item(macro, "U.S. 2-Year Treasury Yield"))
+    real10 = change_value(macro_item(macro, "U.S. 10-Year Real Yield"))
+    if not np.isfinite(us2y) and not np.isfinite(real10):
+        return "UNKNOWN"
+    if np.nanmax([us2y, real10]) > 0.10:
+        return "TIGHTENING"
+    if np.nanmin([us2y, real10]) < -0.10:
+        return "EASING"
+    return "NEUTRAL"
+
+
+def financial_conditions_state(macro: dict[str, Any], market: dict[str, Any]) -> str:
+    fast = to_float(market.get("fast_transition_risk"))
+    vix = change_value(macro_item(macro, "CBOE Volatility Index"))
+    move = change_value(macro_item(macro, "ICE BofA MOVE Index"))
+    if np.isfinite(fast) and fast >= 60:
+        return "TIGHT"
+    if np.nanmax([vix, move]) > 10:
+        return "TIGHTENING"
+    if np.isfinite(fast) and fast < 25:
+        return "EASY"
+    return "NEUTRAL"
+
+
+def credit_dimension_state(macro: dict[str, Any]) -> str:
+    hy = change_value(macro_item(macro, "U.S. High Yield Option-Adjusted Spread"))
+    ig = change_value(macro_item(macro, "U.S. Investment Grade Option-Adjusted Spread"))
+    if not np.isfinite(hy) and not np.isfinite(ig):
+        return "UNKNOWN"
+    if np.nanmax([hy, ig]) > 0.10:
+        return "DETERIORATING"
+    if np.nanmax([hy, ig]) > 0.30:
+        return "STRESSED"
+    if np.nanmax([hy, ig]) <= 0:
+        return "BENIGN"
+    return "NORMAL"
+
+
+def asset_fallback_bias(ticker: str, snapshot: dict[str, Any], alpha: float) -> str:
+    liquidity = snapshot.get("global_liquidity", {})
+    market = snapshot.get("market_regime", {})
+    gold = snapshot.get("gold_regime", {})
+    btc = snapshot.get("btc_regime", {})
+    if ticker == "GLD":
+        if to_float(gold.get("gold_alpha")) >= 60 and to_float(gold.get("tactical_flow")) >= 60:
+            return "NEUTRAL_POSITIVE" if to_float(gold.get("structural_macro")) < 40 else "POSITIVE"
+        return "NEUTRAL_NEGATIVE" if to_float(gold.get("gold_alpha")) < 50 else "NEUTRAL"
+    if ticker == "BTC-USD":
+        if to_float(btc.get("alpha")) >= 60 and str(btc.get("etf_flow_state")) == "POSITIVE" and liquidity_direction_value(liquidity) >= 0:
+            return "POSITIVE"
+        if "DETERIORATING" in str(btc.get("global_liquidity_direction")):
+            return "NEUTRAL_NEGATIVE"
+        return "NEUTRAL"
+    if ticker == "QQQ":
+        if liquidity_direction_value(liquidity) < -10 or to_float(market.get("macro_transition_risk")) > 40:
+            return "NEUTRAL_NEGATIVE"
+    if str(market.get("structural_regime", "")).upper() == "BULL" and np.isfinite(alpha) and alpha >= 50:
+        return "NEUTRAL_POSITIVE"
+    return "NEUTRAL"
+
+
+def asset_specific_lists(ticker: str, snapshot: dict[str, Any]) -> tuple[list[str], list[str], list[str], list[str]]:
+    market = snapshot.get("market_regime", {})
+    liquidity = snapshot.get("global_liquidity", {})
+    gold = snapshot.get("gold_regime", {})
+    btc = snapshot.get("btc_regime", {})
+    if ticker == "SPY":
+        return (
+            [f"Structural regime {market.get('structural_regime', 'UNKNOWN')}", f"Macro risk {market.get('macro_transition_risk', 'n/a')}", f"Systemic stress {systemic_stress_state(market)}"],
+            [f"Liquidity direction {liquidity.get('global_liquidity_direction', 'UNKNOWN')}", f"Fast risk {market.get('fast_transition_risk', 'n/a')}", "Credit spread widening would change the risk profile"],
+            ["GlobalLiquidityDirection > 0", "MacroTransitionRisk < 20", "DXY and US2Y weaken", "Breadth confirmations improve"],
+            ["GlobalLiquidityScore < 40", "MacroTransitionRisk > 40", "HY/IG spreads widen", "FastRisk > 40"],
+        )
+    if ticker == "QQQ":
+        return (
+            [f"Structural equity backdrop {market.get('structural_regime', 'UNKNOWN')}", "Duration/growth beta benefits if yields ease", "Alpha/trend confirmation from table"],
+            [f"Liquidity direction {liquidity.get('global_liquidity_direction', 'UNKNOWN')}", "10Y real yield or US2Y rising pressures duration", "DXY strength tightens financial conditions"],
+            ["GlobalLiquidityDirection > 0", "10Y real yield falls", "US2Y falls", "DXY weakens"],
+            ["Liquidity deteriorates further", "Real yield rises", "US2Y rises", "QQQ Alpha < 40"],
+        )
+    if ticker == "GLD":
+        return (
+            [f"Gold Alpha {gold.get('gold_alpha', 'n/a')}", f"Tactical Flow {gold.get('tactical_flow', 'n/a')}", f"ETF Flow Score {gold.get('etf_flow_score', 'n/a')}"],
+            [f"Structural Macro {gold.get('structural_macro', 'n/a')}", f"Forward Macro Risk {gold.get('forward_macro_risk', 'n/a')}", "Flow support can fade if ETF/COT weaken"],
+            ["Gold Alpha >= 70", "ETF Flow Score >= 70", "Real yield falling", "Forward Macro Risk < 60"],
+            ["Gold Alpha < 50", "ETF Flow < 40", "Structural Macro < 40", "Forward Macro Risk remains high and flows weaken"],
+        )
+    return (
+        [f"Halving phase {btc.get('halving_phase', 'UNKNOWN')}", f"BTC Alpha {btc.get('alpha', 'n/a')}", f"ETF flow state {btc.get('etf_flow_state', 'n/a')}", f"Funding 28D {btc.get('funding_28d', 'n/a')}"],
+        [f"Liquidity direction {btc.get('global_liquidity_direction', 'UNKNOWN')}", f"Forward Macro Risk {btc.get('forward_macro_risk', 'n/a')}", "OI/funding leverage can rise without price confirmation"],
+        ["Halving setup and liquidity improve together", "BTC Alpha > 60", "ETF flows improving", "OI stable after deleveraging"],
+        ["Global liquidity deteriorates", "BTC Alpha < 40", "ETF flows weaken", "OI/funding leverage rises without price confirmation"],
+    )
+
+
+def asset_environment_text(ticker: str, market: dict[str, Any], liquidity: dict[str, Any], gold: dict[str, Any], btc: dict[str, Any]) -> str:
+    if ticker == "GLD":
+        return f"Gold-specific drivers: alpha {gold.get('gold_alpha', 'n/a')}, structural macro {gold.get('structural_macro', 'n/a')}, forward risk {gold.get('forward_macro_risk', 'n/a')}, tactical flow {gold.get('tactical_flow', 'n/a')}."
+    if ticker == "BTC-USD":
+        return f"BTC cycle/liquidity setup: {btc.get('halving_phase', 'UNKNOWN')} with liquidity direction {btc.get('global_liquidity_direction', 'UNKNOWN')} and ETF state {btc.get('etf_flow_state', 'n/a')}."
+    if ticker == "QQQ":
+        return f"Growth-duration setup with higher sensitivity to liquidity {liquidity.get('global_liquidity_direction', 'UNKNOWN')}, rates and DXY than SPY."
+    return f"Equity broad-market setup: {market.get('structural_regime', 'UNKNOWN')} / {market.get('final_state', 'UNKNOWN')} with liquidity direction {liquidity.get('global_liquidity_direction', 'UNKNOWN')}."
+
+
+def dynamic_bull_conditions(snapshot: dict[str, Any]) -> list[str]:
+    conditions = ["Credit remains benign"]
+    if liquidity_direction_value(snapshot.get("global_liquidity", {})) <= 0:
+        conditions.append("GlobalLiquidityDirection turns positive")
+    if to_float(snapshot.get("global_liquidity", {}).get("global_liquidity_score")) < 60:
+        conditions.append("GlobalLiquidityScore > 60")
+    conditions.extend(["US2Y / real yields decline", "DXY weakens"])
+    return conditions[:5]
+
+
+def dynamic_bear_conditions(snapshot: dict[str, Any]) -> list[str]:
+    return ["GlobalLiquidityScore < 40", "Liquidity direction remains DETERIORATING_FAST", "MacroTransitionRisk > 40", "HY/IG OAS widens", "DXY / real yields rise"]
+
+
+def fallback_confidence(snapshot: dict[str, Any]) -> float:
+    if snapshot.get("data_quality", {}).get("status") == "PARTIAL_DATA":
+        return 0.52
+    return 0.55
+
+
 def read_cio_cache() -> dict[str, Any] | None:
     if not CIO_STORAGE_PATH.exists():
         return None
@@ -872,6 +1434,9 @@ def write_cio_cache(result: CioRunResult) -> None:
                 "final_result": result.final_result,
                 "usage": result.usage,
                 "status": result.status,
+                "analysis_source": result.analysis_source,
+                "analyst_status": result.analyst_status,
+                "critic_status": result.critic_status,
                 "generated_at": result.generated_at,
                 "next_scheduled_at": result.next_scheduled_at,
             },
@@ -890,6 +1455,9 @@ def cio_result_from_cache(cache: dict[str, Any], status: str) -> CioRunResult:
         final_result=cache.get("final_result", {}),
         usage=cache.get("usage", {}),
         status=status,
+        analysis_source=str(cache.get("analysis_source") or cache.get("final_result", {}).get("analysis_source") or "DETERMINISTIC_FALLBACK"),
+        analyst_status=str(cache.get("analyst_status") or cache.get("usage", {}).get("analyst_status") or "SKIPPED"),
+        critic_status=str(cache.get("critic_status") or cache.get("usage", {}).get("critic_status") or "SKIPPED"),
         generated_at=str(cache.get("generated_at", "")),
         next_scheduled_at=str(cache.get("next_scheduled_at", "")),
     )
