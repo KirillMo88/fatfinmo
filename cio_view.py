@@ -166,28 +166,7 @@ def load_or_build_cio_view(table_df: pd.DataFrame, market_snapshot: dict[str, An
         return cio_result_from_cache(cached, "CACHED")
     if cached:
         return cio_result_from_cache(cached, "STALE")
-    snapshot = build_cio_snapshot(table_df, market_snapshot, fred_api_key)
-    final = deterministic_cio_view(snapshot, "CIO_VIEW_UNAVAILABLE")
-    return CioRunResult(
-        snapshot=snapshot,
-        analyst_result=final,
-        critic_result=None,
-        final_result=final,
-        usage={
-            "model": CIO_MODEL,
-            "reasoning_effort": CIO_REASONING_EFFORT,
-            "openai_api": "SKIPPED",
-            "analyst": "SKIPPED",
-            "critic": "SKIPPED",
-            "status": "NO_PREVIOUS_ANALYSIS",
-        },
-        status="CIO_VIEW_UNAVAILABLE",
-        analysis_source="DETERMINISTIC_FALLBACK",
-        analyst_status="SKIPPED",
-        critic_status="SKIPPED",
-        generated_at=snapshot["as_of_date"],
-        next_scheduled_at=next_weekly_timestamp(snapshot["as_of_date"]),
-    )
+    return generate_cio_view(table_df, market_snapshot, fred_api_key, force=True)
 
 
 def generate_cio_view(
