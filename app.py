@@ -48,6 +48,7 @@ from table_export import dataframe_to_excel_xls_bytes
 from ai_dashboard import AI_GROUP_LABELS, AI_UNIVERSE, canonical_ai_group_label, is_ai_group_label
 from ai_dashboard_tab import render_ai_dashboard_tab
 from cio_view import render_cio_view_tab
+from cftc_cot_tab import render_cftc_cot_tab
 from global_macro_tab import render_global_macro_tab
 from gold_regime_tab import render_gold_regime_tab
 from global_liquidity import (
@@ -6117,6 +6118,7 @@ def main():
         cio_view_tab,
         market_regime_tab,
         global_macro_tab,
+        cftc_cot_tab,
         global_liquidity_tab,
         gold_regime_tab,
         btc_regime_tab,
@@ -6134,6 +6136,7 @@ def main():
             "CIO View",
             "Market Regime",
             "Global Macro",
+            "CFTC COT",
             "Global Liquidity Regime",
             "Gold Regime",
             "BTC Regime",
@@ -6362,6 +6365,8 @@ def main():
         render_market_regime_tab(market_snapshot)
     with global_macro_tab:
         render_global_macro_tab(get_fred_api_key_for_app())
+    with cftc_cot_tab:
+        render_cftc_cot_tab()
     with global_liquidity_tab:
         render_global_liquidity_dashboard_tab()
     with gold_regime_tab:

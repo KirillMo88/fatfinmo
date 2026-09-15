@@ -24,6 +24,7 @@ services:
       - ./persistent/bybit_derivatives:/app/persistent/bybit_derivatives
       - ./persistent/cio_view:/app/persistent/cio_view
       - ./persistent/global_liquidity:/app/persistent/global_liquidity
+      - ./persistent/positioning:/app/persistent/positioning
       - ./persistent/tradingview_mcp:/app/persistent/tradingview_mcp
 
   tester:
