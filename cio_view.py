@@ -128,6 +128,10 @@ class CioRunResult:
     critic_status: str
     generated_at: str
     next_scheduled_at: str
+    analyst_raw: dict[str, Any] | None = None
+    analyst_normalized: dict[str, Any] | None = None
+    critic_raw: dict[str, Any] | None = None
+    critic_normalized: dict[str, Any] | None = None
 
 
 def render_cio_view_tab(table_df: pd.DataFrame, market_snapshot: dict[str, Any], fred_api_key: str | None = None) -> None:
@@ -150,7 +154,7 @@ def render_cio_view_tab(table_df: pd.DataFrame, market_snapshot: dict[str, Any],
         result = load_or_build_cio_view(table_df, market_snapshot, fred_api_key)
 
     _render_cio_top_cards(result)
-    final = result.final_result
+    final = safe_dict(result.final_result)
     _render_dimensions(final.get("dimensions", {}))
     _render_cross_regime(final.get("cross_regime_signals", []))
     _render_asset_outlook(final.get("asset_outlook_3m", {}))
@@ -189,45 +193,55 @@ def generate_cio_view(
         "critic": "SKIPPED" if not CIO_CRITIC_ENABLED else "FAILED",
         "estimated_cost": None,
     }
+    analyst_raw: dict[str, Any] | None = None
     analyst: dict[str, Any]
+    critic_raw: dict[str, Any] | None = None
     critic: dict[str, Any] | None = None
     analysis_source = "DETERMINISTIC_FALLBACK"
     analyst_status = "FAILED"
     critic_status = "SKIPPED" if not CIO_CRITIC_ENABLED else "FAILED"
     try:
-        analyst = call_cio_llm(snapshot, CIO_REASONING_EFFORT)
-        usage["analyst_usage"] = analyst.pop("_response_usage", None)
+        analyst_raw = call_cio_llm(snapshot, CIO_REASONING_EFFORT)
+        usage["analyst_usage"] = analyst_raw.pop("_response_usage", None)
+        analyst = normalize_cio_result(analyst_raw, snapshot, "LLM_ANALYST")
         usage["openai_api"] = "CONNECTED"
         usage["analyst"] = "SUCCESS"
+        usage["analyst_schema_valid"] = "YES" if not analyst.get("_validation_errors") else "NO"
         analyst_status = "SUCCESS"
         analysis_source = "LLM_ANALYST"
         status = "CURRENT"
     except Exception as exc:
-        analyst = deterministic_cio_view(snapshot, "LLM_UNAVAILABLE")
+        analyst_raw = None
+        analyst = normalize_cio_result(deterministic_cio_view(snapshot, "LLM_UNAVAILABLE"), snapshot, "DETERMINISTIC_FALLBACK")
         critic = None
         final = analyst
         usage["analyst_error"] = brief_error(exc)
+        usage["analyst_schema_valid"] = "NO"
         status = "LLM_UNAVAILABLE"
     else:
         if CIO_CRITIC_ENABLED:
             try:
-                critic = call_cio_critic(snapshot, analyst)
-                usage["critic_usage"] = critic.pop("_response_usage", None)
+                critic_raw = call_cio_critic(snapshot, analyst)
+                usage["critic_usage"] = critic_raw.pop("_response_usage", None)
+                critic = normalize_cio_result(critic_raw, snapshot, "LLM_CRITIC_CORRECTED")
                 usage["critic"] = "SUCCESS"
+                usage["critic_schema_valid"] = "YES" if not critic.get("_validation_errors") else "NO"
                 critic_status = "SUCCESS"
                 analysis_source = "LLM_CRITIC_CORRECTED"
             except Exception as exc:
                 usage["critic"] = "FAILED"
                 usage["critic_error"] = brief_error(exc)
+                usage["critic_schema_valid"] = "NO"
                 critic_status = "FAILED"
         final = critic or analyst
     final = normalize_cio_result(final, snapshot, analysis_source)
-    analyst = normalize_cio_result(analyst, snapshot, "LLM_ANALYST" if analyst_status == "SUCCESS" else "DETERMINISTIC_FALLBACK")
-    if critic:
-        critic = normalize_cio_result(critic, snapshot, "LLM_CRITIC_CORRECTED")
     usage["analysis_source"] = analysis_source
     usage["analyst_status"] = analyst_status
     usage["critic_status"] = critic_status
+    usage["normalization_applied"] = "YES"
+    usage["validation_errors_count"] = len(final.get("_validation_errors", []))
+    usage["section_sources"] = final.get("section_sources", {})
+    usage["sections_using_fallback"] = [name for name, source in final.get("section_sources", {}).items() if source == "FALLBACK"]
     usage["token_usage"] = summarize_token_usage(usage)
     usage["estimated_cost"] = estimate_usage_cost(usage["token_usage"])
     usage["latency_seconds"] = round(time.time() - started, 2)
@@ -244,6 +258,10 @@ def generate_cio_view(
         critic_status=critic_status,
         generated_at=generated_at,
         next_scheduled_at=next_weekly_timestamp(generated_at),
+        analyst_raw=analyst_raw,
+        analyst_normalized=analyst,
+        critic_raw=critic_raw,
+        critic_normalized=critic,
     )
     write_cio_cache(result)
     return result
@@ -467,6 +485,8 @@ def call_cio_critic(snapshot: dict[str, Any], analyst: dict[str, Any]) -> dict[s
         "driver mismatches for SPY/QQQ/GLD/BTC, overuse of short-term Fast Risk, misuse of Global Liquidity for Gold, "
         "halving treated as deterministic BTC forecast, active risks incorrectly shown as future triggers, "
         "SPY/QQQ not differentiated enough, invalid/null values treated as valid, and confidence values that are too high. "
+        "Return the corrected result using EXACTLY the same JSON schema and key names as the Analyst input. "
+        "Do not rename fields. Do not change object/list/string types. Do not add alternate root structures. "
         "Return corrected final JSON only, with critic_changes_summary explaining material corrections.\n\n"
         f"Snapshot:\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}\n\n"
         f"Analyst JSON:\n{json.dumps(analyst, ensure_ascii=False, indent=2)}"
@@ -642,19 +662,23 @@ def fallback_change_view() -> dict[str, dict[str, list[str]]]:
 
 
 def _render_cio_top_cards(result: CioRunResult) -> None:
-    final = result.final_result
-    state = final.get("overall_system_state", {})
-    snapshot = result.snapshot
+    final = safe_dict(result.final_result)
+    state = safe_dict(final.get("overall_system_state"))
+    snapshot = safe_dict(result.snapshot)
+    gold = safe_dict(snapshot.get("gold_regime"))
+    btc = safe_dict(snapshot.get("btc_regime"))
+    quality = safe_dict(snapshot.get("data_quality"))
     cards = [
-        ("Overall System State", state.get("label", "n/a"), result.status),
+        ("Overall System State", state.get("label") or "n/a", result.status),
         ("Analysis Source", display_analysis_source(result.analysis_source), f"Analyst {result.analyst_status} / Critic {result.critic_status}"),
-        ("Market Regime", snapshot.get("market_regime", {}).get("final_state", "n/a"), snapshot.get("market_regime", {}).get("structural_regime", "n/a")),
-        ("Global Liquidity", snapshot.get("global_liquidity", {}).get("global_liquidity_backdrop", "n/a"), snapshot.get("global_liquidity", {}).get("global_liquidity_direction", "n/a")),
-        ("Gold Regime", snapshot.get("gold_regime", {}).get("final_state", "n/a"), f"Alpha {snapshot.get('gold_regime', {}).get('gold_alpha', 'n/a')}"),
-        ("BTC Regime", snapshot.get("btc_regime", {}).get("final_state", "n/a"), snapshot.get("btc_regime", {}).get("halving_phase", "n/a")),
+        ("Market Regime", safe_dict(snapshot.get("market_regime")).get("final_state", "n/a"), safe_dict(snapshot.get("market_regime")).get("structural_regime", "n/a")),
+        ("Global Liquidity", safe_dict(snapshot.get("global_liquidity")).get("global_liquidity_backdrop", "n/a"), safe_dict(snapshot.get("global_liquidity")).get("global_liquidity_direction", "n/a")),
+        ("Gold Regime", gold.get("final_state", "n/a"), f"Alpha {display_value(gold.get('gold_alpha', 'n/a'))}"),
+        ("BTC Tactical / Regime State", btc.get("final_state", "n/a"), ""),
+        ("BTC Halving Cycle Phase", btc.get("halving_phase", "n/a"), ""),
         ("Last Analysis", result.generated_at[:19], result.status),
         ("Next Scheduled", result.next_scheduled_at[:19], "weekly"),
-        ("Data Quality", snapshot.get("data_quality", {}).get("status", "n/a"), f"{len(snapshot.get('data_quality', {}).get('notes', []))} notes"),
+        ("Data Quality", quality.get("status", "n/a"), "; ".join(data_quality_reasons(snapshot)[:2]) or f"{len(safe_list(quality.get('notes')))} notes"),
     ]
     for start in range(0, len(cards), 4):
         cols = st.columns(4)
@@ -665,29 +689,36 @@ def _render_cio_top_cards(result: CioRunResult) -> None:
 
 def _render_dimensions(dimensions: dict[str, Any]) -> None:
     st.markdown("### Financial System State")
-    rows = [{"Dimension": key.replace("_", " ").title(), "State": value.get("state"), "Explanation": value.get("explanation")} for key, value in dimensions.items() if isinstance(value, dict)]
+    rows = []
+    for key, value in safe_dict(dimensions).items():
+        item = safe_dict(value)
+        state = item.get("state") or item.get("level") or "UNKNOWN"
+        if key == "liquidity":
+            state = f"{item.get('state', 'UNKNOWN')} | Level {item.get('level', 'UNKNOWN')} | Direction {item.get('direction', 'UNKNOWN')}"
+        rows.append({"Dimension": key.replace("_", " ").title(), "State": display_value(state), "Explanation": safe_str(item.get("explanation") or "")})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def _render_cross_regime(signals: list[Any]) -> None:
     st.markdown("### Key Cross-Asset Signals")
-    cols = st.columns(min(5, max(1, len(signals))))
-    for col, item in zip(cols, signals[:5]):
+    items = safe_list(signals)
+    cols = st.columns(min(5, max(1, len(items))))
+    for col, item in zip(cols, items[:5]):
         with col:
-            if isinstance(item, dict):
-                _metric_card(item.get("title", "Signal"), item.get("label", item.get("state", "")), item.get("description", ""))
-            else:
-                _metric_card(str(item), "", "")
+            data = safe_dict(item)
+            signal = data.get("signal") or data.get("name") or data.get("title") or data.get("label") or "UNNAMED_SIGNAL"
+            assets = ", ".join(normalize_assets(data.get("affected_assets", data.get("assets", []))))
+            _metric_card(signal, assets, data.get("description", safe_str(item) if not data else ""))
 
 
 def _render_asset_outlook(outlook: dict[str, Any]) -> None:
     st.markdown("### 3M Asset Outlook")
     cols = st.columns(4)
     for col, ticker in zip(cols, ASSET_TICKERS):
-        item = outlook.get(ticker, {}) if isinstance(outlook, dict) else {}
+        item = safe_dict(safe_dict(outlook).get(ticker))
         with col:
             st.markdown(f"#### {ticker} - 3M Outlook")
-            _metric_card("Bias", item.get("bias_3m", "n/a"), f"Confidence {item.get('confidence', 'n/a')}")
+            _metric_card("Bias", item.get("bias", item.get("bias_3m", "n/a")), f"Confidence {display_value(item.get('confidence', 'n/a'))}")
             st.caption(str(item.get("expected_environment", "")))
             st.markdown("**Top Supports**")
             st.markdown(items_markdown(item.get("top_supports", item.get("supporting_factors", []))))
@@ -703,30 +734,31 @@ def _render_scenarios(scenarios: dict[str, Any]) -> None:
     st.markdown("### 3M Scenario Analysis")
     cols = st.columns(3)
     for col, key, title in zip(cols, ["base", "bull", "bear"], ["Base Case", "Bull Case", "Bear Case"]):
-        scenario = scenarios.get(key, {}) if isinstance(scenarios, dict) else {}
+        scenario = safe_dict(safe_dict(scenarios).get(key))
         with col:
             st.markdown(f"#### {title}")
-            st.markdown(items_markdown(scenario.get("scenario_conditions", [])))
-            st.caption(str(scenario.get("system_implication", "")))
-            rows = [{"Asset": asset, "Impact": scenario.get(asset, scenario.get(asset.replace("-USD", ""), "n/a"))} for asset in ASSET_TICKERS]
+            st.markdown(items_markdown(scenario.get("conditions", scenario.get("scenario_conditions", []))))
+            st.caption(safe_str(scenario.get("summary", scenario.get("system_implication", ""))))
+            impacts = safe_dict(scenario.get("asset_impacts"))
+            rows = [{"Asset": asset, "Impact": display_value(impacts.get(asset, scenario.get(asset, scenario.get(asset.replace("-USD", ""), "n/a"))))} for asset in ASSET_TICKERS]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def _render_key_risks(risks: list[Any]) -> None:
     st.markdown("### Key Risks")
     rows = []
-    for idx, risk in enumerate(risks[:5], start=1):
-        if isinstance(risk, dict):
-            rows.append(
-                {
-                    "Rank": risk.get("rank", idx),
-                    "Risk": risk.get("title", "n/a"),
-                    "Status": risk.get("status", "n/a"),
-                    "Description": risk.get("description", ""),
-                    "Assets": ", ".join(map(str, risk.get("affected_assets", []))),
-                    "Escalation Trigger": risk.get("trigger_to_escalate", risk.get("trigger_to_watch", "")),
-                }
-            )
+    for idx, risk in enumerate(safe_list(risks)[:5], start=1):
+        item = safe_dict(risk)
+        rows.append(
+            {
+                "Rank": display_value(item.get("rank", idx)),
+                "Risk": item.get("risk") or item.get("title") or item.get("name") or "UNNAMED_RISK",
+                "Status": item.get("status", "n/a"),
+                "Description": safe_str(item.get("description", "")),
+                "Assets": ", ".join(normalize_assets(item.get("affected_assets", item.get("assets", [])))),
+                "Escalation Trigger": item.get("escalation_trigger") or item.get("trigger_to_escalate") or item.get("trigger_to_watch") or "",
+            }
+        )
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
@@ -734,7 +766,8 @@ def _render_change_view(change_view: dict[str, Any]) -> None:
     st.markdown("### What Would Change Our View?")
     tabs = st.tabs(ASSET_TICKERS)
     for tab, ticker in zip(tabs, ASSET_TICKERS):
-        item = change_view.get(ticker, {}) if isinstance(change_view, dict) else {}
+        raw_item = safe_dict(change_view).get(ticker, {})
+        item = safe_dict(raw_item)
         with tab:
             left, right = st.columns(2)
             with left:
@@ -743,6 +776,8 @@ def _render_change_view(change_view: dict[str, Any]) -> None:
             with right:
                 st.markdown("**Bearish Triggers**")
                 st.markdown(items_markdown(item.get("bearish_triggers", [])))
+            if isinstance(raw_item, str):
+                st.caption(raw_item)
 
 
 def _render_diagnostics(result: CioRunResult) -> None:
@@ -775,10 +810,10 @@ def _render_diagnostics(result: CioRunResult) -> None:
         st.json(result.snapshot)
     with st.expander("C. Analyst status/result", expanded=True):
         st.caption(result.analyst_status)
-        st.json(result.analyst_result)
+        st.json({"raw": result.analyst_raw or result.analyst_result, "normalized": result.analyst_normalized or result.analyst_result})
     with st.expander("D. Critic status/result", expanded=True):
         st.caption(result.critic_status)
-        st.json(result.critic_result or {})
+        st.json({"raw": result.critic_raw or result.critic_result or {}, "normalized": result.critic_normalized or result.critic_result or {}})
     with st.expander("E. Final result", expanded=True):
         st.json(result.final_result)
     with st.expander("F-I. Source, Token Usage, Estimated Cost, Validation Warnings", expanded=True):
@@ -787,6 +822,8 @@ def _render_diagnostics(result: CioRunResult) -> None:
                 "analysis_source": result.analysis_source,
                 "usage": result.usage,
                 "validation_warnings": result.snapshot.get("snapshot_validation_errors", []),
+                "section_sources": result.usage.get("section_sources", safe_dict(result.final_result).get("section_sources", {})),
+                "sections_using_fallback": result.usage.get("sections_using_fallback", []),
             }
         )
 
@@ -796,8 +833,8 @@ def _metric_card(label: Any, value: Any, detail: Any = "") -> None:
         f"""
 <div style="padding:0.65rem 0; line-height:1.15;">
   <div style="font-size:0.72rem; color:#94a3b8; font-weight:700;">{escape(label)}</div>
-  <div style="font-size:1.0rem; color:#f8fafc; font-weight:800;">{escape(value)}</div>
-  <div style="font-size:0.72rem; color:#cbd5e1;">{escape(detail)}</div>
+  <div style="font-size:1.0rem; color:#f8fafc; font-weight:800;">{escape(display_value(value))}</div>
+  <div style="font-size:0.72rem; color:#cbd5e1;">{escape(display_value(detail))}</div>
 </div>
 """,
         unsafe_allow_html=True,
@@ -1055,25 +1092,200 @@ def set_path(data: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
         current[path[-1]] = value
 
 
+def normalize_cio_response(raw: Any, snapshot: dict[str, Any], analysis_source: str) -> dict[str, Any]:
+    raw_dict = safe_dict(raw)
+    fallback = deterministic_cio_view(snapshot, "SECTION_FALLBACK")
+    section_sources: dict[str, str] = {}
+    validation_errors: list[str] = []
+
+    overall = normalize_overall(raw_dict.get("overall_system_state", raw_dict), fallback["overall_system_state"])
+    if not overall.get("label"):
+        overall = dict(fallback["overall_system_state"])
+        overall["overall_system_state_source"] = "DERIVED_FALLBACK"
+        section_sources["overall_system_state"] = "FALLBACK"
+        validation_errors.append("overall_system_state.label missing")
+    else:
+        section_sources["overall_system_state"] = "LLM" if analysis_source != "DETERMINISTIC_FALLBACK" else "FALLBACK"
+
+    dimensions = normalize_dimensions(raw_dict.get("dimensions"), snapshot, fallback["dimensions"], section_sources, validation_errors)
+    cross_signals = normalize_cross_signals(raw_dict.get("cross_regime_signals"), fallback["cross_regime_signals"], section_sources, validation_errors, analysis_source)
+    outlook = normalize_asset_outlook_block(raw_dict.get("asset_outlook_3m"), snapshot, fallback["asset_outlook_3m"], section_sources, validation_errors, analysis_source)
+    scenarios = normalize_scenarios(raw_dict.get("scenarios"), fallback["scenarios"], section_sources, validation_errors, analysis_source)
+    risks = normalize_key_risks(raw_dict.get("key_risks"), fallback["key_risks"], section_sources, validation_errors, analysis_source)
+    change_view = normalize_change_view(raw_dict.get("what_would_change_view"), fallback["what_would_change_view"], section_sources, validation_errors, analysis_source)
+
+    data_notes = safe_list(raw_dict.get("data_quality_notes")) + safe_list(snapshot.get("data_quality", {}).get("notes"))
+    if snapshot.get("data_quality", {}).get("status") == "PARTIAL_DATA":
+        data_notes.extend(data_quality_reasons(snapshot))
+    if validation_errors:
+        data_notes.extend(validation_errors)
+
+    return {
+        "as_of_date": safe_str(raw_dict.get("as_of_date")) or snapshot.get("as_of_date"),
+        "analysis_source": analysis_source,
+        "overall_system_state": overall,
+        "dimensions": dimensions,
+        "cross_regime_signals": cross_signals,
+        "asset_outlook_3m": outlook,
+        "scenarios": scenarios,
+        "key_risks": risks,
+        "what_would_change_view": change_view,
+        "critic_changes_summary": safe_list(raw_dict.get("critic_changes_summary")),
+        "data_quality_notes": [safe_str(x) for x in data_notes if safe_str(x)],
+        "section_sources": section_sources,
+        "_validation_errors": validation_errors,
+    }
+
+
 def normalize_cio_result(result: dict[str, Any], snapshot: dict[str, Any], analysis_source: str) -> dict[str, Any]:
-    if not isinstance(result, dict):
-        result = deterministic_cio_view(snapshot, "INVALID_CIO_RESULT")
-        analysis_source = "DETERMINISTIC_FALLBACK"
-    result.setdefault("as_of_date", snapshot.get("as_of_date"))
-    result["analysis_source"] = analysis_source
-    result.setdefault("overall_system_state", deterministic_cio_view(snapshot, "MISSING_OVERALL_STATE")["overall_system_state"])
-    result.setdefault("dimensions", fallback_dimensions(snapshot))
-    result.setdefault("cross_regime_signals", fallback_cross_regime_signals(snapshot.get("market_regime", {}), snapshot.get("global_liquidity", {}), snapshot.get("gold_regime", {}), snapshot.get("btc_regime", {})))
-    result.setdefault("asset_outlook_3m", {ticker: fallback_asset_outlook(ticker, snapshot) for ticker in ASSET_TICKERS})
-    result.setdefault("scenarios", fallback_scenarios(snapshot))
-    result.setdefault("key_risks", fallback_key_risks(snapshot))
-    result.setdefault("what_would_change_view", fallback_change_view())
-    result.setdefault("critic_changes_summary", [])
-    result.setdefault("data_quality_notes", snapshot.get("data_quality", {}).get("notes", []))
+    return normalize_cio_response(result, snapshot, analysis_source)
+
+
+def normalize_overall(raw: Any, fallback: dict[str, Any]) -> dict[str, str]:
+    data = safe_dict(raw)
+    label = first_alias(data, ["label", "state", "status", "name", "title"]) or fallback.get("label", "")
+    summary = first_alias(data, ["summary", "assessment", "description", "reason", "rationale"]) or fallback.get("summary", "")
+    return {"label": safe_str(label), "summary": safe_str(summary)}
+
+
+def normalize_dimensions(raw: Any, snapshot: dict[str, Any], fallback: dict[str, Any], section_sources: dict[str, str], errors: list[str]) -> dict[str, dict[str, str]]:
+    data = safe_dict(raw)
+    out: dict[str, dict[str, str]] = {}
+    used_fallback = False
+    for key, fallback_item in fallback.items():
+        item = safe_dict(data.get(key))
+        if not item:
+            item = fallback_item
+            used_fallback = True
+        explanation = first_alias(item, ["explanation", "reason", "rationale", "description", "summary"]) or fallback_item.get("explanation", "")
+        normalized = {"state": safe_str(item.get("state") or fallback_item.get("state") or "UNKNOWN"), "explanation": safe_str(explanation)}
+        if key == "liquidity":
+            normalized["level"] = safe_str(item.get("level") or fallback_item.get("level") or state_from_liquidity_score(snapshot.get("global_liquidity", {}).get("global_liquidity_score")))
+            normalized["direction"] = safe_str(item.get("direction") or fallback_item.get("direction") or snapshot.get("global_liquidity", {}).get("global_liquidity_direction") or "UNKNOWN")
+            if not normalized["state"] or normalized["state"] == "UNKNOWN":
+                normalized["state"] = liquidity_state_from_level_direction(normalized["level"], normalized["direction"])
+        if not normalized["explanation"]:
+            normalized["explanation"] = dimension_explanation(key, normalized, snapshot)
+            used_fallback = True
+        out[key] = normalized
+    section_sources["dimensions"] = "FALLBACK" if used_fallback else "LLM"
+    if used_fallback:
+        errors.append("dimensions repaired with section-level fallback")
+    return out
+
+
+def normalize_cross_signals(raw: Any, fallback: list[Any], section_sources: dict[str, str], errors: list[str], analysis_source: str) -> list[dict[str, Any]]:
+    items = safe_list(raw)
+    if not items:
+        section_sources["cross_regime_signals"] = "FALLBACK"
+        errors.append("cross_regime_signals missing")
+        items = fallback
+    else:
+        section_sources["cross_regime_signals"] = "LLM" if analysis_source != "DETERMINISTIC_FALLBACK" else "FALLBACK"
+    out = []
+    for item in items[:5]:
+        data = safe_dict(item)
+        if not data:
+            data = {"signal": "UNNAMED_SIGNAL", "description": safe_str(item)}
+        signal = first_alias(data, ["signal", "name", "title", "label"]) or "UNNAMED_SIGNAL"
+        description = first_alias(data, ["description", "reason", "summary", "rationale"]) or ""
+        assets = data.get("affected_assets", data.get("assets", data.get("affected", [])))
+        out.append({"signal": safe_str(signal), "description": safe_str(description), "affected_assets": normalize_assets(assets)})
+    return out
+
+
+def normalize_asset_outlook_block(raw: Any, snapshot: dict[str, Any], fallback: dict[str, Any], section_sources: dict[str, str], errors: list[str], analysis_source: str) -> dict[str, dict[str, Any]]:
+    data = safe_dict(raw)
+    out = {}
+    used_fallback = False
     for ticker in ASSET_TICKERS:
-        result["asset_outlook_3m"].setdefault(ticker, fallback_asset_outlook(ticker, snapshot))
-        result["asset_outlook_3m"][ticker] = normalize_asset_outlook(result["asset_outlook_3m"][ticker], ticker, snapshot, analysis_source)
-    return result
+        item = safe_dict(data.get(ticker))
+        if not item:
+            item = fallback.get(ticker, fallback_asset_outlook(ticker, snapshot))
+            used_fallback = True
+        out[ticker] = normalize_asset_outlook(item, ticker, snapshot, analysis_source)
+    section_sources["asset_outlook_3m"] = "FALLBACK" if used_fallback else "LLM"
+    if used_fallback:
+        errors.append("asset_outlook_3m repaired with section-level fallback")
+    return out
+
+
+def normalize_scenarios(raw: Any, fallback: dict[str, Any], section_sources: dict[str, str], errors: list[str], analysis_source: str) -> dict[str, dict[str, Any]]:
+    data = safe_dict(raw)
+    alias_map = {"base": ["base", "base_case"], "bull": ["bull", "bull_case"], "bear": ["bear", "bear_case"]}
+    out: dict[str, dict[str, Any]] = {}
+    used_fallback = False
+    for key, aliases in alias_map.items():
+        item = safe_dict(next((data.get(alias) for alias in aliases if alias in data), {}))
+        fallback_item = fallback.get(key, {})
+        if not item:
+            item = fallback_item
+            used_fallback = True
+        conditions = item.get("conditions", item.get("scenario_conditions", []))
+        summary = first_alias(item, ["summary", "description", "system_implication"]) or fallback_item.get("summary") or fallback_item.get("system_implication", "")
+        impacts = safe_dict(item.get("asset_impacts", item.get("impacts", item.get("asset_outlook", {}))))
+        if not impacts:
+            impacts = {asset: item.get(asset, item.get(asset.replace("-USD", ""), fallback_item.get(asset, ""))) for asset in ASSET_TICKERS}
+            used_fallback = True
+        out[key] = {
+            "conditions": [safe_str(x) for x in safe_list(conditions)[:5]],
+            "summary": safe_str(summary),
+            "asset_impacts": {asset: safe_str(impacts.get(asset, impacts.get(asset.replace("-USD", ""), ""))) for asset in ASSET_TICKERS},
+        }
+    section_sources["scenarios"] = "FALLBACK" if used_fallback else "LLM"
+    if used_fallback:
+        errors.append("scenarios repaired with section-level fallback")
+    return out
+
+
+def normalize_key_risks(raw: Any, fallback: list[Any], section_sources: dict[str, str], errors: list[str], analysis_source: str) -> list[dict[str, Any]]:
+    items = safe_list(raw)
+    if not items:
+        section_sources["key_risks"] = "FALLBACK"
+        errors.append("key_risks missing")
+        items = fallback
+    else:
+        section_sources["key_risks"] = "LLM" if analysis_source != "DETERMINISTIC_FALLBACK" else "FALLBACK"
+    out = []
+    for idx, item in enumerate(items[:5], start=1):
+        data = safe_dict(item)
+        risk = first_alias(data, ["risk", "title", "name", "label"]) or "UNNAMED_RISK"
+        trigger = first_alias(data, ["escalation_trigger", "trigger_to_escalate", "trigger", "watch_trigger", "escalation"]) or ""
+        out.append(
+            {
+                "rank": int(to_float(data.get("rank")) if np.isfinite(to_float(data.get("rank"))) else idx),
+                "risk": safe_str(risk),
+                "status": safe_str(data.get("status") or "WATCH"),
+                "description": safe_str(data.get("description") or data.get("summary") or data.get("rationale") or ""),
+                "affected_assets": normalize_assets(data.get("affected_assets", data.get("assets", data.get("affected", [])))),
+                "escalation_trigger": safe_str(trigger),
+            }
+        )
+    return out
+
+
+def normalize_change_view(raw: Any, fallback: dict[str, Any], section_sources: dict[str, str], errors: list[str], analysis_source: str) -> dict[str, dict[str, Any]]:
+    data = safe_dict(raw)
+    out = {}
+    used_fallback = False
+    for ticker in ASSET_TICKERS:
+        value = data.get(ticker)
+        fallback_item = safe_dict(fallback.get(ticker))
+        if isinstance(value, str):
+            out[ticker] = {"bullish_triggers": [], "bearish_triggers": [], "_raw_text": value}
+            used_fallback = True
+            continue
+        item = safe_dict(value)
+        if not item:
+            item = fallback_item
+            used_fallback = True
+        bullish = item.get("bullish_triggers", item.get("more_bullish_if", item.get("what_would_make_more_bullish", [])))
+        bearish = item.get("bearish_triggers", item.get("more_bearish_if", item.get("what_would_make_more_bearish", [])))
+        out[ticker] = {"bullish_triggers": [safe_str(x) for x in safe_list(bullish)[:4]], "bearish_triggers": [safe_str(x) for x in safe_list(bearish)[:4]]}
+    section_sources["what_would_change_view"] = "FALLBACK" if used_fallback else "LLM"
+    if used_fallback:
+        errors.append("what_would_change_view repaired with section-level fallback")
+    return out
 
 
 def normalize_asset_outlook(item: dict[str, Any], ticker: str, snapshot: dict[str, Any], source: str) -> dict[str, Any]:
@@ -1082,6 +1294,9 @@ def normalize_asset_outlook(item: dict[str, Any], ticker: str, snapshot: dict[st
         item = {}
     out = {**fallback, **item}
     out["ticker"] = ticker
+    bias = out.get("bias") or out.get("bias_3m") or out.get("outlook") or out.get("state") or fallback.get("bias") or fallback.get("bias_3m") or "NEUTRAL"
+    out["bias"] = safe_str(bias)
+    out["bias_3m"] = out["bias"]
     out["top_supports"] = list_from_any(out.get("top_supports", out.get("supporting_factors", fallback["top_supports"])))[:4]
     out["top_risks"] = list_from_any(out.get("top_risks", out.get("risk_factors", fallback["top_risks"])))[:4]
     out["more_bullish_if"] = list_from_any(out.get("more_bullish_if", out.get("what_would_make_more_bullish", fallback["more_bullish_if"])))[:4]
@@ -1107,6 +1322,96 @@ def list_from_any(value: Any) -> list[Any]:
     if value is None:
         return []
     return [value]
+
+
+def safe_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def safe_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    if isinstance(value, str) and "," in value:
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return [value]
+
+
+def safe_str(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return ""
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    if isinstance(value, np.floating):
+        number = float(value)
+        return f"{number:.2f}".rstrip("0").rstrip(".") if math.isfinite(number) else ""
+    return str(value)
+
+
+def display_value(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        if not math.isfinite(number):
+            return "n/a"
+        if abs(number) >= 1000:
+            return f"{number:,.0f}"
+        if abs(number) >= 10:
+            return f"{number:.1f}"
+        return f"{number:.2f}".rstrip("0").rstrip(".")
+    return safe_str(value) or "n/a"
+
+
+def first_alias(data: dict[str, Any], aliases: list[str]) -> Any:
+    for key in aliases:
+        value = data.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def normalize_assets(value: Any) -> list[str]:
+    assets = [safe_str(item).strip() for item in safe_list(value)]
+    return [asset for asset in assets if asset]
+
+
+def liquidity_state_from_level_direction(level: str, direction: str) -> str:
+    direction_upper = str(direction).upper()
+    level_upper = str(level).upper()
+    if "DETERIORATING" in direction_upper:
+        return "DETERIORATING"
+    if "NEGATIVE" in level_upper:
+        return "NEGATIVE"
+    if "SUPPORTIVE" in level_upper or "ACCELERATING" in direction_upper or "IMPROVING" in direction_upper:
+        return "SUPPORTIVE"
+    if "NEUTRAL" in level_upper:
+        return "NEUTRAL"
+    return "UNKNOWN"
+
+
+def dimension_explanation(key: str, item: dict[str, Any], snapshot: dict[str, Any]) -> str:
+    if key == "liquidity":
+        return f"Liquidity level {item.get('level', 'UNKNOWN')} with direction {item.get('direction', 'UNKNOWN')}."
+    if key == "systemic_stress":
+        return f"Systemic stress state {item.get('state', 'UNKNOWN')} based on macro and fast transition risk."
+    return f"{key.replace('_', ' ').title()} state is {item.get('state', 'UNKNOWN')} based on supplied CIO snapshot."
+
+
+def data_quality_reasons(snapshot: dict[str, Any]) -> list[str]:
+    quality = safe_dict(snapshot.get("data_quality"))
+    reasons = []
+    for label, key in [("missing", "missing_series"), ("stale", "stale_series"), ("partial", "partial_data"), ("invalid", "invalid_scores")]:
+        values = safe_list(quality.get(key))
+        if values:
+            reasons.append(f"{label}: {', '.join(safe_str(v) for v in values[:6])}")
+    validation = safe_list(snapshot.get("snapshot_validation_errors"))
+    if validation:
+        reasons.append(f"snapshot validation warnings: {len(validation)}")
+    return reasons
 
 
 def summarize_token_usage(usage: dict[str, Any]) -> dict[str, Any]:
@@ -1412,6 +1717,10 @@ def write_cio_cache(result: CioRunResult) -> None:
         json.dumps(
             {
                 "snapshot": result.snapshot,
+                "analyst_raw": result.analyst_raw,
+                "analyst_normalized": result.analyst_normalized,
+                "critic_raw": result.critic_raw,
+                "critic_normalized": result.critic_normalized,
                 "analyst_result": result.analyst_result,
                 "critic_result": result.critic_result,
                 "final_result": result.final_result,
@@ -1431,18 +1740,28 @@ def write_cio_cache(result: CioRunResult) -> None:
 
 
 def cio_result_from_cache(cache: dict[str, Any], status: str) -> CioRunResult:
+    snapshot = safe_dict(cache.get("snapshot"))
+    snapshot.setdefault("as_of_date", str(cache.get("generated_at") or datetime.now(timezone.utc).isoformat()))
+    analysis_source = str(cache.get("analysis_source") or cache.get("final_result", {}).get("analysis_source") or "DETERMINISTIC_FALLBACK")
+    final_result = normalize_cio_result(cache.get("final_result", {}), snapshot, analysis_source)
+    analyst_result = normalize_cio_result(cache.get("analyst_result", {}), snapshot, "LLM_ANALYST" if cache.get("analyst_status") == "SUCCESS" else "DETERMINISTIC_FALLBACK")
+    critic_result = normalize_cio_result(cache.get("critic_result", {}), snapshot, "LLM_CRITIC_CORRECTED") if cache.get("critic_result") else None
     return CioRunResult(
-        snapshot=cache.get("snapshot", {}),
-        analyst_result=cache.get("analyst_result", {}),
-        critic_result=cache.get("critic_result"),
-        final_result=cache.get("final_result", {}),
+        snapshot=snapshot,
+        analyst_result=analyst_result,
+        critic_result=critic_result,
+        final_result=final_result,
         usage=cache.get("usage", {}),
         status=status,
-        analysis_source=str(cache.get("analysis_source") or cache.get("final_result", {}).get("analysis_source") or "DETERMINISTIC_FALLBACK"),
+        analysis_source=analysis_source,
         analyst_status=str(cache.get("analyst_status") or cache.get("usage", {}).get("analyst_status") or "SKIPPED"),
         critic_status=str(cache.get("critic_status") or cache.get("usage", {}).get("critic_status") or "SKIPPED"),
         generated_at=str(cache.get("generated_at", "")),
         next_scheduled_at=str(cache.get("next_scheduled_at", "")),
+        analyst_raw=cache.get("analyst_raw"),
+        analyst_normalized=cache.get("analyst_normalized"),
+        critic_raw=cache.get("critic_raw"),
+        critic_normalized=cache.get("critic_normalized"),
     )
 
 
