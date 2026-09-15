@@ -28,6 +28,8 @@ STATUS_PATH = POSITIONING_STORAGE_DIR / "source_status.json"
 CFTC_PERCENTILE_WINDOW = 156
 CFTC_PERCENTILE_MIN_PERIODS = 52
 CFTC_STALE_DAYS = 10
+CFTC_UPDATE_FREQUENCY = "Weekly"
+CFTC_SCHEDULED_UPDATE_DAY = "Saturday"
 EXCEL_MAX_ROWS = 1_048_000
 
 
@@ -368,12 +370,20 @@ def download_csv_source(url: str, cache_path: Path, label: str, status: dict[str
         frame = pd.read_csv(url, low_memory=False)
         frame.to_csv(cache_path, index=False)
         status[label] = {"last_updated_utc": now_utc_iso(), "source": url, "status": "CURRENT", "rows": int(len(frame))}
+        annotate_source_schedule(status[label], label)
         return frame
     except Exception as exc:
         status[label] = {"last_updated_utc": now_utc_iso(), "source": url, "status": "SOURCE_FAILED_USING_CACHE", "error": str(exc)}
+        annotate_source_schedule(status[label], label)
         if cache_path.exists():
             return pd.read_csv(cache_path, low_memory=False)
         return pd.DataFrame()
+
+
+def annotate_source_schedule(source_status: dict[str, Any], label: str) -> None:
+    if label.startswith("CFTC "):
+        source_status["update_frequency"] = CFTC_UPDATE_FREQUENCY
+        source_status["scheduled_update_day"] = CFTC_SCHEDULED_UPDATE_DAY
 
 
 def download_aaii(status: dict[str, Any], force: bool = False) -> pd.DataFrame:
@@ -446,7 +456,7 @@ def validate_cftc_master(master: pd.DataFrame) -> list[str]:
 
 def positioning_metadata(status: dict[str, Any]) -> pd.DataFrame:
     rows = [
-        ("Date", "CFTC report date / weekly observation date", "CFTC, AAII, NAAIM", "All", "n/a", "Parsed date; no look-ahead shifting", "Date"),
+        ("Date", "CFTC report date / weekly observation date", "CFTC, AAII, NAAIM", "All", "CFTC source files update weekly on Saturday", "Parsed date; no look-ahead shifting", "Date"),
         ("Participant_Category", "Economic participant category from source report", "CFTC", "Disaggregated / TFF", "Report-specific; no equivalence mapping forced", "Canonical display label only", "Text"),
         ("NetPctOI", "Net position as percent of open interest", "CFTC", "Disaggregated / TFF", "Category-specific", "(Long - Short) / Open Interest * 100", "Percent points"),
         ("NetPctOI_3Y_Percentile", "Point-in-time trailing 3Y percentile", "CFTC", "Disaggregated / TFF", "Category-specific", "Rolling 156W percentile using data available up to t only; min 52W", "0-100"),
@@ -491,7 +501,11 @@ def read_status() -> dict[str, Any]:
     if not STATUS_PATH.exists():
         return {}
     try:
-        return json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+        status = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+        for key in ("CFTC Commodities", "CFTC Financials"):
+            if isinstance(status.get(key), dict):
+                annotate_source_schedule(status[key], key)
+        return status
     except Exception:
         return {}
 

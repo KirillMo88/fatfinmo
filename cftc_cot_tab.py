@@ -76,8 +76,8 @@ def render_source_status(master: pd.DataFrame, status: dict[str, Any]) -> None:
     financials = cftc_latest_status(master, "TFF")
     cols = st.columns(4)
     items = [
-        ("CFTC Commodities", commodities.get("last_report_date") or "n/a", commodities.get("status", "DATA UNAVAILABLE")),
-        ("CFTC Financials", financials.get("last_report_date") or "n/a", financials.get("status", "DATA UNAVAILABLE")),
+        ("CFTC Commodities", commodities.get("last_report_date") or "n/a", cftc_source_detail(status, "CFTC Commodities", commodities.get("status", "DATA UNAVAILABLE"))),
+        ("CFTC Financials", financials.get("last_report_date") or "n/a", cftc_source_detail(status, "CFTC Financials", financials.get("status", "DATA UNAVAILABLE"))),
         ("AAII", source_timestamp(status, "AAII"), source_state(status, "AAII")),
         ("NAAIM", source_timestamp(status, "NAAIM"), source_state(status, "NAAIM")),
     ]
@@ -210,6 +210,13 @@ def source_state(status: dict[str, Any], key: str) -> str:
     if not isinstance(status, dict):
         return "n/a"
     return str(status.get(key, {}).get("status", "n/a"))
+
+
+def cftc_source_detail(status: dict[str, Any], key: str, freshness: Any) -> str:
+    source = status.get(key, {}) if isinstance(status, dict) else {}
+    frequency = source.get("update_frequency", "Weekly")
+    update_day = source.get("scheduled_update_day", "Saturday")
+    return f"{freshness} | updates {frequency.lower()} on {update_day}"
 
 
 def fmt_date(value: Any) -> str:
