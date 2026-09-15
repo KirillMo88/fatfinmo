@@ -1131,7 +1131,10 @@ def estimate_usage_cost(token_usage: dict[str, Any]) -> float | None:
 
 
 def brief_error(exc: Exception) -> str:
-    text = str(exc).replace(os.environ.get("OPENAI_API_KEY", ""), "[redacted]")
+    text = str(exc)
+    key = os.environ.get("OPENAI_API_KEY", "")
+    if key:
+        text = text.replace(key, "[redacted]")
     return text[:600]
 
 

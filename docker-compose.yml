@@ -11,6 +11,7 @@ services:
       - --server.headless=true
     environment:
       TESTER_APP_URL: /tester
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       FRED_API_KEY: ${FRED_API_KEY:-}
       TRADINGVIEW_MCP_ENABLED: ${TRADINGVIEW_MCP_ENABLED:-1}
       TRADINGVIEW_MCP_REDIRECT_URI: ${TRADINGVIEW_MCP_REDIRECT_URI:-}
