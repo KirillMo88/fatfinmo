@@ -25,6 +25,8 @@ services:
       - ./persistent/cio_view:/app/persistent/cio_view
       - ./persistent/global_liquidity:/app/persistent/global_liquidity
       - ./persistent/positioning:/app/persistent/positioning
+      - ./persistent/snapshots:/app/persistent/snapshots
+      - ./persistent/job_status:/app/persistent/job_status
       - ./persistent/tradingview_mcp:/app/persistent/tradingview_mcp
 
   tester:

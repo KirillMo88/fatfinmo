@@ -10,6 +10,7 @@ import time
 import os
 import json
 import html
+import hashlib
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,14 @@ from alpha_engine import (
     calculate_sma200d_robust_z_36m,
     sort_by_alpha,
 )
-from finance_core import download_completed_ohlcv, download_latest_ohlcv
+from finance_core import (
+    USD_KRW_TICKER,
+    convert_krw_ohlcv_to_usd,
+    download_completed_ohlcv,
+    download_latest_ohlcv,
+    extract_ohlcv_frame,
+    is_krw_quoted_ticker,
+)
 from fund_flows import FundFlowCache, default_fund_flow_cache_path, get_fund_flow_metrics
 from market_model import (
     YAHOO_MARKET_TICKERS,
@@ -201,6 +209,7 @@ ALPHA_TECHNICAL_COLUMNS = [
 
 DISPLAY_COLUMNS = [
     "Group", "Subgroup", "Ticker",
+    "CurrentPrice",
     *TABLE_ALPHA_COLUMNS,
     *ALPHA_TECHNICAL_COLUMNS,
     "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
@@ -216,6 +225,7 @@ TABLE_HEADER_NAMES = {
     "Group": "Group",
     "Subgroup": "Sub\ngroup",
     "Ticker": "Ticker",
+    "CurrentPrice": "Current\nPrice",
     "Alpha_Score": "Alpha\nScore",
     "Alpha_State": "Alpha\nState",
     "Momentum_Score": "Momentum\nScore",
@@ -287,6 +297,7 @@ TABLE_PERMANENTLY_HIDDEN_COLUMNS = {
 }
 
 NUMERIC_COLUMNS = [
+    "CurrentPrice",
     "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
     "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
@@ -317,16 +328,26 @@ PERFORMANCE_COLUMNS = [
 ]
 
 FAST_PERFORMANCE_COLUMNS = [
+    "CurrentPrice",
     "Perf_1D_%",
     "Perf_1W_%",
     "Perf_1M_%",
     "Perf_3M_%",
     "Perf_6M_%",
     "Perf_12M_%",
-    "Perf_3Y_%",
-    "Perf_5Y_%",
-    "Perf_10Y_%",
 ]
+
+PERFORMANCE_REFERENCE_COLUMNS = [
+    "PerfRef_1D",
+    "PerfRef_1W",
+    "PerfRef_1M",
+    "PerfRef_3M",
+    "PerfRef_6M",
+    "PerfRef_12M",
+]
+
+SNAPSHOT_DIR = Path(__file__).with_name("persistent") / "snapshots"
+SCREENER_SNAPSHOT_MODEL_VERSION = "screener-snapshot-v1"
 
 INVERSE_PERFORMANCE_COLUMNS = [
     "Perf_12M_Percentile",
@@ -440,6 +461,57 @@ def flatten_universe_for_editor(universe: dict) -> pd.DataFrame:
             for ticker in tickers:
                 rows.append({"Group": group, "Subgroup": subgroup, "Ticker": ticker})
     return pd.DataFrame(rows, columns=["Group", "Subgroup", "Ticker"])
+
+
+def snapshot_hash(*parts: Any) -> str:
+    payload = json.dumps([str(part) for part in parts], sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def snapshot_paths(kind: str, key: str) -> tuple[Path, Path]:
+    base = SNAPSHOT_DIR / f"{kind}_{key}"
+    return base.with_suffix(".parquet"), base.with_suffix(".json")
+
+
+def read_snapshot_frame(kind: str, key: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+    data_path, meta_path = snapshot_paths(kind, key)
+    frame = pd.DataFrame()
+    if data_path.exists():
+        try:
+            frame = pd.read_parquet(data_path)
+        except Exception:
+            frame = pd.DataFrame()
+    metadata: dict[str, Any] = {}
+    if meta_path.exists():
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            metadata = {}
+    return frame, metadata
+
+
+def atomic_write_snapshot(kind: str, key: str, frame: pd.DataFrame, metadata: dict[str, Any]) -> None:
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    data_path, meta_path = snapshot_paths(kind, key)
+    tmp_data = data_path.with_name(f".{data_path.name}.{os.getpid()}.tmp")
+    tmp_meta = meta_path.with_name(f".{meta_path.name}.{os.getpid()}.tmp")
+    frame.to_parquet(tmp_data, index=False)
+    tmp_meta.write_text(json.dumps(metadata, indent=2, ensure_ascii=True), encoding="utf-8")
+    os.replace(tmp_data, data_path)
+    os.replace(tmp_meta, meta_path)
+
+
+def snapshot_metadata(status: str, rows: int, data_as_of: Any = None, error: str | None = None) -> dict[str, Any]:
+    metadata = {
+        "Status": status,
+        "Rows": int(rows),
+        "CalculatedAt": pd.Timestamp.now(tz="UTC").isoformat(),
+        "Data_AsOf": None if data_as_of is None else str(data_as_of),
+        "ModelVersion": SCREENER_SNAPSHOT_MODEL_VERSION,
+    }
+    if error:
+        metadata["Error"] = str(error)
+    return metadata
 
 
 def build_universe_from_editor_df(editor_df: pd.DataFrame) -> tuple[dict, list]:
@@ -995,6 +1067,71 @@ def download_performance_ohlcv(ticker: str, period: str = "10y", refresh_bucket:
     return download_latest_ohlcv(ticker, period=period)
 
 
+def performance_reference_prices(close: pd.Series, today: pd.Timestamp) -> dict[str, float]:
+    windows = {
+        "PerfRef_1D": 1,
+        "PerfRef_1W": 7,
+        "PerfRef_1M": 30,
+        "PerfRef_3M": 90,
+        "PerfRef_6M": 182,
+        "PerfRef_12M": 365,
+    }
+    return {key: safe_value_on_or_before(close, today - pd.Timedelta(days=days)) for key, days in windows.items()}
+
+
+def lightweight_current_price(ticker: str, refresh_bucket: int = 0) -> float:
+    _ = refresh_bucket
+    if is_ai_group_label(ticker):
+        return np.nan
+    for attempt in range(2):
+        try:
+            raw = yf.download(
+                ticker,
+                period="5d",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+            frame = extract_ohlcv_frame(raw, ticker)
+            if is_krw_quoted_ticker(ticker):
+                fx_raw = yf.download(
+                    USD_KRW_TICKER,
+                    period="5d",
+                    interval="1d",
+                    auto_adjust=True,
+                    progress=False,
+                    threads=False,
+                )
+                frame = convert_krw_ohlcv_to_usd(frame, extract_ohlcv_frame(fx_raw, USD_KRW_TICKER))
+            close = pd.to_numeric(frame.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
+            if not close.empty:
+                return float(close.iloc[-1])
+        except Exception:
+            pass
+        time.sleep(0.25 * (attempt + 1))
+    return np.nan
+
+
+def overlay_performance_from_refs(row: pd.Series, current_price: float) -> dict[str, float]:
+    out = {"CurrentPrice": current_price}
+    mapping = {
+        "Perf_1D_%": "PerfRef_1D",
+        "Perf_1W_%": "PerfRef_1W",
+        "Perf_1M_%": "PerfRef_1M",
+        "Perf_3M_%": "PerfRef_3M",
+        "Perf_6M_%": "PerfRef_6M",
+        "Perf_12M_%": "PerfRef_12M",
+    }
+    for perf_col, ref_col in mapping.items():
+        ref = pd.to_numeric(pd.Series([row.get(ref_col)]), errors="coerce").iloc[0]
+        if np.isfinite(current_price) and np.isfinite(ref) and ref != 0.0:
+            out[perf_col] = (current_price / ref - 1.0) * 100.0
+        else:
+            out[perf_col] = row.get(perf_col, np.nan)
+    return out
+
+
 def get_metrics(ticker: str, divergence_cfg: dict):
     ohlcv = download_metrics_ohlcv(ticker)
     if ohlcv.empty:
@@ -1027,6 +1164,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         perf_3y = safe_perf(close, today, 365 * 3)
         perf_5y = safe_perf(close, today, 365 * 5)
         perf_10y = safe_perf(close, today, 365 * 10)
+        perf_refs = performance_reference_prices(close, today)
 
         # 52W high distance
         last_52w = close.loc[today - pd.DateOffset(days=int(365 * 1.1)):]
@@ -1114,8 +1252,10 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         flows_3m = np.nan if fund_flow_metrics is None else fund_flow_metrics.flow_3m_pct
 
         return [
+            cur_px,
             perf_1d, perf_1w, perf_1m, perf_3m, perf_6m,
             perf_12m, perf_3y, perf_5y, perf_10y,
+            *[perf_refs.get(col, np.nan) for col in PERFORMANCE_REFERENCE_COLUMNS],
             sma200w_percentile, perf_12m_percentile, avg_forward_return_6m, correction_risk,
             flows_1m, flows_3m,
             vs_52w, vs_ath, cur_rsi, cur_rsi14w,
@@ -1132,7 +1272,7 @@ def get_metrics(ticker: str, divergence_cfg: dict):
 def get_performance_metrics(ticker: str, refresh_bucket: int = 0) -> list[float] | None:
     if is_ai_group_label(ticker):
         return get_ai_group_performance_metrics(canonical_ai_group_label(ticker), refresh_bucket=refresh_bucket)
-    ohlcv = download_performance_ohlcv(ticker, refresh_bucket=refresh_bucket)
+    ohlcv = download_performance_ohlcv(ticker, period="15mo", refresh_bucket=refresh_bucket)
     if ohlcv.empty:
         return None
     close = pd.to_numeric(ohlcv["Close"], errors="coerce").dropna()
@@ -1140,49 +1280,79 @@ def get_performance_metrics(ticker: str, refresh_bucket: int = 0) -> list[float]
         return None
     today = close.index[-1]
     return [
+        float(close.iloc[-1]),
         safe_perf(close, today, 1),
         safe_perf(close, today, 7),
         safe_perf(close, today, 30),
         safe_perf(close, today, 90),
         safe_perf(close, today, 182),
         safe_perf(close, today, 365),
-        safe_perf(close, today, 365 * 3),
-        safe_perf(close, today, 365 * 5),
-        safe_perf(close, today, 365 * 10),
     ]
 
 
 def get_ai_group_performance_metrics(group_label: str, refresh_bucket: int = 0) -> list[float] | None:
-    windows = [1, 7, 30, 90, 182, 365, 365 * 3, 365 * 5, 365 * 10]
+    windows = [1, 7, 30, 90, 182, 365]
     member_returns: list[list[float]] = []
+    current_prices: list[float] = []
     for member in AI_UNIVERSE.get(canonical_ai_group_label(group_label), []):
-        ohlcv = download_performance_ohlcv(member, refresh_bucket=refresh_bucket)
+        ohlcv = download_performance_ohlcv(member, period="15mo", refresh_bucket=refresh_bucket)
         if ohlcv.empty:
             continue
         close = pd.to_numeric(ohlcv["Close"], errors="coerce").dropna()
         if close.empty:
             continue
         end = pd.Timestamp(close.index[-1])
+        current_prices.append(float(close.iloc[-1]))
         member_returns.append([safe_perf(close, end, days) for days in windows])
     if not member_returns:
         return None
-    frame = pd.DataFrame(member_returns, columns=FAST_PERFORMANCE_COLUMNS)
+    frame = pd.DataFrame(member_returns, columns=[col for col in FAST_PERFORMANCE_COLUMNS if col != "CurrentPrice"])
+    frame.insert(0, "CurrentPrice", np.nan if not current_prices else float(np.nanmean(current_prices)))
     return [float(pd.to_numeric(frame[col], errors="coerce").mean(skipna=True)) for col in FAST_PERFORMANCE_COLUMNS]
 
 
-@st.cache_data(show_spinner=True, ttl=AUTO_REFRESH_SECONDS)
-def compute_performance_table(universe: dict, universe_signature: str, refresh_nonce: int = 0) -> tuple[pd.DataFrame, str]:
-    _ = universe_signature
+def compute_performance_table(slow_df: pd.DataFrame, overlay_key: str, refresh_nonce: int = 0) -> tuple[pd.DataFrame, str, dict[str, Any]]:
+    previous_overlay, previous_meta = read_snapshot_frame("market_performance_latest", overlay_key)
+    previous_by_key: dict[tuple[str, str, str], pd.Series] = {}
+    if not previous_overlay.empty:
+        for _, prev_row in previous_overlay.iterrows():
+            previous_by_key[(str(prev_row.get("Group")), str(prev_row.get("Subgroup")), str(prev_row.get("Ticker")))] = prev_row
+
     refresh_bucket = int(refresh_nonce)
+    previous_bucket = int(previous_meta.get("RefreshBucket", -1)) if str(previous_meta.get("RefreshBucket", "")).lstrip("-").isdigit() else -1
+    if not previous_overlay.empty and previous_bucket == refresh_bucket:
+        return previous_overlay, str(previous_meta.get("CalculatedAt", "")), previous_meta
+
     columns = ["Group", "Subgroup", "Ticker", *FAST_PERFORMANCE_COLUMNS]
     rows = []
-    for group, subgroups in universe.items():
-        for subgroup, tickers in subgroups.items():
-            for ticker in tickers:
-                res = get_performance_metrics(ticker, refresh_bucket=refresh_bucket)
-                rows.append([group, subgroup, ticker] + ([np.nan] * len(FAST_PERFORMANCE_COLUMNS) if res is None else res))
+    for _, row in slow_df.iterrows():
+        group = str(row.get("Group", ""))
+        subgroup = str(row.get("Subgroup", ""))
+        ticker = str(row.get("Ticker", ""))
+        key = (group, subgroup, ticker)
+        previous = previous_by_key.get(key)
+        current_price = lightweight_current_price(ticker, refresh_bucket=refresh_bucket)
+        if not np.isfinite(current_price):
+            current_price = pd.to_numeric(pd.Series([previous.get("CurrentPrice") if previous is not None else row.get("CurrentPrice")]), errors="coerce").iloc[0]
+        values = overlay_performance_from_refs(row, current_price)
+        if previous is not None:
+            for col in FAST_PERFORMANCE_COLUMNS:
+                if not np.isfinite(pd.to_numeric(pd.Series([values.get(col)]), errors="coerce").iloc[0]):
+                    values[col] = previous.get(col, row.get(col, np.nan))
+        rows.append([group, subgroup, ticker] + [values.get(col, np.nan) for col in FAST_PERFORMANCE_COLUMNS])
     fetched_at_utc = pd.Timestamp.now(tz="UTC").isoformat()
-    return pd.DataFrame(rows, columns=columns), fetched_at_utc
+    overlay = pd.DataFrame(rows, columns=columns)
+    meta = snapshot_metadata("CURRENT", len(overlay), error=None)
+    meta["RefreshBucket"] = int(refresh_bucket)
+    try:
+        atomic_write_snapshot("market_performance_latest", overlay_key, overlay, meta)
+    except Exception as exc:
+        if not previous_overlay.empty:
+            fallback = snapshot_metadata("UPDATE_FAILED_USING_PREVIOUS", len(previous_overlay), error=str(exc))
+            fallback["RefreshBucket"] = previous_bucket
+            return previous_overlay, str(previous_meta.get("CalculatedAt", "")), fallback
+        meta = snapshot_metadata("WRITE_FAILED", len(overlay), error=str(exc))
+    return overlay, fetched_at_utc, meta
 
 
 @st.cache_data(show_spinner=True, ttl=SLOW_REFRESH_SECONDS)
@@ -1198,8 +1368,10 @@ def compute_slow_metrics_table(
     _ = refresh_nonce
     columns = [
         "Group", "Subgroup", "Ticker",
+        "CurrentPrice",
         "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%",
         "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
+        *PERFORMANCE_REFERENCE_COLUMNS,
         "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
         "FundFlows_1M_%", "FundFlows_3M_%",
         "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "RSI_14W",
@@ -1247,23 +1419,51 @@ def compute_metrics_table(
     divergence_signature: str,
     performance_refresh_nonce: int = 0,
     slow_refresh_nonce: int = 0,
-) -> tuple[pd.DataFrame, str]:
-    slow_df, _ = compute_slow_metrics_table(
-        universe,
-        universe_signature,
-        divergence_cfg,
-        divergence_signature,
-        slow_refresh_nonce,
-    )
-    perf_df, performance_fetched_at_utc = compute_performance_table(
-        universe,
-        universe_signature,
+) -> tuple[pd.DataFrame, str, dict[str, Any]]:
+    snapshot_key = snapshot_hash(universe_signature, divergence_signature)
+    slow_df, slow_meta = read_snapshot_frame("screener_snapshot_latest", snapshot_key)
+    previous_refresh_nonce = int(slow_meta.get("RefreshNonce", -1)) if str(slow_meta.get("RefreshNonce", "")).lstrip("-").isdigit() else -1
+    should_rebuild_snapshot = slow_df.empty or int(slow_refresh_nonce) > previous_refresh_nonce
+    if should_rebuild_snapshot:
+        try:
+            slow_df, slow_fetched_at_utc = compute_slow_metrics_table(
+                universe,
+                universe_signature,
+                divergence_cfg,
+                divergence_signature,
+                slow_refresh_nonce,
+            )
+            if not slow_df.empty:
+                data_as_of = None
+                if "Ticker" in slow_df.columns:
+                    data_as_of = f"{slow_df['Ticker'].nunique()} tickers"
+                slow_meta = snapshot_metadata("CURRENT", len(slow_df), data_as_of=data_as_of)
+                slow_meta["RefreshNonce"] = int(slow_refresh_nonce)
+                slow_meta["SourceCalculatedAt"] = slow_fetched_at_utc
+                atomic_write_snapshot("screener_snapshot_latest", snapshot_key, slow_df, slow_meta)
+        except Exception as exc:
+            fallback, fallback_meta = read_snapshot_frame("screener_snapshot_latest", snapshot_key)
+            if not fallback.empty:
+                slow_df = fallback
+                slow_meta = dict(fallback_meta)
+                slow_meta["Status"] = "NIGHTLY_UPDATE_FAILED_USING_PREVIOUS"
+                slow_meta["Error"] = str(exc)
+            else:
+                raise
+
+    perf_df, performance_fetched_at_utc, perf_meta = compute_performance_table(
+        slow_df,
+        snapshot_key,
         performance_refresh_nonce,
     )
+    status_payload = {
+        "analytics": slow_meta,
+        "prices": perf_meta,
+    }
     if slow_df.empty:
-        return perf_df, performance_fetched_at_utc
+        return perf_df, performance_fetched_at_utc, status_payload
     if perf_df.empty:
-        return slow_df, performance_fetched_at_utc
+        return slow_df, str(slow_meta.get("CalculatedAt", "")), status_payload
 
     keys = ["Group", "Subgroup", "Ticker"]
     merged = slow_df.drop(columns=FAST_PERFORMANCE_COLUMNS, errors="ignore").merge(
@@ -1274,7 +1474,7 @@ def compute_metrics_table(
     ordered_columns = [col for col in slow_df.columns if col in merged.columns] + [
         col for col in merged.columns if col not in slow_df.columns
     ]
-    return merged[ordered_columns], performance_fetched_at_utc
+    return merged[ordered_columns], performance_fetched_at_utc, status_payload
 
 
 def apply_filters(df: pd.DataFrame):
@@ -6024,9 +6224,9 @@ def main():
     with top_export_col:
         table_export_slot = st.empty()
     with top_refresh_col:
-        refresh = st.button("Refresh", use_container_width=True)
+        refresh = st.button("Refresh Prices", use_container_width=True)
     with top_hard_refresh_col:
-        hard_refresh = st.button("Hard Refresh Data", use_container_width=True)
+        hard_refresh = st.button("Run Nightly Analytics Now", use_container_width=True)
     if refresh:
         st.session_state["performance_refresh_nonce"] += 1
         st.rerun()
@@ -6051,7 +6251,7 @@ def main():
         performance_refresh_key = int(time.time() // AUTO_REFRESH_SECONDS) + (
             int(st.session_state["performance_refresh_nonce"]) * 10_000_000
         )
-        df, app_refresh_utc = compute_metrics_table(
+        df, app_refresh_utc, snapshot_status = compute_metrics_table(
             selected_universe,
             f"{selected_universe_name}:{str(selected_universe)}",
             divergence_cfg,
@@ -6066,10 +6266,25 @@ def main():
         refresh_text = ts.strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
         pass
+    status_payload = snapshot_status if isinstance(snapshot_status, dict) else {}
+    analytics_meta = status_payload.get("analytics", {}) if isinstance(status_payload, dict) else {}
+    analytics_text = "n/a"
+    analytics_status = str(analytics_meta.get("Status", "n/a"))
+    try:
+        analytics_ts = pd.to_datetime(analytics_meta.get("CalculatedAt"), utc=True)
+        analytics_text = analytics_ts.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        pass
     _, refresh_col = st.columns([8, 2])
     with refresh_col:
         st.markdown(
-            f"<div style='text-align:right; font-size:0.85rem; color:#cbd5e1;'>App Refresh: <b>{refresh_text}</b></div>",
+            (
+                "<div style='text-align:right; font-size:0.76rem; color:#cbd5e1; line-height:1.25;'>"
+                f"Prices updated: <b>{refresh_text}</b><br>"
+                f"Analytics calculated: <b>{analytics_text}</b><br>"
+                f"Status: <b>{html.escape(analytics_status)}</b>"
+                "</div>"
+            ),
             unsafe_allow_html=True,
         )
 
@@ -6087,6 +6302,9 @@ def main():
     )
     graph_ordered_df = filtered_df.copy()
     table_df = filtered_df.copy().reset_index(drop=True)
+    for display_col in DISPLAY_COLUMNS:
+        if display_col not in table_df.columns:
+            table_df[display_col] = np.nan
     table_df["__row_id__"] = np.arange(len(table_df))
     table_display_df = table_df[["__row_id__"] + DISPLAY_COLUMNS].copy()
     table_col_labels = {
