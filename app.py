@@ -17,12 +17,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
-import streamlit.components.v1 as components
 from streamlit.errors import StreamlitSecretNotFoundError
-try:
-    from streamlit_autorefresh import st_autorefresh
-except Exception:  # pragma: no cover - optional dependency fallback.
-    st_autorefresh = None
 
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
@@ -6128,20 +6123,6 @@ def _handle_tradingview_oauth_callback() -> None:
 def main():
     st.set_page_config(page_title="ETF Market Screener", layout="wide")
     _handle_tradingview_oauth_callback()
-    if st_autorefresh is not None:
-        st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="performance_autorefresh")
-    else:
-        components.html(
-            f"""
-            <script>
-            setTimeout(function() {{
-                window.parent.location.reload();
-            }}, {AUTO_REFRESH_SECONDS * 1000});
-            </script>
-            """,
-            height=0,
-            width=0,
-        )
     if "universe_map" not in st.session_state:
         st.session_state["universe_map"] = load_universe_map()
     if "performance_refresh_nonce" not in st.session_state:
