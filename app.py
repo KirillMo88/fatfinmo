@@ -6137,17 +6137,18 @@ def main():
         """
         <style>
         .block-container {
-            padding-top: 0.2rem !important;
+            padding-top: 1.35rem !important;
             padding-bottom: 0.35rem !important;
             padding-left: 0.65rem !important;
             padding-right: 0.65rem !important;
             max-width: 100% !important;
         }
         [data-testid="stHeader"] {
-            height: 0rem;
+            height: 1.35rem;
+            background: transparent;
         }
         [data-testid="stToolbar"] {
-            top: 0.15rem;
+            top: 0.25rem;
             right: 0.35rem;
         }
         [data-testid="stElementToolbar"] {
@@ -6356,44 +6357,32 @@ def main():
     if flow_unavailable:
         st.warning("Fund flow data unavailable")
 
-    (
-        table_tab,
-        charts_tab,
-        graphs_tab,
-        ai_dashboard_tab,
-        cio_view_tab,
-        market_regime_tab,
-        global_macro_tab,
-        cftc_cot_tab,
-        global_liquidity_tab,
-        gold_regime_tab,
-        btc_regime_tab,
-        crypto_derivatives_tab,
-        alpha_tab,
-        inputs_tab,
-        description_tab,
-        tester_tab,
-    ) = st.tabs(
-        [
-            "Table",
-            "Charts",
-            "Graphs",
-            "AI Dashboard",
-            "CIO View",
-            "Market Regime",
-            "Global Macro",
-            "CFTC COT",
-            "Global Liquidity Regime",
-            "Gold Regime",
-            "BTC Regime",
-            "Crypto Derivatives",
-            "Alpha Engine",
-            "Inputs",
-            "Description",
-            "Tester",
-        ]
+    view_options = [
+        "Table",
+        "Charts",
+        "Graphs",
+        "AI Dashboard",
+        "CIO View",
+        "Market Regime",
+        "Global Macro",
+        "CFTC COT",
+        "Global Liquidity Regime",
+        "Gold Regime",
+        "BTC Regime",
+        "Crypto Derivatives",
+        "Alpha Engine",
+        "Inputs",
+        "Description",
+        "Tester",
+    ]
+    active_view = st.radio(
+        "View",
+        options=view_options,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="active_main_view",
     )
-    with table_tab:
+    if active_view == "Table":
         gb = GridOptionsBuilder.from_dataframe(table_display_df)
         gb.configure_default_column(
             sortable=True,
@@ -6583,9 +6572,9 @@ def main():
             .dropna(how="all")
             .reset_index(drop=True)
         )
-    with charts_tab:
+    elif active_view == "Charts":
         render_charts(filtered_df)
-    with graphs_tab:
+    elif active_view == "Graphs":
         row_order = st.session_state.get("table_graph_row_order", None)
         base_df = filtered_df.copy().reset_index(drop=True)
         base_df["__row_id__"] = np.arange(len(base_df))
@@ -6603,31 +6592,31 @@ def main():
         else:
             graph_ordered_df = base_df
         render_graphs_tab(graph_ordered_df.drop(columns=["__row_id__"], errors="ignore"), selected_universe, selected_universe_name)
-    with ai_dashboard_tab:
+    elif active_view == "AI Dashboard":
         render_ai_dashboard_tab()
-    with cio_view_tab:
+    elif active_view == "CIO View":
         render_cio_view_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), market_snapshot, get_fred_api_key_for_app())
-    with market_regime_tab:
+    elif active_view == "Market Regime":
         render_market_regime_tab(market_snapshot)
-    with global_macro_tab:
+    elif active_view == "Global Macro":
         render_global_macro_tab(get_fred_api_key_for_app())
-    with cftc_cot_tab:
+    elif active_view == "CFTC COT":
         render_cftc_cot_tab()
-    with global_liquidity_tab:
+    elif active_view == "Global Liquidity Regime":
         render_global_liquidity_dashboard_tab()
-    with gold_regime_tab:
+    elif active_view == "Gold Regime":
         render_gold_regime_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), get_fred_api_key_for_app())
-    with btc_regime_tab:
+    elif active_view == "BTC Regime":
         render_btc_regime_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), market_snapshot)
-    with crypto_derivatives_tab:
+    elif active_view == "Crypto Derivatives":
         render_crypto_derivatives_tab()
-    with alpha_tab:
+    elif active_view == "Alpha Engine":
         render_alpha_engine_tab(table_df.drop(columns=["__row_id__"], errors="ignore"))
-    with inputs_tab:
+    elif active_view == "Inputs":
         render_inputs_tab(universe_map)
-    with description_tab:
+    elif active_view == "Description":
         render_description_tab()
-    with tester_tab:
+    elif active_view == "Tester":
         render_tester_tab()
 
 
