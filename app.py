@@ -11,6 +11,8 @@ import os
 import json
 import html
 import hashlib
+import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -347,6 +349,7 @@ PERFORMANCE_REFERENCE_COLUMNS = [
 ]
 
 SNAPSHOT_DIR = Path(__file__).with_name("persistent") / "snapshots"
+JOB_STATUS_DIR = Path(__file__).with_name("persistent") / "job_status"
 SCREENER_SNAPSHOT_MODEL_VERSION = "screener-snapshot-v1"
 
 INVERSE_PERFORMANCE_COLUMNS = [
@@ -512,6 +515,32 @@ def snapshot_metadata(status: str, rows: int, data_as_of: Any = None, error: str
     if error:
         metadata["Error"] = str(error)
     return metadata
+
+
+def background_job_running(job_name: str) -> bool:
+    return (JOB_STATUS_DIR / f"{job_name}.lock").exists()
+
+
+def start_refresh_job(job: str) -> tuple[bool, str]:
+    job_name = job.replace("-", "_")
+    if background_job_running(job_name):
+        return False, f"{job_name} is already running"
+    JOB_STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    script_path = Path(__file__).with_name("refresh_jobs.py")
+    kwargs: dict[str, Any] = {
+        "cwd": str(Path(__file__).parent),
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen([sys.executable, str(script_path), job], **kwargs)
+    except Exception as exc:
+        return False, str(exc)
+    return True, f"{job_name} started"
 
 
 def build_universe_from_editor_df(editor_df: pd.DataFrame) -> tuple[dict, list]:
@@ -1423,7 +1452,9 @@ def compute_metrics_table(
     snapshot_key = snapshot_hash(universe_signature, divergence_signature)
     slow_df, slow_meta = read_snapshot_frame("screener_snapshot_latest", snapshot_key)
     previous_refresh_nonce = int(slow_meta.get("RefreshNonce", -1)) if str(slow_meta.get("RefreshNonce", "")).lstrip("-").isdigit() else -1
-    should_rebuild_snapshot = slow_df.empty or int(slow_refresh_nonce) > previous_refresh_nonce
+    requested_inline_refresh = int(slow_refresh_nonce) > 0 and int(slow_refresh_nonce) > previous_refresh_nonce
+    allow_inline_refresh = os.getenv("SCREENER_ALLOW_INLINE_ANALYTICS", "0").strip().lower() in {"1", "true", "yes"}
+    should_rebuild_snapshot = (slow_df.empty or requested_inline_refresh) and allow_inline_refresh
     if should_rebuild_snapshot:
         try:
             slow_df, slow_fetched_at_utc = compute_slow_metrics_table(
@@ -1450,6 +1481,15 @@ def compute_metrics_table(
                 slow_meta["Error"] = str(exc)
             else:
                 raise
+    elif slow_df.empty:
+        slow_meta = snapshot_metadata(
+            "SNAPSHOT_MISSING_WAITING_FOR_BACKGROUND_JOB",
+            0,
+            error="No screener snapshot found. Run the background nightly analytics job.",
+        )
+    elif requested_inline_refresh:
+        slow_meta = dict(slow_meta)
+        slow_meta["Status"] = "BACKGROUND_REFRESH_REQUESTED"
 
     perf_df, performance_fetched_at_utc, perf_meta = compute_performance_table(
         slow_df,
@@ -6108,6 +6148,8 @@ def main():
         st.session_state["performance_refresh_nonce"] = 0
     if "slow_refresh_nonce" not in st.session_state:
         st.session_state["slow_refresh_nonce"] = 0
+    if "nightly_job_notice" not in st.session_state:
+        st.session_state["nightly_job_notice"] = ""
     universe_map = st.session_state["universe_map"]
 
     st.markdown(
@@ -6231,11 +6273,12 @@ def main():
         st.session_state["performance_refresh_nonce"] += 1
         st.rerun()
     if hard_refresh:
-        st.session_state["performance_refresh_nonce"] += 1
-        st.session_state["slow_refresh_nonce"] += 1
-        st.cache_data.clear()
-        if hasattr(st, "cache_resource"):
-            st.cache_resource.clear()
+        started, message = start_refresh_job("nightly-analytics")
+        st.session_state["nightly_job_notice"] = (
+            "Nightly analytics job started in background."
+            if started
+            else f"Nightly analytics job was not started: {message}"
+        )
         st.rerun()
 
     divergence_cfg = render_divergence_settings()
@@ -6287,6 +6330,10 @@ def main():
             ),
             unsafe_allow_html=True,
         )
+    if background_job_running("nightly_analytics"):
+        st.info("Nightly analytics is running in the background. Snapshots will appear when it finishes.")
+    elif st.session_state.get("nightly_job_notice"):
+        st.caption(st.session_state["nightly_job_notice"])
 
     filtered_df, flow_unavailable = apply_filters(df)
     render_top_alpha_status(

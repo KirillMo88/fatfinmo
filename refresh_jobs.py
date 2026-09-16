@@ -5,6 +5,7 @@ import json
 import os
 import time
 from contextlib import contextmanager
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,10 @@ import positioning
 
 JOB_DIR = Path("persistent") / "job_status"
 JOB_LOG_PATH = JOB_DIR / "refresh_jobs.jsonl"
+DEFAULT_NIGHTLY_UTC = "02:30"
+DEFAULT_WEEKLY_POSITIONING_UTC = "12:30"
+DEFAULT_MARKET_PERFORMANCE_INTERVAL_SECONDS = 600
+DEFAULT_SCHEDULER_POLL_SECONDS = 30
 
 
 @contextmanager
@@ -50,6 +55,10 @@ def log_job(job: str, started: float, status: str, rows_updated: int = 0, source
     }
     with JOB_LOG_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
+def log_scheduler(message: str) -> None:
+    print(f"{pd.Timestamp.now(tz='UTC').isoformat()} {message}", flush=True)
 
 
 def default_divergence_config() -> tuple[dict[str, Any], str]:
@@ -135,9 +144,102 @@ def run_weekly_positioning() -> None:
         raise
 
 
+def parse_utc_hhmm(value: str, fallback: str) -> dt_time:
+    raw = (value or fallback).strip()
+    try:
+        hour_text, minute_text = raw.split(":", 1)
+        return dt_time(int(hour_text), int(minute_text), tzinfo=timezone.utc)
+    except Exception:
+        log_scheduler(f"Invalid UTC time {raw!r}; using {fallback}")
+        hour_text, minute_text = fallback.split(":", 1)
+        return dt_time(int(hour_text), int(minute_text), tzinfo=timezone.utc)
+
+
+def next_daily_run(now: datetime, run_at: dt_time) -> datetime:
+    candidate = datetime.combine(now.date(), run_at, tzinfo=timezone.utc)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def next_weekly_run(now: datetime, weekday: int, run_at: dt_time) -> datetime:
+    candidate = datetime.combine(now.date(), run_at, tzinfo=timezone.utc)
+    days_ahead = (weekday - now.weekday()) % 7
+    candidate += timedelta(days=days_ahead)
+    if candidate <= now:
+        candidate += timedelta(days=7)
+    return candidate
+
+
+def latest_screener_snapshot_time() -> datetime | None:
+    latest: datetime | None = None
+    for meta_path in app.SNAPSHOT_DIR.glob("screener_snapshot_latest_*.json"):
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+            calculated_at = pd.to_datetime(payload.get("CalculatedAt"), utc=True)
+            if pd.isna(calculated_at):
+                continue
+            ts = calculated_at.to_pydatetime()
+            if latest is None or ts > latest:
+                latest = ts
+        except Exception:
+            continue
+    return latest
+
+
+def run_job_safely(name: str, func) -> None:
+    try:
+        log_scheduler(f"Starting {name}")
+        func()
+        log_scheduler(f"Finished {name}")
+    except Exception as exc:
+        log_scheduler(f"{name} failed: {exc}")
+
+
+def run_scheduler() -> None:
+    nightly_at = parse_utc_hhmm(os.getenv("SCREENER_NIGHTLY_UTC", DEFAULT_NIGHTLY_UTC), DEFAULT_NIGHTLY_UTC)
+    weekly_at = parse_utc_hhmm(
+        os.getenv("SCREENER_WEEKLY_POSITIONING_UTC", DEFAULT_WEEKLY_POSITIONING_UTC),
+        DEFAULT_WEEKLY_POSITIONING_UTC,
+    )
+    overlay_interval = int(os.getenv("SCREENER_MARKET_PERFORMANCE_INTERVAL_SECONDS", str(DEFAULT_MARKET_PERFORMANCE_INTERVAL_SECONDS)))
+    poll_seconds = int(os.getenv("SCREENER_SCHEDULER_POLL_SECONDS", str(DEFAULT_SCHEDULER_POLL_SECONDS)))
+    weekly_weekday = int(os.getenv("SCREENER_WEEKLY_POSITIONING_WEEKDAY", "5"))
+
+    now = datetime.now(timezone.utc)
+    next_nightly = next_daily_run(now, nightly_at)
+    next_weekly = next_weekly_run(now, weekly_weekday, weekly_at)
+    next_overlay = time.time()
+
+    log_scheduler(
+        f"Scheduler started; nightly={next_nightly.isoformat()}, "
+        f"weekly_positioning={next_weekly.isoformat()}, overlay_interval={overlay_interval}s"
+    )
+
+    if os.getenv("SCREENER_RUN_NIGHTLY_ON_START_IF_MISSING", "1").strip().lower() in {"1", "true", "yes"}:
+        if latest_screener_snapshot_time() is None:
+            run_job_safely("nightly_analytics_startup", run_nightly_analytics)
+
+    while True:
+        now_dt = datetime.now(timezone.utc)
+        now_seconds = time.time()
+        if now_dt >= next_nightly:
+            run_job_safely("nightly_analytics", run_nightly_analytics)
+            next_nightly = next_daily_run(datetime.now(timezone.utc), nightly_at)
+            log_scheduler(f"Next nightly_analytics={next_nightly.isoformat()}")
+        if now_dt >= next_weekly:
+            run_job_safely("weekly_positioning", run_weekly_positioning)
+            next_weekly = next_weekly_run(datetime.now(timezone.utc), weekly_weekday, weekly_at)
+            log_scheduler(f"Next weekly_positioning={next_weekly.isoformat()}")
+        if now_seconds >= next_overlay:
+            run_job_safely("market_performance_10m", update_market_performance_overlay)
+            next_overlay = time.time() + max(60, overlay_interval)
+        time.sleep(max(5, poll_seconds))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screener refresh jobs")
-    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "weekly-positioning"])
+    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "weekly-positioning", "scheduler"])
     args = parser.parse_args()
     if args.job == "market-performance":
         update_market_performance_overlay()
@@ -145,6 +247,8 @@ def main() -> None:
         run_nightly_analytics()
     elif args.job == "weekly-positioning":
         run_weekly_positioning()
+    elif args.job == "scheduler":
+        run_scheduler()
 
 
 if __name__ == "__main__":
