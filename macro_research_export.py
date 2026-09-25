@@ -250,6 +250,7 @@ def build_weekly_macro_dataset(
     add_business_cycle_model_outputs(dataset, metadata, api_key)
     add_market_regime_outputs(dataset, metadata, api_key)
     add_gold_regime_outputs(dataset, metadata, api_key)
+    add_gold_structural_macro2_outputs(dataset, metadata, api_key)
     add_btc_regime_outputs(dataset, metadata)
     add_model_versions(dataset, metadata)
     model_metadata = build_model_metadata()
@@ -777,6 +778,64 @@ def add_gold_regime_outputs(dataset: pd.DataFrame, metadata: list[SeriesMeta], a
             metadata.append(SeriesMeta(out_col, "MODEL_OUTPUT", "Gold Regime", out_col, "score/state", "Missing optional production history column", "Gold Regime", "weekly", "Gold Regime", notes="Column unavailable in persisted history"))
 
 
+def add_gold_structural_macro2_outputs(dataset: pd.DataFrame, metadata: list[SeriesMeta], api_key: str | None) -> None:
+    """Export the horizon model separately while keeping the legacy Gold fields intact."""
+    try:
+        from gold_regime import build_gold_regime_snapshot, gold_regime_config
+        from gold_regime.macro2 import macro2_export_columns
+
+        snapshot = build_gold_regime_snapshot(gold_alpha=50.0, fred_api_key=api_key, config=gold_regime_config())
+        history = snapshot.structural_macro2.history if snapshot.structural_macro2 is not None else pd.DataFrame()
+        columns = macro2_export_columns()
+    except Exception:
+        history = pd.DataFrame()
+        columns = []
+
+    if history.empty:
+        for column in columns:
+            if column == "date":
+                continue
+            metadata.append(
+                SeriesMeta(
+                    column,
+                    "MODEL_OUTPUT",
+                    "Gold Regime",
+                    f"Gold Structural Macro 2: {column}",
+                    "state" if column.endswith("_State") or column in {"Gold_Rate_Regime", "BusinessCycleState"} else "score/value",
+                    "Missing optional production history",
+                    "Gold Structural Macro 2",
+                    "weekly",
+                    "Gold Regime",
+                    notes="Macro 2 history unavailable",
+                )
+            )
+        return
+
+    frame = prepare_date_frame(history, "date")
+    for column in columns:
+        if column == "date":
+            continue
+        unit = "state" if column.endswith("_State") or column in {"Gold_Rate_Regime", "BusinessCycleState"} else "score/value"
+        if column in frame.columns:
+            add_frame_column(
+                dataset,
+                column,
+                frame,
+                column,
+                metadata,
+                "MODEL_OUTPUT",
+                "Gold Regime",
+                f"Gold Structural Macro 2: {column}",
+                unit,
+                "weekly",
+                "Gold Regime",
+                point_in_time="Recomputed current production model; trailing 156W point-in-time percentiles",
+            )
+        else:
+            dataset[column] = np.nan
+            metadata.append(SeriesMeta(column, "MODEL_OUTPUT", "Gold Regime", f"Gold Structural Macro 2: {column}", unit, "Missing optional production history column", "Gold Structural Macro 2", "weekly", "Gold Regime", notes="Column unavailable in calculated history"))
+
+
 def add_btc_regime_outputs(dataset: pd.DataFrame, metadata: list[SeriesMeta]) -> None:
     try:
         _, monthly, weekly = read_global_liquidity()
@@ -911,14 +970,23 @@ def write_macro_research_workbook(
     from openpyxl import Workbook
 
     workbook = Workbook(write_only=True)
-    for sheet_name, frame in {
+    sheets = {
         "Weekly_Data": weekly_data,
         "Metadata": metadata_df,
         "Data_Quality": data_quality,
         "Positioning_Metadata": positioning_metadata,
         "Model_Metadata": model_metadata,
         "Release_Lag_Info": release_lag_info(metadata),
-    }.items():
+    }
+    try:
+        from gold_regime.macro2 import macro2_export_columns
+
+        macro2_columns = ["Date"] + [column for column in macro2_export_columns() if column != "date" and column in weekly_data.columns]
+        if len(macro2_columns) > 1:
+            sheets["Gold Structural Macro 2"] = weekly_data[macro2_columns]
+    except Exception:
+        pass
+    for sheet_name, frame in sheets.items():
         write_dataframe_sheet(workbook, sheet_name, frame, freeze_first_column=(sheet_name == "Weekly_Data"))
     workbook.save(output)
     return output.getvalue()
@@ -1084,6 +1152,7 @@ def build_model_metadata() -> pd.DataFrame:
         ("Rates & Financial Conditions", RATES_FC_MODEL_VERSION, "RatesFinancialConditionsRegime", "Rates direction x core financial conditions direction", "0.65 US2Y momentum + 0.35 real yield momentum; core FC direction 0.45 credit + 0.30 DXY + 0.25 MOVE", "DGS2 + DFII10 + HY/IG OAS + DXY + MOVE; NFCI/ANFCI confirmation only", "13W / 26W", "refresh_rates_fc_snapshot()", "Expanding 156W z-scores; NFCI/ANFCI/Fed Funds initial releases; other histories remain current vintages"),
         ("Funding Conditions", FUNDING_MODEL_VERSION, "FundingState", "Rule-based USD funding-system state", "FundingCore = 0.60 money-market stress + 0.40 reserve pressure; MOVE separate", "SOFR99 + DFF + WRESBAL + GDP; IORB/MOVE diagnostics", "daily / weekly", "refresh_funding_snapshot()", "FRED initial releases; expanding point-in-time normalization; production weekly snapshot"),
         ("Gold Regime", GOLD_REGIME_VERSION, "GoldStructuralMacro", "Gold structural macro backdrop", "Existing production function", "DXY + real yield + US2Y", "medium-term", "build_gold_regime_snapshot()", "Exported only when production history exposes column"),
+        ("Gold Regime", "GOLD_STRUCTURAL_MACRO_2_V1", "GLD_MACRO_3M/6M/9M/12M", "Gold horizon macro scores", "Core Macro + SovereignStressOverlay + BusinessCycleModifier, clamped to 0-100", "GLD + DXY + DFII10 + DGS2/DGS10 + JP10Y + liquidity + T5YIE/T10YIE + BusinessCycleState", "3-12M", "calculate_gold_structural_macro2_history()", "156-week point-in-time percentiles; minimum 104 observations; 9M/12M exclude liquidity"),
         ("BTC Regime", BTC_REGIME_VERSION, "BTCForwardMacroRisk", "Forward BTC macro headwind", "Existing production function", "Global M2 + DXY + US2Y + Credit", "8-26W", "_build_btc_macro_frame()", "Recomputed over history using current model"),
         ("Positioning", POSITIONING_VERSION, "CFTC wide fields", "Canonical CFTC participant history", "Unified positioning pipeline", "CFTC_Master processed parquet", "weekly", "load_positioning_data()", "Report date convention; publication date unavailable"),
     ]

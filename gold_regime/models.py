@@ -15,6 +15,12 @@ class Freshness:
 
 
 @dataclass(frozen=True)
+class GoldStructuralMacro2Snapshot:
+    current: dict[str, Any]
+    history: pd.DataFrame
+
+
+@dataclass(frozen=True)
 class GoldRegimeSnapshot:
     current: dict[str, Any]
     history: pd.DataFrame
@@ -22,3 +28,4 @@ class GoldRegimeSnapshot:
     etf_available_tickers: list[str] = field(default_factory=list)
     cot_contract_market_name: str | None = None
     freshness: dict[str, Freshness] = field(default_factory=dict)
+    structural_macro2: GoldStructuralMacro2Snapshot | None = None
