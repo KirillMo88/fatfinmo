@@ -346,6 +346,8 @@ FAST_PERFORMANCE_COLUMNS = [
     "Perf_12M_%",
 ]
 
+AI_GROUP_FORWARD_FILL_LIMIT = 5
+
 PERFORMANCE_REFERENCE_COLUMNS = [
     "PerfRef_1D",
     "PerfRef_1W",
@@ -1026,13 +1028,32 @@ def detect_divergence_for_indicator(
 # ============================================================
 # 4) Metrics function (same logic)
 # ============================================================
-@st.cache_data(show_spinner=False, ttl=SLOW_REFRESH_SECONDS)
-def build_ai_group_ohlcv(group_label: str, period: str = "10y") -> pd.DataFrame:
-    canonical = canonical_ai_group_label(group_label)
-    members = AI_UNIVERSE.get(canonical, [])
+def _aggregate_ai_group_ohlcv(normalized_frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Aggregate normalized members without changing weights on short data gaps."""
+    columns = ["Open", "High", "Low", "Close", "Volume"]
+    if not normalized_frames:
+        return pd.DataFrame(columns=columns)
+
+    common_start = max(frame.index.min() for frame in normalized_frames.values())
+    combined_index = sorted(set().union(*(frame.index for frame in normalized_frames.values())))
+    aligned_frames = {
+        member: frame.reindex(combined_index).ffill(limit=AI_GROUP_FORWARD_FILL_LIMIT)
+        for member, frame in normalized_frames.items()
+    }
+    combined = pd.concat(aligned_frames, axis=1).sort_index()
+    combined = combined.loc[combined.index >= common_start]
+    out = pd.DataFrame(index=combined.index)
+    for column in ["Open", "High", "Low", "Close"]:
+        # Forward-fill covers holidays and short Yahoo gaps; the mean therefore
+        # keeps the same member weights instead of jumping when one row is absent.
+        out[column] = combined.xs(column, axis=1, level=1).mean(axis=1, skipna=False)
+    out["Volume"] = combined.xs("Volume", axis=1, level=1).sum(axis=1, min_count=1)
+    return out.dropna(subset=["Close"]).sort_index()
+
+
+def _normalize_ai_member_frames(frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     normalized_frames: dict[str, pd.DataFrame] = {}
-    for member in members:
-        frame = download_completed_ohlcv(member, period=period)
+    for member, frame in frames.items():
         if frame.empty:
             continue
         close = pd.to_numeric(frame.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
@@ -1045,50 +1066,23 @@ def build_ai_group_ohlcv(group_label: str, period: str = "10y") -> pd.DataFrame:
         for column in ["Open", "High", "Low", "Close"]:
             normalized[column] = pd.to_numeric(normalized[column], errors="coerce") / base * 100.0
         normalized["Volume"] = pd.to_numeric(normalized["Volume"], errors="coerce")
-        normalized_frames[member] = normalized
+        normalized_frames[member] = normalized.sort_index()
+    return normalized_frames
 
-    if not normalized_frames:
-        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
-    combined = pd.concat(normalized_frames, axis=1).sort_index()
-    out = pd.DataFrame(index=combined.index)
-    for column in ["Open", "High", "Low", "Close"]:
-        out[column] = combined.xs(column, axis=1, level=1).mean(axis=1, skipna=True)
-    out["Volume"] = combined.xs("Volume", axis=1, level=1).sum(axis=1, min_count=1)
-    return out.dropna(subset=["Close"]).sort_index()
+@st.cache_data(show_spinner=False, ttl=SLOW_REFRESH_SECONDS)
+def build_ai_group_ohlcv(group_label: str, period: str = "10y") -> pd.DataFrame:
+    canonical = canonical_ai_group_label(group_label)
+    frames = {member: download_completed_ohlcv(member, period=period) for member in AI_UNIVERSE.get(canonical, [])}
+    return _aggregate_ai_group_ohlcv(_normalize_ai_member_frames(frames))
 
 
 @st.cache_data(show_spinner=False, ttl=AUTO_REFRESH_SECONDS)
 def build_ai_group_latest_ohlcv(group_label: str, period: str = "10y", refresh_bucket: int = 0) -> pd.DataFrame:
     _ = refresh_bucket
     canonical = canonical_ai_group_label(group_label)
-    members = AI_UNIVERSE.get(canonical, [])
-    normalized_frames: dict[str, pd.DataFrame] = {}
-    for member in members:
-        frame = download_latest_ohlcv(member, period=period)
-        if frame.empty:
-            continue
-        close = pd.to_numeric(frame.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
-        if close.empty:
-            continue
-        base = float(close.iloc[0])
-        if not np.isfinite(base) or base == 0.0:
-            continue
-        normalized = frame[["Open", "High", "Low", "Close", "Volume"]].copy()
-        for column in ["Open", "High", "Low", "Close"]:
-            normalized[column] = pd.to_numeric(normalized[column], errors="coerce") / base * 100.0
-        normalized["Volume"] = pd.to_numeric(normalized["Volume"], errors="coerce")
-        normalized_frames[member] = normalized
-
-    if not normalized_frames:
-        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-
-    combined = pd.concat(normalized_frames, axis=1).sort_index()
-    out = pd.DataFrame(index=combined.index)
-    for column in ["Open", "High", "Low", "Close"]:
-        out[column] = combined.xs(column, axis=1, level=1).mean(axis=1, skipna=True)
-    out["Volume"] = combined.xs("Volume", axis=1, level=1).sum(axis=1, min_count=1)
-    return out.dropna(subset=["Close"]).sort_index()
+    frames = {member: download_latest_ohlcv(member, period=period) for member in AI_UNIVERSE.get(canonical, [])}
+    return _aggregate_ai_group_ohlcv(_normalize_ai_member_frames(frames))
 
 
 def download_metrics_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
@@ -1369,7 +1363,10 @@ def compute_performance_table(slow_df: pd.DataFrame, overlay_key: str, refresh_n
         previous = previous_by_key.get(key)
         current_price = lightweight_current_price(ticker, refresh_bucket=refresh_bucket)
         if not np.isfinite(current_price):
-            current_price = pd.to_numeric(pd.Series([previous.get("CurrentPrice") if previous is not None else row.get("CurrentPrice")]), errors="coerce").iloc[0]
+            fallback_price = row.get("CurrentPrice")
+            if not is_ai_group_label(ticker) and previous is not None:
+                fallback_price = previous.get("CurrentPrice", fallback_price)
+            current_price = pd.to_numeric(pd.Series([fallback_price]), errors="coerce").iloc[0]
         values = overlay_performance_from_refs(row, current_price)
         if previous is not None:
             for col in FAST_PERFORMANCE_COLUMNS:
