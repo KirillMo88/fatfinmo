@@ -114,13 +114,16 @@ EXPORT_FRED_SERIES = {
 }
 CORE_CFTC_EXPORT = [
     ("S&P 500", "Asset Manager", "SP500_AM"),
+    ("S&P 500", "Leveraged Money", "SP500_LM"),
     ("NASDAQ-100", "Asset Manager", "NASDAQ100_AM"),
+    ("NASDAQ-100", "Leveraged Money", "NASDAQ100_LM"),
     ("VIX", "Asset Manager", "VIX_AM"),
     ("UST 2Y", "Leveraged Money", "UST2Y_LM"),
     ("UST 10Y", "Leveraged Money", "UST10Y_LM"),
     ("GOLD", "Managed Money", "Gold_MM"),
     ("WTI", "Managed Money", "WTI_MM"),
     ("BTC", "Leveraged Money", "BTC_LM"),
+    ("BTC", "Asset Manager", "BTC_AM"),
 ]
 
 

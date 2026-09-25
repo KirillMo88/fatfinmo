@@ -1,6 +1,6 @@
 import pandas as pd
 
-from macro_research_export import SeriesMeta, filter_export_components
+from macro_research_export import CORE_CFTC_EXPORT, SeriesMeta, filter_export_components
 
 
 def test_export_filters_keep_date_and_selected_layer_aligned():
@@ -45,3 +45,13 @@ def test_export_filters_support_category():
 
     assert list(filtered.columns) == ["Date", "Market"]
     assert [meta.column for meta in filtered_metadata] == ["Date", "Market"]
+
+
+def test_cftc_participant_series_are_included_in_macro_export():
+    expected = {
+        ("S&P 500", "Leveraged Money", "SP500_LM"),
+        ("NASDAQ-100", "Leveraged Money", "NASDAQ100_LM"),
+        ("BTC", "Asset Manager", "BTC_AM"),
+    }
+
+    assert expected.issubset(set(CORE_CFTC_EXPORT))
