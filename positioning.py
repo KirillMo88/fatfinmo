@@ -17,6 +17,7 @@ import requests
 DISAGGREGATED_URL = "https://publicreporting.cftc.gov/api/v3/views/72hh-3qpy/export.csv"
 TFF_URL = "https://publicreporting.cftc.gov/api/v3/views/gpe5-46if/export.csv"
 AAII_URL = "https://www.aaii.com/files/surveys/sentiment.xls"
+AAII_RESULTS_URL = "https://www.aaii.com/sentimentsurvey/sent_results"
 NAAIM_URL = "https://naaim.org/programs/naaim-exposure-index/"
 NAAIM_TABLE_URL = "https://index.naaim.org/embeddable/table"
 
@@ -30,6 +31,12 @@ CFTC_PERCENTILE_MIN_PERIODS = 52
 CFTC_STALE_DAYS = 10
 CFTC_UPDATE_FREQUENCY = "Weekly"
 CFTC_SCHEDULED_UPDATE_DAY = "Saturday"
+AAII_HISTORICAL_FILENAME = "aaii_historical.xls"
+AAII_BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/vnd.ms-excel,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 EXCEL_MAX_ROWS = 1_048_000
 
 
@@ -290,6 +297,17 @@ def resolve_canonical_contracts(master: pd.DataFrame) -> pd.DataFrame:
         candidates = out.loc[out["Report_Type"] == cfg.report_type].copy()
         if candidates.empty:
             continue
+        if cfg.canonical_asset == "WTI":
+            wti_mask = (
+                (out["Report_Type"] == cfg.report_type)
+                & out["CFTC_Code"].astype(str).str.contains("|".join(re.escape(code) for code in cfg.code_patterns), case=False, na=False)
+                & out["Raw_Contract_Name"].astype(str).str.upper().str.contains("CRUDE OIL, LIGHT SWEET|WTI-PHYSICAL", regex=True, na=False)
+            )
+            if wti_mask.any():
+                out.loc[wti_mask, "Canonical_Asset"] = cfg.canonical_asset
+                out.loc[wti_mask, "Asset_Group"] = cfg.asset_group
+                out.loc[wti_mask, "Preferred_For_Dashboard"] = True
+                continue
         selected_name = select_contract_name(candidates, cfg)
         if not selected_name:
             continue
@@ -318,21 +336,15 @@ def calculate_cftc_positioning_metrics(master: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_aaii_metrics(raw: pd.DataFrame) -> pd.DataFrame:
-    if raw is None or raw.empty:
-        return pd.DataFrame(columns=aaii_columns())
-    frame = normalize_columns(raw)
-    date_col = find_column(frame, ["date", "week", "reported"])
-    bullish_col = find_column(frame, ["bullish"])
-    neutral_col = find_column(frame, ["neutral"])
-    bearish_col = find_column(frame, ["bearish"])
-    if not date_col or not bullish_col or not neutral_col or not bearish_col:
+    normalized = normalize_aaii_raw(raw)
+    if normalized.empty:
         return pd.DataFrame(columns=aaii_columns())
     out = pd.DataFrame(
         {
-            "Date": pd.to_datetime(frame[date_col], errors="coerce"),
-            "AAII_Bullish": percent_number(frame[bullish_col]),
-            "AAII_Neutral": percent_number(frame[neutral_col]),
-            "AAII_Bearish": percent_number(frame[bearish_col]),
+            "Date": pd.to_datetime(normalized["Date"], errors="coerce"),
+            "AAII_Bullish": percent_number(normalized["Bullish"]),
+            "AAII_Neutral": percent_number(normalized["Neutral"]),
+            "AAII_Bearish": percent_number(normalized["Bearish"]),
         }
     ).dropna(subset=["Date"])
     out = out.sort_values("Date").drop_duplicates(subset=["Date"], keep="last")
@@ -341,6 +353,46 @@ def calculate_aaii_metrics(raw: pd.DataFrame) -> pd.DataFrame:
     out["AAII_Bearish_3Y_Percentile"] = trailing_percentile(out["AAII_Bearish"], CFTC_PERCENTILE_WINDOW, CFTC_PERCENTILE_MIN_PERIODS)
     out["AAII_BullBearSpread_3Y_Percentile"] = trailing_percentile(out["AAII_BullBearSpread"], CFTC_PERCENTILE_WINDOW, CFTC_PERCENTILE_MIN_PERIODS)
     return out[aaii_columns()]
+
+
+def normalize_aaii_raw(raw: pd.DataFrame | None) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=["Date", "Bullish", "Neutral", "Bearish"])
+    promoted = promote_aaii_embedded_header(raw)
+    frame = normalize_columns(promoted)
+    date_col = find_column(frame, ["date"]) or find_column(frame, ["reported"]) or find_column(frame, ["week"])
+    bullish_col = find_column(frame, ["bullish"])
+    neutral_col = find_column(frame, ["neutral"])
+    bearish_col = find_column(frame, ["bearish"])
+    if not date_col or not bullish_col or not neutral_col or not bearish_col:
+        return pd.DataFrame(columns=["Date", "Bullish", "Neutral", "Bearish"])
+    return pd.DataFrame(
+        {
+            "Date": frame[date_col],
+            "Bullish": frame[bullish_col],
+            "Neutral": frame[neutral_col],
+            "Bearish": frame[bearish_col],
+        }
+    )
+
+
+def promote_aaii_embedded_header(raw: pd.DataFrame) -> pd.DataFrame:
+    frame = raw.copy()
+    normalized_columns = {str(column).strip().lower() for column in frame.columns}
+    if any("date" in column for column in normalized_columns) and {"bullish", "neutral", "bearish"}.issubset(normalized_columns):
+        return frame
+    for idx in range(min(len(frame), 25)):
+        cells = [str(value).strip().lower() for value in frame.iloc[idx].tolist()]
+        has_date = any(cell == "date" or "reported" in cell and "date" in cell for cell in cells)
+        if has_date and "bullish" in cells and "neutral" in cells and "bearish" in cells:
+            header = []
+            for pos, value in enumerate(frame.iloc[idx].tolist()):
+                text = str(value).strip()
+                header.append(text if text and text.lower() != "nan" else f"Column_{pos}")
+            out = frame.iloc[idx + 1 :].copy()
+            out.columns = header
+            return out
+    return frame
 
 
 def calculate_naaim_metrics(raw: pd.DataFrame) -> pd.DataFrame:
@@ -387,13 +439,50 @@ def annotate_source_schedule(source_status: dict[str, Any], label: str) -> None:
 
 
 def download_aaii(status: dict[str, Any], force: bool = False) -> pd.DataFrame:
-    raw_path = RAW_DIR / "aaii.xls"
-    if raw_path.exists() and not force:
+    historical_path = RAW_DIR / AAII_HISTORICAL_FILENAME
+    if not force:
         cached = read_processed("aaii")
         if not cached.empty:
             return cached
+    cached = read_processed("aaii")
+    source_frames: list[pd.DataFrame] = []
+    source_details: dict[str, Any] = {
+        "last_updated_utc": now_utc_iso(),
+        "source": AAII_RESULTS_URL,
+        "historical_source": str(historical_path),
+    }
+    historical_error = None
+    live_error = None
     try:
-        request = Request(AAII_URL, headers={"User-Agent": "Mozilla/5.0 Screener positioning pipeline"})
+        historical = read_aaii_historical_workbook(historical_path)
+        if not historical.empty:
+            source_frames.append(historical)
+            source_details["historical_rows"] = int(len(historical))
+    except Exception as exc:
+        historical_error = str(exc)
+    try:
+        live = download_aaii_live_results()
+        if not live.empty:
+            source_frames.append(live)
+            source_details["live_rows"] = int(len(live))
+    except Exception as exc:
+        live_error = str(exc)
+    if source_frames:
+        out = calculate_aaii_metrics(pd.concat(source_frames, ignore_index=True))
+        source_details["rows"] = int(len(out))
+        if live_error:
+            source_details["live_status"] = "SOURCE_FAILED"
+            source_details["live_error"] = live_error
+        else:
+            source_details["live_status"] = "CURRENT"
+        if historical_error:
+            source_details["historical_error"] = historical_error
+        source_details["status"] = "CURRENT" if not live_error else "HISTORICAL_CURRENT_LIVE_FAILED"
+        status["AAII"] = source_details
+        return out
+    try:
+        raw_path = RAW_DIR / "aaii.xls"
+        request = Request(AAII_URL, headers=AAII_BROWSER_HEADERS)
         with urlopen(request, timeout=30) as response:
             content = response.read()
         raw_path.write_bytes(content)
@@ -402,8 +491,41 @@ def download_aaii(status: dict[str, Any], force: bool = False) -> pd.DataFrame:
         status["AAII"] = {"last_updated_utc": now_utc_iso(), "source": AAII_URL, "status": "CURRENT", "rows": int(len(out))}
         return out
     except Exception as exc:
-        status["AAII"] = {"last_updated_utc": now_utc_iso(), "source": AAII_URL, "status": "SOURCE_FAILED_USING_CACHE", "error": str(exc)}
-        return read_processed("aaii")
+        source_details["status"] = "SOURCE_FAILED_USING_CACHE" if not cached.empty else "SOURCE_FAILED_NO_CACHE"
+        source_details["legacy_source"] = AAII_URL
+        source_details["legacy_error"] = str(exc)
+        if historical_error:
+            source_details["historical_error"] = historical_error
+        if live_error:
+            source_details["live_error"] = live_error
+        status["AAII"] = source_details
+        return cached
+
+
+def read_aaii_historical_workbook(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=["Date", "Bullish", "Neutral", "Bearish"])
+    excel = pd.ExcelFile(path)
+    sheet_name = "SENTIMENT" if "SENTIMENT" in excel.sheet_names else excel.sheet_names[0]
+    raw = pd.read_excel(path, sheet_name=sheet_name, header=None)
+    return normalize_aaii_raw(raw)
+
+
+def download_aaii_live_results() -> pd.DataFrame:
+    response = requests.get(AAII_RESULTS_URL, headers=AAII_BROWSER_HEADERS, timeout=30)
+    response.raise_for_status()
+    return parse_aaii_live_results_html(response.text)
+
+
+def parse_aaii_live_results_html(html: str) -> pd.DataFrame:
+    tables = pd.read_html(io.StringIO(html))
+    for table in tables:
+        normalized = normalize_aaii_raw(table)
+        if not normalized.empty:
+            parsed_dates = pd.to_datetime(normalized["Date"], errors="coerce")
+            if parsed_dates.notna().any():
+                return normalized
+    return pd.DataFrame(columns=["Date", "Bullish", "Neutral", "Bearish"])
 
 
 def download_naaim(status: dict[str, Any], force: bool = False) -> pd.DataFrame:

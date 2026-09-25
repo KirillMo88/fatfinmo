@@ -5,7 +5,7 @@ import pandas as pd
 
 from fund_flows import FundFlowObservation
 from gold_regime.config import gold_regime_config
-from gold_regime.cot import calculate_cot_momentum_score, download_cftc_cot, extract_comex_gold_cot, normalize_cot_columns
+from gold_regime.cot import calculate_cot_momentum_score, download_cftc_cot, extract_comex_gold_cot, load_comex_gold_cot_from_positioning, normalize_cot_columns
 from gold_regime.etf_flows import aggregate_gold_etf_flows, load_gold_etf_flows
 from gold_regime.macro import calculate_gold_macro_history
 from gold_regime.regime import calculate_gold_tactical_flow, determine_flow_flags, determine_gold_regime
@@ -118,6 +118,39 @@ def test_cot_managed_money_net_and_publication_availability(tmp_path):
     assert scored["date"].iloc[0].day_name() == "Friday"
     assert scored["cot_report_date"].iloc[0].strftime("%Y-%m-%d") == "2020-01-07"
     assert np.isclose(scored["cot_change_4w"].iloc[4], 0.004)
+
+
+def test_gold_cot_can_load_from_unified_positioning(monkeypatch):
+    import positioning
+
+    dates = pd.date_range("2020-01-07", periods=120, freq="W-TUE")
+    master = pd.DataFrame(
+        {
+            "Date": dates,
+            "Canonical_Asset": ["GOLD"] * len(dates),
+            "Preferred_For_Dashboard": [True] * len(dates),
+            "Participant_Category": ["Managed Money"] * len(dates),
+            "Raw_Contract_Name": ["GOLD - COMMODITY EXCHANGE INC."] * len(dates),
+            "Exchange": ["COMMODITY EXCHANGE INC."] * len(dates),
+            "Open_Interest": [1000] * len(dates),
+            "Long": np.arange(500, 620),
+            "Short": [300] * len(dates),
+            "Spreading": [0] * len(dates),
+            "Net": np.arange(200, 320),
+            "NetPctOI": np.arange(20.0, 32.0, 0.1),
+            "NetPctOI_3Y_Percentile": np.linspace(10.0, 90.0, len(dates)),
+            "NetPctOI_4W_Change": [np.nan] * 4 + [0.4] * (len(dates) - 4),
+        }
+    )
+    monkeypatch.setattr(positioning, "read_processed", lambda name: master if name == "cftc_master" else pd.DataFrame())
+
+    cot, contract = load_comex_gold_cot_from_positioning()
+
+    assert contract == "GOLD - COMMODITY EXCHANGE INC."
+    assert cot["date"].iloc[0].day_name() == "Friday"
+    assert np.isclose(cot["cot_mm_net_pct_oi"].iloc[0], 0.20)
+    assert np.isclose(cot["cot_change_4w"].iloc[-1], 0.004)
+    assert np.isfinite(cot["cot_momentum_score"].dropna().iloc[-1])
 
 
 def test_cot_normalization_drops_duplicate_columns():

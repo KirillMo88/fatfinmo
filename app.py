@@ -44,6 +44,8 @@ from market_model import (
     calculate_macro_transition_risk_history,
     calculate_market_model,
     calculate_overall_transition_status,
+    calculate_positioning_risk_history,
+    calculate_tail_risk_history,
     classify_global_liquidity_backdrop,
     download_fred_market_data,
     market_model_config,
@@ -52,10 +54,20 @@ from market_model import (
 from table_export import dataframe_to_excel_xls_bytes
 from ai_dashboard import AI_GROUP_LABELS, AI_UNIVERSE, canonical_ai_group_label, is_ai_group_label
 from ai_dashboard_tab import render_ai_dashboard_tab
+from business_cycle_tab import render_business_cycle_tab
 from cio_view import render_cio_view_tab
 from cftc_cot_tab import render_cftc_cot_tab
 from global_macro_tab import render_global_macro_tab
+from global_dashboard_tab import render_global_dashboard_tab
+from liquidity_forecast import read_forecast_snapshot
+from liquidity_forecast_tab import render_liquidity_forecast
+from rates_financial_conditions_tab import render_rates_financial_conditions_tab
+from funding_conditions_tab import render_funding_conditions_tab
+from financial_fragility_tab import render_financial_fragility_tab
+from treasury_fiscal_regime_tab import render_treasury_fiscal_regime_tab
+from treasury_funding_policy import read_snapshot as read_treasury_funding_policy_snapshot
 from gold_regime_tab import render_gold_regime_tab
+from market_cycle_tab import render_market_cycle_tab
 from global_liquidity import (
     GLOBAL_LIQUIDITY_STORAGE_DIR,
     freshness as global_liquidity_freshness,
@@ -1803,6 +1815,187 @@ def render_key_value_table(rows: list[tuple[str, str]]) -> None:
     st.dataframe(pd.DataFrame(rows, columns=["Metric", "Value"]), use_container_width=True, hide_index=True)
 
 
+def _liquidity_latest_numeric(frame: pd.DataFrame, column: str) -> float:
+    if frame.empty or column not in frame.columns:
+        return np.nan
+    values = pd.to_numeric(frame[column], errors="coerce").dropna()
+    return float(values.iloc[-1]) if not values.empty else np.nan
+
+
+def _liquidity_ordinary_roc(frame: pd.DataFrame, column: str, periods: int) -> float:
+    if frame.empty or column not in frame.columns or periods < 1:
+        return np.nan
+    values = pd.to_numeric(frame[column], errors="coerce").dropna()
+    if len(values) <= periods:
+        return np.nan
+    current = float(values.iloc[-1])
+    previous = float(values.iloc[-(periods + 1)])
+    if not np.isfinite(current) or not np.isfinite(previous) or previous == 0:
+        return np.nan
+    return (current / previous - 1.0) * 100.0
+
+
+def _liquidity_roc_momentum(frame: pd.DataFrame, column: str, momentum_months: int) -> float:
+    """Return the change in the 52-week ROC over the requested month lag."""
+    if frame.empty or column not in frame.columns or momentum_months < 1:
+        return np.nan
+    values = pd.to_numeric(frame[column], errors="coerce")
+    roc_52w = values.pct_change(12, fill_method=None) * 100.0
+    momentum = roc_52w.diff(momentum_months).dropna()
+    return float(momentum.iloc[-1]) if not momentum.empty else np.nan
+
+
+def _liquidity_cycle_maturity_pct(value: Any) -> float:
+    if value is None or pd.isna(value):
+        return np.nan
+    return _liquidity_cycle_months_since_anchor(pd.Timestamp(value)) / 65.0 * 100.0
+
+
+def _liquidity_fmt_roc(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{float(value):+.1f}%"
+
+
+def _liquidity_display_state(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() == "nan":
+        return "n/a"
+    return text.replace("_", " ").title()
+
+
+def _liquidity_percentile_status(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    percentile = float(value)
+    if not np.isfinite(percentile):
+        return "n/a"
+    if percentile >= 90.0:
+        return "EXTREME ACCELERATION"
+    if percentile >= 70.0:
+        return "ACCELERATION"
+    if percentile >= 40.0:
+        return "NEUTRAL"
+    if percentile >= 10.0:
+        return "DECELERATION"
+    return "EXTREME DECELERATION"
+
+
+def _render_liquidity_summary_block(title: str, value: str, rows: list[tuple[str, str]]) -> None:
+    safe_title = html.escape(title)
+    safe_value = html.escape(value)
+    body = "".join(
+        "<div style='display:flex;align-items:baseline;gap:0.7rem;padding:0.12rem 0;background:transparent !important;'>"
+        f"<span style='white-space:nowrap;color:#cbd5e1;font-size:1rem;'>{html.escape(label)}</span>"
+        f"<span style='white-space:nowrap;color:#f8fafc;font-size:1.15rem;font-weight:800;text-align:left;'>{html.escape(row_value)}</span>"
+        "</div>"
+        for label, row_value in rows
+    )
+    st.markdown(
+        f"""
+<div style="padding:0.2rem 0 0.65rem 0;line-height:1.25;">
+  <div style="color:#94a3b8;font-size:0.68rem;font-weight:700;margin-bottom:0.12rem;white-space:nowrap;">{safe_title}</div>
+  <div style="color:#f8fafc;font-size:1.4rem;font-weight:800;line-height:1.15;margin-bottom:0.3rem;white-space:nowrap;">{safe_value}</div>
+  <div style="width:100%;background:transparent !important;">{body}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame, latest: dict[str, Any]) -> None:
+    forecast_frame, _ = read_forecast_snapshot()
+    valid_forecast = (
+        forecast_frame.loc[forecast_frame.get("LiquidityForwardSignal", pd.Series(dtype="object")).notna()]
+        if not forecast_frame.empty and "LiquidityForwardSignal" in forecast_frame.columns
+        else pd.DataFrame()
+    )
+    forecast_signal = valid_forecast.iloc[-1].get("LiquidityForwardSignal", "n/a") if not valid_forecast.empty else "n/a"
+
+    treasury = read_treasury_funding_policy_snapshot()
+    refinancing = _liquidity_latest_numeric(treasury.monthly, "near_term_refinancing_pressure")
+    latest_date = pd.to_datetime(latest.get("date"), errors="coerce")
+    current_date = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    if pd.notna(latest_date):
+        latest_date = min(pd.Timestamp(latest_date).normalize(), current_date)
+
+    m2_rows = [
+        (f"ROC {months}m", _liquidity_fmt_roc(_liquidity_ordinary_roc(monthly, "global_m2_usd_bn", months)))
+        for months in (1, 3, 6, 12)
+    ]
+    m2_rows.extend(
+        [
+            ("Growth Percentile Status (52w)", _liquidity_percentile_status(latest.get("m2_growth_pctl"))),
+            ("Fast Impulse Percentile Status (13w)", _liquidity_percentile_status(latest.get("m2_fast_impulse_pctl"))),
+            ("Medium Impulse Percentile Status (26w)", _liquidity_percentile_status(latest.get("m2_medium_impulse_pctl"))),
+            ("Slow Impulse Percentile Status (39w)", _liquidity_percentile_status(latest.get("m2_slow_impulse_pctl"))),
+        ]
+    )
+    cb_rows = [
+        (f"ROC {months}m", _liquidity_fmt_roc(_liquidity_ordinary_roc(monthly, "global_cb_assets_usd_bn", months)))
+        for months in (1, 3, 6, 12)
+    ]
+    cb_rows.extend(
+        [
+            ("Growth Percentile Status (52w)", _liquidity_percentile_status(latest.get("cb_growth_pctl"))),
+            ("Fast Impulse Percentile Status (13w)", _liquidity_percentile_status(latest.get("cb_fast_impulse_pctl"))),
+            ("Medium Impulse Percentile Status (26w)", _liquidity_percentile_status(latest.get("cb_medium_impulse_pctl"))),
+            ("Slow Impulse Percentile Status (39w)", _liquidity_percentile_status(latest.get("cb_slow_impulse_pctl"))),
+        ]
+    )
+    usnl_rows = [
+        (f"ROC {months}m", _liquidity_fmt_roc(_liquidity_ordinary_roc(regime, "us_net_liquidity_usd_bn", weeks)))
+        for months, weeks in ((1, 4), (3, 13), (6, 26), (12, 52))
+    ]
+    usnl_rows.extend(
+        [
+            ("Growth Percentile Status (52w)", _liquidity_percentile_status(latest.get("usnl_growth_pctl"))),
+            ("Fast Impulse Percentile Status (13w)", _liquidity_percentile_status(latest.get("usnl_fast_impulse_pctl"))),
+            ("Medium Impulse Percentile Status (26w)", _liquidity_percentile_status(latest.get("usnl_medium_impulse_pctl"))),
+            ("Slow Impulse Percentile Status (39w)", _liquidity_percentile_status(latest.get("usnl_slow_impulse_pctl"))),
+        ]
+    )
+    maturity = _liquidity_cycle_maturity_pct(latest_date)
+    score_rows = [
+        (f"ROC {months}m", _liquidity_fmt_roc(_liquidity_ordinary_roc(regime, "global_liquidity_score", weeks)))
+        for months, weeks in ((1, 4), (3, 13), (6, 26), (12, 52))
+    ]
+    score_rows.extend(
+        [
+            ("Status", _liquidity_direction_state(latest.get("direction_13w"))),
+            ("Final Regime", str(latest.get("final_regime_label", "n/a"))),
+            ("65M cycle Maturity", "n/a" if pd.isna(maturity) else f"{maturity:.0f}%"),
+            ("Liquidity Forecast Signal", _liquidity_display_state(forecast_signal)),
+            ("Near-Term Treasury Refinancing", "n/a" if pd.isna(refinancing) else f"{refinancing:.1f}"),
+            ("Data Status", _liquidity_display_state(latest.get("data_status", "n/a"))),
+        ]
+    )
+
+    columns = st.columns(4, gap="medium")
+    with columns[0]:
+        _render_liquidity_summary_block(
+            "Global Liquidity Score",
+            _liquidity_fmt_number(latest.get("global_liquidity_score"), 1),
+            score_rows,
+        )
+    with columns[1]:
+        _render_liquidity_summary_block(
+            "Global M2",
+            _liquidity_fmt_trillions(_liquidity_latest_numeric(monthly, "global_m2_usd_bn")),
+            m2_rows,
+        )
+    with columns[2]:
+        _render_liquidity_summary_block(
+            "Global CB Assets",
+            _liquidity_fmt_trillions(_liquidity_latest_numeric(monthly, "global_cb_assets_usd_bn")),
+            cb_rows,
+        )
+    with columns[3]:
+        _render_liquidity_summary_block(
+            "US Net Liquidity",
+            _liquidity_fmt_trillions(latest.get("us_net_liquidity_usd_bn")),
+            usnl_rows,
+        )
 def render_global_liquidity_dashboard_tab() -> None:
     st.subheader("Global Liquidity Regime")
 
@@ -1851,47 +2044,15 @@ def render_global_liquidity_dashboard_tab() -> None:
     chart_frame = _liquidity_filter_range(regime, range_choice)
 
     st.markdown("### Regime Summary")
-    row1 = st.columns(4)
-    with row1[0]:
-        render_market_metric("Global Liquidity Regime", str(latest.get("final_regime_label", "n/a")), str(latest.get("impulse_state", "n/a")))
-    with row1[1]:
-        render_market_metric("Global Liquidity Score", _liquidity_fmt_number(latest.get("global_liquidity_score"), 1), "0-100 impulse")
-    with row1[2]:
-        render_market_metric("13W Direction", str(latest.get("direction_13w_state", "n/a")), _liquidity_fmt_score_delta(latest.get("direction_13w")))
-    with row1[3]:
-        render_market_metric("Global M2 Trend", str(latest.get("trend_state", "n/a")), _liquidity_fmt_number(latest.get("trend_score"), 2))
-
-    row2 = st.columns(4)
-    with row2[0]:
-        render_market_metric("M2 Impulse", _liquidity_fmt_score_state(latest.get("m2_impulse")), "M2 13W/26W/52W")
-    with row2[1]:
-        render_market_metric("CB Impulse", _liquidity_fmt_score_state(latest.get("cb_impulse")), "global CB assets")
-    with row2[2]:
-        render_market_metric("US Net Liquidity Impulse", _liquidity_fmt_score_state(latest.get("usnl_impulse")), "WALCL - TGA - RRP")
-    with row2[3]:
-        render_market_metric("Long Cycle", str(latest.get("long_cycle_phase", "n/a")), "structural context")
-
-    row3 = st.columns(4)
-    with row3[0]:
-        render_market_metric("Global M2", _liquidity_fmt_trillions(latest.get("global_m2_usd_bn")), "US + EA + China + Japan")
-    with row3[1]:
-        render_market_metric("Global CB Assets", _liquidity_fmt_trillions(latest.get("global_cb_assets_usd_bn")), "Fed + ECB + BoJ + PBoC")
-    with row3[2]:
-        render_market_metric("Last Updated", str(latest.get("last_updated", "n/a")), "")
-    with row3[3]:
-        render_market_metric("Data Status", str(latest.get("data_status", "n/a")), _liquidity_history_start(regime))
+    _render_liquidity_regime_summary(monthly, regime, latest)
 
     st.markdown("### Global M2")
     _render_global_m2_level_growth(chart_frame, regime)
     with st.expander("Global M2 Momentum vs 65M Liquidity Cycle", expanded=True):
-        cycle_range = st.radio(
-            "Long cycle range",
-            ["5Y", "10Y", "MAX"],
-            index=1,
-            horizontal=True,
-            key="global_liquidity_cycle_range",
-        )
-        _render_long_cycle_chart(_liquidity_filter_range(regime, cycle_range))
+        _render_long_cycle_chart(chart_frame, regime)
+    _render_liquidity_impulse_percentile_chart(chart_frame, "Global M2", "m2")
+    _render_liquidity_impulse_percentile_chart(chart_frame, "Global CB Assets", "cb")
+    _render_liquidity_impulse_percentile_chart(chart_frame, "US Net Liquidity", "usnl")
 
     _render_global_liquidity_components_chart(chart_frame)
     _render_liquidity_contribution_chart(chart_frame, "m2")
@@ -1900,6 +2061,9 @@ def render_global_liquidity_dashboard_tab() -> None:
 
     st.markdown("### What Global Liquidity Regime Means for Markets")
     st.dataframe(_build_liquidity_asset_impact_table(latest), use_container_width=True, hide_index=True)
+
+    range_start = pd.to_datetime(chart_frame["date"], errors="coerce").min() if not chart_frame.empty else None
+    render_liquidity_forecast(range_start=range_start)
 
     st.markdown("### Data Quality")
     st.dataframe(_build_liquidity_regime_quality_summary(regime), use_container_width=True, hide_index=True)
@@ -1934,6 +2098,13 @@ def render_global_liquidity_dashboard_tab() -> None:
         "USNLImpulse = 0.50 * Pctl(USNL_4W) + 0.30 * Pctl(USNL_13W) + 0.20 * Pctl(USNL_26W)\n"
         "GlobalLiquidityScore = 0.50 * M2Impulse + 0.25 * CBImpulse + 0.25 * USNLImpulse\n"
         "Direction13W = GlobalLiquidityScore_t - GlobalLiquidityScore_t-13W\n\n"
+        "GlobalM2YoYGrowth = GlobalM2_t / GlobalM2_t-52W - 1\n"
+        "FastImpulse = GlobalM2YoYGrowth_t - GlobalM2YoYGrowth_t-13W\n"
+        "MediumImpulse = GlobalM2YoYGrowth_t - GlobalM2YoYGrowth_t-26W\n"
+        "SlowImpulse = GlobalM2YoYGrowth_t - GlobalM2YoYGrowth_t-39W\n"
+        "GrowthPercentile and Fast/Medium/SlowImpulsePercentile = trailing 3Y percentile (156W)\n\n"
+        "The same Growth and Impulse Percentile calculations are applied to Global CB Assets and US Net Liquidity.\n\n"
+        "Percentile status: >=90 extreme acceleration; >=70 acceleration; >=40 neutral; >=10 deceleration; <10 extreme deceleration.\n\n"
         "All M2 and central-bank balance-sheet series are already normalized to bn USD. Missing major data is not treated as zero. "
         "Percentiles are trailing 3Y point-in-time windows. The 65M long cycle is structural context and is not included in the score.",
     )
@@ -2000,6 +2171,19 @@ def _build_global_liquidity_regime_frame(monthly: pd.DataFrame, weekly: pd.DataF
     frame["m2_13w_pctl"] = _liquidity_trailing_percentile(frame["m2_13w"])
     frame["m2_26w_pctl"] = _liquidity_trailing_percentile(frame["m2_26w"])
     frame["m2_52w_pctl"] = _liquidity_trailing_percentile(frame["m2_52w"])
+    for prefix, source_column in (
+        ("m2", "global_m2_usd_bn"),
+        ("cb", "global_cb_assets_usd_bn"),
+        ("usnl", "us_net_liquidity_usd_bn"),
+    ):
+        frame[f"{prefix}_growth"] = frame[source_column].div(frame[source_column].shift(52)).sub(1.0)
+        frame[f"{prefix}_fast_impulse"] = frame[f"{prefix}_growth"].sub(frame[f"{prefix}_growth"].shift(13))
+        frame[f"{prefix}_medium_impulse"] = frame[f"{prefix}_growth"].sub(frame[f"{prefix}_growth"].shift(26))
+        frame[f"{prefix}_slow_impulse"] = frame[f"{prefix}_growth"].sub(frame[f"{prefix}_growth"].shift(39))
+        frame[f"{prefix}_growth_pctl"] = _liquidity_trailing_percentile(frame[f"{prefix}_growth"])
+        frame[f"{prefix}_fast_impulse_pctl"] = _liquidity_trailing_percentile(frame[f"{prefix}_fast_impulse"])
+        frame[f"{prefix}_medium_impulse_pctl"] = _liquidity_trailing_percentile(frame[f"{prefix}_medium_impulse"])
+        frame[f"{prefix}_slow_impulse_pctl"] = _liquidity_trailing_percentile(frame[f"{prefix}_slow_impulse"])
     frame["cb_13w_pctl"] = _liquidity_trailing_percentile(frame["cb_13w"])
     frame["cb_26w_pctl"] = _liquidity_trailing_percentile(frame["cb_26w"])
     frame["cb_52w_pctl"] = _liquidity_trailing_percentile(frame["cb_52w"])
@@ -2213,7 +2397,7 @@ def _style_liquidity_plotly(fig: go.Figure, height: int, title: str) -> go.Figur
         plot_bgcolor="#0f131a",
         font={"color": "#e5e7eb", "size": 11},
         margin={"l": 58, "r": 72, "t": 62, "b": 42},
-        hovermode="x unified",
+        hovermode="closest",
         legend={"orientation": "h", "yanchor": "top", "y": -0.16, "xanchor": "left", "x": 0},
     )
     fig.update_xaxes(
@@ -2440,64 +2624,75 @@ def _render_liquidity_contribution_chart(frame: pd.DataFrame, block: str) -> Non
 
 def _render_us_net_liquidity_chart(frame: pd.DataFrame) -> None:
     if frame.empty:
-        st.info("No data for US Net Liquidity - Fed / TGA / RRP.")
+        st.info("No data for US Net Liquidity - Funding Impulse.")
         return
+    horizon = st.selectbox(
+        "US Net Liquidity horizon",
+        ["13W", "26W", "52W"],
+        index=0,
+        key="global_liquidity_usnl_contribution_horizon",
+    )
+    weeks = int(horizon.replace("W", ""))
     rows = []
+    fed_column = "weekly_fed_assets_usd_bn" if "weekly_fed_assets_usd_bn" in frame.columns else "fed_assets_usd_bn"
     mapping = {
-        "US Net Liquidity": ("us_net_liquidity_usd_bn", 1000.0),
-        "Fed Assets": ("weekly_fed_assets_usd_bn", 1000.0),
-        "-TGA": ("tga_usd_bn", -1000.0),
-        "-RRP": ("rrp_usd_bn", -1000.0),
+        "Fed Assets": (fed_column, 1.0),
+        "-TGA": ("tga_usd_bn", -1.0),
+        "-RRP": ("rrp_usd_bn", -1.0),
     }
-    for label, (column, divisor) in mapping.items():
+    for label, (column, sign) in mapping.items():
         if column not in frame.columns:
             continue
-        values = pd.to_numeric(frame[column], errors="coerce") / divisor
+        values = pd.to_numeric(frame[column], errors="coerce") * sign
+        values = values.diff(weeks)
         for date, value in zip(frame["date"], values):
             if pd.notna(date) and np.isfinite(value):
-                rows.append({"Date": date, "Series": label, "Value": float(value)})
+                rows.append({"Date": date, "Component": label, "Change": float(value)})
     chart_df = pd.DataFrame(rows)
-    change = pd.DataFrame({"Date": frame["date"], "13W change": pd.to_numeric(frame.get("usnl_13w", np.nan), errors="coerce") * 100.0}).dropna()
     if chart_df.empty:
-        st.info("No data for US Net Liquidity - Fed / TGA / RRP.")
+        st.info("No data for US Net Liquidity - Funding Impulse.")
         return
+    total = pd.DataFrame(
+        {
+            "Date": frame["date"],
+            "Total Change": pd.to_numeric(frame.get("us_net_liquidity_usd_bn", np.nan), errors="coerce").diff(weeks),
+        }
+    ).dropna(subset=["Date", "Total Change"])
     fig = go.Figure()
-    colors = {"US Net Liquidity": "#38bdf8", "Fed Assets": "#22c55e", "-TGA": "#f97316", "-RRP": "#a78bfa"}
-    for series in chart_df["Series"].drop_duplicates():
-        d = chart_df[chart_df["Series"].eq(series)]
+    colors = {"Fed Assets": "#38bdf8", "-TGA": "#f97316", "-RRP": "#a78bfa"}
+    for component in chart_df["Component"].drop_duplicates():
+        d = chart_df[chart_df["Component"].eq(component)]
         fig.add_trace(
-            go.Scatter(
+            go.Bar(
                 x=d["Date"],
-                y=d["Value"],
-                mode="lines",
-                name=series,
-                line={"color": colors.get(series, "#cbd5e1"), "width": 1.8},
-                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{series}: %{{y:.2f}}T<extra></extra>",
+                y=d["Change"],
+                name=component,
+                marker_color=colors.get(component, "#cbd5e1"),
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{component}: %{{y:,.0f}}B<extra></extra>",
             )
         )
-    if not change.empty:
+    if not total.empty:
         fig.add_trace(
             go.Scatter(
-                x=change["Date"],
-                y=change["13W change"],
+                x=total["Date"],
+                y=total["Total Change"],
                 mode="lines",
-                name="13W change",
-                yaxis="y2",
-                line={"color": "#facc15", "width": 1.5, "dash": "dash"},
-                hovertemplate="Date: %{x|%Y-%m-%d}<br>13W change: %{y:.2f}%<extra></extra>",
+                name="Global total change",
+                line={"color": "#f8fafc", "width": 1.8},
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>Total: %{y:,.0f}B<extra></extra>",
             )
         )
-        fig.update_layout(yaxis2={"title": "13W change, %", "overlaying": "y", "side": "right", "showgrid": False})
-    fig.update_layout(yaxis={"title": "USD tn"})
-    st.plotly_chart(_style_liquidity_plotly(fig, 340, "US Net Liquidity - Fed / TGA / RRP"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+    fig.update_layout(barmode="relative", yaxis={"title": f"{horizon} change, USD bn"})
+    st.plotly_chart(_style_liquidity_plotly(fig, 320, "US Net Liquidity - Funding Impulse"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
 
 
-def _render_long_cycle_chart(frame: pd.DataFrame) -> None:
+def _render_long_cycle_chart(frame: pd.DataFrame, full_frame: pd.DataFrame) -> None:
     if frame.empty:
         st.info("No data for Global M2 Momentum vs 65M Liquidity Cycle.")
         return
-    m2_roc = pd.to_numeric(frame.get("m2_52w", np.nan), errors="coerce")
-    normalized = _liquidity_rolling_zscore(m2_roc, 156, 104).clip(-2, 2) * 50.0
+    m2_roc = pd.to_numeric(full_frame.get("m2_52w", np.nan), errors="coerce")
+    normalized = (_liquidity_rolling_zscore(m2_roc, 156, 104).clip(-2, 2) * 50.0).reindex(frame.index)
     dates = pd.to_datetime(frame["date"], errors="coerce")
     min_date = dates.min()
     max_date = dates.max()
@@ -2563,7 +2758,52 @@ def _render_long_cycle_chart(frame: pd.DataFrame) -> None:
                 xanchor="left",
             )
     fig.update_layout(yaxis={"title": "-100 to +100", "range": [-100, 100]})
+    if pd.notna(min_date) and pd.notna(max_date):
+        fig.update_xaxes(range=[min_date.strftime("%Y-%m-%d"), max_date.strftime("%Y-%m-%d")])
     st.plotly_chart(_style_liquidity_plotly(fig, 300, "Global M2 Momentum vs 65M Liquidity Cycle"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _render_liquidity_impulse_percentile_chart(frame: pd.DataFrame, asset_label: str, prefix: str) -> None:
+    title = f"{asset_label} Growth and Impulse Percentiles"
+    if frame.empty:
+        st.info(f"No data for {title}.")
+        return
+    mapping = {
+        "Growth Percentile": (f"{prefix}_growth_pctl", "#f8fafc"),
+        "Fast Impulse Percentile": (f"{prefix}_fast_impulse_pctl", "#38bdf8"),
+        "Medium Impulse Percentile": (f"{prefix}_medium_impulse_pctl", "#a78bfa"),
+        "Slow Impulse Percentile": (f"{prefix}_slow_impulse_pctl", "#facc15"),
+    }
+    fig = go.Figure()
+    added = False
+    for label, (column, color) in mapping.items():
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        chart_df = pd.DataFrame({"date": frame["date"], "value": values}).dropna()
+        if chart_df.empty:
+            continue
+        added = True
+        fig.add_trace(
+            go.Scatter(
+                x=chart_df["date"],
+                y=chart_df["value"],
+                mode="lines",
+                name=label,
+                line={"color": color, "width": 1.8},
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{label}: %{{y:.1f}}<extra></extra>",
+            )
+        )
+    if not added:
+        st.info(f"No data for {title}.")
+        return
+    for level in [20, 40, 60, 80]:
+        fig.add_hline(y=level, line={"color": "#64748b", "dash": "dot", "width": 1}, opacity=0.55)
+    fig.update_layout(
+        yaxis={"title": "Trailing 3Y percentile", "range": [0, 100]},
+        hovermode="x unified",
+    )
+    st.plotly_chart(_style_liquidity_plotly(fig, 320, title), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
 
 
 def _liquidity_rolling_zscore(series: pd.Series, window: int, min_periods: int) -> pd.Series:
@@ -4603,6 +4843,45 @@ def enrich_market_snapshot_with_global_liquidity(market: dict) -> dict:
             "Final_Market_State": final_state,
         }
     )
+    return enrich_market_snapshot_with_positioning_tail_risk(enriched)
+
+
+def load_positioning_history_for_market_regime() -> pd.DataFrame:
+    try:
+        from positioning import read_processed
+
+        master = read_processed("cftc_master")
+        aaii = read_processed("aaii")
+        return calculate_positioning_risk_history(aaii, master)
+    except Exception:
+        return pd.DataFrame()
+
+
+def enrich_market_snapshot_with_positioning_tail_risk(market: dict) -> dict:
+    enriched = dict(market or {})
+    history = pd.DataFrame([{"Date": pd.Timestamp.now(tz="UTC").tz_localize(None).normalize(), **enriched}])
+    positioning_history = load_positioning_history_for_market_regime()
+    tail = calculate_tail_risk_history(history, positioning_history)
+    if tail.empty:
+        return enriched
+    row = tail.iloc[-1]
+    for key in [
+        "AAII_Bearish_3Y_Percentile",
+        "VIX_AssetManager_NetPctOI",
+        "VIX_AssetManager_NetPctOI_3Y_Percentile",
+        "PositioningRisk",
+        "PositioningState",
+        "LiquidityWarning",
+        "CreditWarning",
+        "FastWarning",
+        "MacroWarning",
+        "TailRiskFlag",
+        "TailRiskReason",
+        "PositioningModel_Version",
+        "TailRiskModel_Version",
+    ]:
+        if key in row.index:
+            enriched[key] = row.get(key)
     return enriched
 
 
@@ -4733,6 +5012,19 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
                 "Negative_Confirmation_Count",
                 "Overall_Transition_Status",
                 "Final_Market_State",
+                "AAII_Bearish_3Y_Percentile",
+                "VIX_AssetManager_NetPctOI",
+                "VIX_AssetManager_NetPctOI_3Y_Percentile",
+                "PositioningRisk",
+                "PositioningState",
+                "LiquidityWarning",
+                "CreditWarning",
+                "FastWarning",
+                "MacroWarning",
+                "TailRiskFlag",
+                "TailRiskReason",
+                "PositioningModel_Version",
+                "TailRiskModel_Version",
             ]
         )
 
@@ -4830,12 +5122,10 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
         axis=1,
     )
     history["Final_Market_State"] = history["Overall_Transition_Status"]
+    positioning_history = load_positioning_history_for_market_regime()
+    history = calculate_tail_risk_history(history, positioning_history)
     today_utc = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
-    return history.loc[
-        (history["Date"] >= "2016-01-01")
-        & (history["Date"] <= "2026-12-31")
-        & (history["Date"] <= today_utc)
-    ].reset_index(drop=True)
+    return history.loc[history["Date"] <= today_utc].reset_index(drop=True)
 
 
 def prepare_candle_data(ohlcv: pd.DataFrame, period_mode: str, max_candles: int) -> pd.DataFrame:
@@ -5590,6 +5880,194 @@ def _render_spy_weekly_market_regime_chart() -> None:
     st.altair_chart(chart, use_container_width=True)
 
 
+def _render_tail_risk_validation_report() -> None:
+    with st.expander("Tail Risk Validation", expanded=False):
+        transition_history = load_market_transition_history("spy-weekly-transition-history")
+        spy = _prepare_spy_weekly_regime_frame()
+        if transition_history.empty or spy.empty or "TailRiskFlag" not in transition_history.columns:
+            st.info("Tail risk validation data is not available yet.")
+            return
+
+        corrections = _build_spy_correction_validation(spy, transition_history)
+        distribution = _build_tail_risk_distribution_validation(corrections, transition_history)
+        incidence = _build_tail_risk_forward_incidence(spy, transition_history)
+
+        st.markdown("#### SPY weekly-close corrections greater than 15%")
+        if corrections.empty:
+            st.info("No weekly-close SPY corrections greater than 15% were detected in the available sample.")
+        else:
+            st.dataframe(corrections, use_container_width=True, hide_index=True)
+
+        st.markdown("#### TailRiskFlag distribution")
+        if distribution.empty:
+            st.info("No TailRiskFlag distribution is available.")
+        else:
+            st.dataframe(distribution, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Forward drawdown incidence by TailRiskFlag")
+        if incidence.empty:
+            st.info("Forward incidence cannot be calculated for the available sample.")
+        else:
+            st.dataframe(incidence, use_container_width=True, hide_index=True)
+
+
+def _build_spy_correction_validation(spy: pd.DataFrame, history: pd.DataFrame) -> pd.DataFrame:
+    price = spy[["Date", "Close"]].dropna().copy()
+    if price.empty:
+        return pd.DataFrame()
+    price["Date"] = pd.to_datetime(price["Date"], errors="coerce")
+    price = price.dropna(subset=["Date"]).sort_values("Date")
+    close = pd.to_numeric(price["Close"], errors="coerce")
+    price = price.loc[close.notna()].copy()
+    price["Close"] = close.loc[price.index].astype(float)
+    price = price.loc[(price["Date"] >= "2016-01-01") & (price["Date"] <= "2026-12-31")]
+    if len(price) < 2:
+        return pd.DataFrame()
+
+    corrections = []
+    peak_date = price["Date"].iloc[0]
+    peak_value = float(price["Close"].iloc[0])
+    trough_date = peak_date
+    trough_value = peak_value
+    in_correction = False
+
+    for row in price.iloc[1:].itertuples(index=False):
+        current_date = row.Date
+        current_value = float(row.Close)
+        drawdown = current_value / peak_value - 1.0 if peak_value else np.nan
+        if not in_correction:
+            if current_value >= peak_value:
+                peak_date = current_date
+                peak_value = current_value
+                trough_date = current_date
+                trough_value = current_value
+            elif np.isfinite(drawdown) and drawdown <= -0.15:
+                in_correction = True
+                trough_date = current_date
+                trough_value = current_value
+        else:
+            if current_value < trough_value:
+                trough_date = current_date
+                trough_value = current_value
+            if current_value >= peak_value:
+                corrections.append(
+                    {
+                        "Peak Date": peak_date,
+                        "Trough Date": trough_date,
+                        "Max Drawdown %": (trough_value / peak_value - 1.0) * 100.0,
+                    }
+                )
+                peak_date = current_date
+                peak_value = current_value
+                trough_date = current_date
+                trough_value = current_value
+                in_correction = False
+
+    if in_correction:
+        corrections.append(
+            {
+                "Peak Date": peak_date,
+                "Trough Date": trough_date,
+                "Max Drawdown %": (trough_value / peak_value - 1.0) * 100.0,
+            }
+        )
+    if not corrections:
+        return pd.DataFrame()
+
+    lookup_columns = [
+        "Date",
+        "PositioningRisk",
+        "PositioningState",
+        "Global_Liquidity_Score",
+        "Global_Liquidity_Direction_13W",
+        "LiquidityWarning",
+        "Credit_Risk",
+        "Fast_Transition_Risk",
+        "Macro_Transition_Risk",
+        "TailRiskFlag",
+        "TailRiskReason",
+    ]
+    lookup = history[[col for col in lookup_columns if col in history.columns]].copy()
+    lookup["Date"] = pd.to_datetime(lookup["Date"], errors="coerce")
+    lookup = lookup.dropna(subset=["Date"]).sort_values("Date")
+    result = pd.DataFrame(corrections)
+    points = pd.DataFrame({"Date": pd.to_datetime(result["Peak Date"]) - pd.Timedelta(days=7)})
+    sampled = pd.merge_asof(points.sort_values("Date"), lookup, on="Date", direction="backward")
+    sampled = sampled.drop(columns=["Date"], errors="ignore").reset_index(drop=True)
+    return pd.concat([result.reset_index(drop=True), sampled], axis=1)
+
+
+def _build_tail_risk_distribution_validation(corrections: pd.DataFrame, history: pd.DataFrame) -> pd.DataFrame:
+    if history.empty or "TailRiskFlag" not in history.columns:
+        return pd.DataFrame()
+    all_flags = history["TailRiskFlag"].dropna().astype(str)
+    correction_flags = corrections.get("TailRiskFlag", pd.Series(dtype="object")).dropna().astype(str)
+    flags = sorted(set(all_flags.unique()).union(set(correction_flags.unique())))
+    rows = []
+    for flag in flags:
+        rows.append(
+            {
+                "TailRiskFlag": flag,
+                "All Weeks Count": int((all_flags == flag).sum()),
+                "All Weeks %": float((all_flags == flag).mean() * 100.0) if len(all_flags) else np.nan,
+                "Correction Peaks Count": int((correction_flags == flag).sum()),
+                "Correction Peaks %": float((correction_flags == flag).mean() * 100.0) if len(correction_flags) else np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _build_tail_risk_forward_incidence(spy: pd.DataFrame, history: pd.DataFrame) -> pd.DataFrame:
+    if spy.empty or history.empty or "TailRiskFlag" not in history.columns:
+        return pd.DataFrame()
+    price = spy[["Date", "Close"]].dropna().copy()
+    price["Date"] = pd.to_datetime(price["Date"], errors="coerce")
+    price["Close"] = pd.to_numeric(price["Close"], errors="coerce")
+    price = price.dropna(subset=["Date", "Close"]).sort_values("Date").reset_index(drop=True)
+    lookup = history[["Date", "TailRiskFlag"]].dropna().copy()
+    lookup["Date"] = pd.to_datetime(lookup["Date"], errors="coerce")
+    lookup = lookup.dropna(subset=["Date"]).sort_values("Date")
+    aligned = pd.merge_asof(price, lookup, on="Date", direction="backward")
+    rows = []
+    for horizon in [4, 8, 12]:
+        samples = []
+        for idx, row in aligned.iloc[:-horizon].iterrows():
+            flag = row.get("TailRiskFlag")
+            if not isinstance(flag, str) or not flag:
+                continue
+            current = float(row["Close"])
+            future = aligned["Close"].iloc[idx + 1 : idx + horizon + 1]
+            if len(future) < horizon or current <= 0:
+                continue
+            samples.append(
+                {
+                    "Horizon": f"{horizon}W",
+                    "TailRiskFlag": flag,
+                    "Forward Return": future.iloc[-1] / current - 1.0,
+                    "Future Min Return": future.min() / current - 1.0,
+                }
+            )
+        sample = pd.DataFrame(samples)
+        if sample.empty:
+            continue
+        for flag, group in sample.groupby("TailRiskFlag"):
+            min_return = pd.to_numeric(group["Future Min Return"], errors="coerce")
+            forward_return = pd.to_numeric(group["Forward Return"], errors="coerce")
+            rows.append(
+                {
+                    "Horizon": f"{horizon}W",
+                    "TailRiskFlag": flag,
+                    "N": int(len(group)),
+                    "Avg Forward Return %": float(forward_return.mean() * 100.0),
+                    "Avg Future Min Return %": float(min_return.mean() * 100.0),
+                    "Prob <= -5%": float((min_return <= -0.05).mean() * 100.0),
+                    "Prob <= -10%": float((min_return <= -0.10).mean() * 100.0),
+                    "Prob <= -15%": float((min_return <= -0.15).mean() * 100.0),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def format_market_value(value, kind: str = "number") -> str:
     if value is None:
         return "n/a"
@@ -5859,10 +6337,21 @@ def render_market_regime_tab(market: dict) -> None:
     with summary_cols[3]:
         render_market_metric("RSI Divergence", format_market_value(market.get("RSI_Divergence")), "SPY weekly RSI14")
 
+    summary_cols = st.columns(4)
+    with summary_cols[0]:
+        render_market_metric("Positioning Risk", f"{format_market_value(market.get('PositioningRisk'), 'score')} / {format_market_value(market.get('PositioningState'))}", "AAII bearish + VIX AM")
+    with summary_cols[1]:
+        render_market_metric("Tail Risk Flag", format_market_value(market.get("TailRiskFlag")), format_market_value(market.get("TailRiskReason")))
+    with summary_cols[2]:
+        render_market_metric("Liquidity Warning", format_market_value(market.get("LiquidityWarning")), "directional pressure")
+    with summary_cols[3]:
+        render_market_metric("Credit Warning", format_market_value(market.get("CreditWarning")), "HY OAS transmission")
+
     st.markdown("### Market Regime Interpretation")
     render_market_formula("Interpretation", market_regime_interpretation_text(market))
 
     _render_spy_weekly_market_regime_chart()
+    _render_tail_risk_validation_report()
 
     st.markdown("### Current Final Market State Logic")
     render_market_formula("Logic", overall_status_logic_text(market))
@@ -5977,6 +6466,31 @@ def render_market_regime_tab(market: dict) -> None:
         "GlobalLiquidityBackdrop is a separate medium-term backdrop and does not directly change Structural Regime.",
     )
     _render_market_global_liquidity_backdrop_chart()
+
+    st.markdown("### Positioning and Tail Risk Overlay")
+    render_market_detail_table(
+        [
+            ("Positioning Risk", f"{format_market_value(market.get('PositioningRisk'), 'score')} / {format_market_value(market.get('PositioningState'))}"),
+            ("AAII Bearish 3Y Percentile", format_market_value(market.get("AAII_Bearish_3Y_Percentile"), "score")),
+            ("VIX Asset Manager Net % OI", format_market_value(market.get("VIX_AssetManager_NetPctOI"), "score")),
+            ("VIX Asset Manager Net % OI 3Y Percentile", format_market_value(market.get("VIX_AssetManager_NetPctOI_3Y_Percentile"), "score")),
+            ("Liquidity Warning", format_market_value(market.get("LiquidityWarning"))),
+            ("Credit Warning", format_market_value(market.get("CreditWarning"))),
+            ("Fast Warning", format_market_value(market.get("FastWarning"))),
+            ("Macro Warning", format_market_value(market.get("MacroWarning"))),
+            ("Tail Risk Flag", format_market_value(market.get("TailRiskFlag"))),
+            ("Tail Risk Reason", format_market_value(market.get("TailRiskReason"))),
+            ("Positioning Model Version", format_market_value(market.get("PositioningModel_Version"))),
+            ("Tail Risk Model Version", format_market_value(market.get("TailRiskModel_Version"))),
+        ]
+    )
+    render_market_formula(
+        "Formula",
+        "PositioningRisk = 0.50 * AAII_Bearish_3Y_Percentile + 0.50 * VIX_AssetManager_NetPctOI_3Y_Percentile\n"
+        "CFTC VIX Asset Manager positioning uses report date + 3 calendar days when publication date is unavailable.\n"
+        "TailRiskFlag is rule-based interaction logic across Positioning, Liquidity, Credit, Fast Risk, Macro Risk and Structural Regime.\n"
+        "TailRiskFlag is a separate overlay and does not change StructuralMarketRegime or FinalMarketState.",
+    )
 
     st.markdown("### Confirmations")
     render_market_detail_table(
@@ -6181,6 +6695,15 @@ def main():
         [data-testid="stTabs"] {
             margin-top: -0.15rem !important;
         }
+        div[data-testid="stRadio"] > div {
+            flex-wrap: nowrap !important;
+            overflow-x: auto !important;
+            gap: 0.35rem !important;
+            padding-bottom: 0.2rem !important;
+        }
+        div[data-testid="stRadio"] label {
+            white-space: nowrap !important;
+        }
         [data-testid="stDataFrame"] [role="columnheader"] {
             font-size: 0.77rem !important;
             min-width: 108px !important;
@@ -6362,15 +6885,22 @@ def main():
         "Charts",
         "Graphs",
         "AI Dashboard",
+        "Market Cycle",
+        "Liquidity Cycle",
+        "Business Cycle",
+        "Rates & Financial Conditions",
+        "Funding Conditions",
+        "Treasury & Fiscal Regime",
+        "Global Dashboard",
         "CIO View",
-        "Market Regime",
         "Global Macro",
         "CFTC COT",
-        "Global Liquidity Regime",
         "Gold Regime",
         "BTC Regime",
         "Crypto Derivatives",
         "Alpha Engine",
+        "Financial Fragility",
+        "Market Regime",
         "Inputs",
         "Description",
         "Tester",
@@ -6596,14 +7126,51 @@ def main():
         render_ai_dashboard_tab()
     elif active_view == "CIO View":
         render_cio_view_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), market_snapshot, get_fred_api_key_for_app())
+    elif active_view == "Global Dashboard":
+        try:
+            _, dashboard_monthly, dashboard_weekly = read_global_liquidity()
+            dashboard_liquidity = _build_global_liquidity_regime_frame(
+                _liquidity_prepare_dates(dashboard_monthly),
+                _liquidity_prepare_dates(dashboard_weekly),
+            )
+        except Exception:
+            dashboard_liquidity = pd.DataFrame()
+        render_global_dashboard_tab(
+            get_fred_api_key_for_app(),
+            market_snapshot,
+            dashboard_liquidity,
+            transition_history_loader=lambda: load_market_transition_history(
+                "financial-fragility-validation-export"
+            ),
+        )
+    elif active_view == "Financial Fragility":
+        try:
+            _, fragility_monthly, fragility_weekly = read_global_liquidity()
+            fragility_liquidity = _build_global_liquidity_regime_frame(
+                _liquidity_prepare_dates(fragility_monthly),
+                _liquidity_prepare_dates(fragility_weekly),
+            )
+        except Exception:
+            fragility_liquidity = pd.DataFrame()
+        render_financial_fragility_tab(get_fred_api_key_for_app(), fragility_liquidity)
     elif active_view == "Market Regime":
         render_market_regime_tab(market_snapshot)
+    elif active_view == "Market Cycle":
+        render_market_cycle_tab(get_fred_api_key_for_app())
+    elif active_view == "Business Cycle":
+        render_business_cycle_tab(get_fred_api_key_for_app())
     elif active_view == "Global Macro":
         render_global_macro_tab(get_fred_api_key_for_app())
     elif active_view == "CFTC COT":
         render_cftc_cot_tab()
-    elif active_view == "Global Liquidity Regime":
+    elif active_view == "Liquidity Cycle":
         render_global_liquidity_dashboard_tab()
+    elif active_view == "Rates & Financial Conditions":
+        render_rates_financial_conditions_tab(get_fred_api_key_for_app())
+    elif active_view == "Funding Conditions":
+        render_funding_conditions_tab(get_fred_api_key_for_app())
+    elif active_view == "Treasury & Fiscal Regime":
+        render_treasury_fiscal_regime_tab(get_fred_api_key_for_app())
     elif active_view == "Gold Regime":
         render_gold_regime_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), get_fred_api_key_for_app())
     elif active_view == "BTC Regime":

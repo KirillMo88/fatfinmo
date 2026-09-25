@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - production Docker installs beautifulso
     BeautifulSoup = None
 
 from finance_core import download_completed_ohlcv
-from fred_client import FredApiError, download_fred_series_batch
+from fred_client import FredApiError, download_fred_series, download_fred_series_batch
 
 
 CHINA_M2_SERIES_ID = "Money & Quasi-money (M2)"
@@ -66,6 +66,8 @@ GLOBAL_LIQUIDITY_CONFIG = {
     "tradingview_scanner_url": "https://scanner.tradingview.com/global/scan",
     "tradingview_cnm2_reports_url": "https://www.tradingview.com/symbols/ECONOMICS-CNM2/reports-history/",
     "tradingview_cncbbs_url": "https://www.tradingview.com/symbols/ECONOMICS-CNCBBS/",
+    "investing_china_m2_url": "https://www.investing.com/economic-calendar/chinese-m2-money-stock-463",
+    "tradingeconomics_cncbbs_url": "https://tradingeconomics.com/china/banks-balance-sheet",
 }
 
 FRED_GLOBAL_SERIES = (
@@ -77,6 +79,7 @@ FRED_GLOBAL_SERIES = (
     "DEXJPUS",
     "DEXCHUS",
 )
+FRED_FORECAST_SERIES = ("THREEFYTP10", "SOFR", "EFFR", "WRESBAL")
 
 RAW_COLUMNS = [
     "observation_date",
@@ -197,6 +200,22 @@ WEEKLY_COLUMNS = [
     "dxy_4w_pct",
     "dxy_13w_pct",
     "dxy_26w_pct",
+    "US10Y_TermPremium",
+    "US10Y_TermPremium_4W_Change",
+    "US10Y_TermPremium_13W_Change",
+    "US10Y_TermPremium_26W_Change",
+    "SOFR",
+    "EFFR",
+    "SOFR_EFFR_Spread",
+    "SOFR_EFFR_4W_Change",
+    "SOFR_EFFR_13W_Change",
+    "US_BankReserves",
+    "US_BankReserves_4W_Change",
+    "US_BankReserves_13W_Change",
+    "US_BankReserves_26W_Change",
+    "US_BankReserves_4W_PctChange",
+    "US_BankReserves_13W_PctChange",
+    "US_BankReserves_26W_PctChange",
     "data_status",
     "last_updated",
 ]
@@ -294,7 +313,20 @@ def fred_raw(api_key: str | None = None) -> pd.DataFrame:
         "DEXUSEU": ("FX", "EURUSD", "daily", "USD per EUR", "rate"),
         "DEXJPUS": ("FX", "USDJPY", "daily", "JPY per USD", "rate"),
         "DEXCHUS": ("FX", "USDCNY", "daily", "CNY per USD", "rate"),
+        "THREEFYTP10": ("US", "10Y Term Premium", "daily", "USD", "percentage points"),
+        "SOFR": ("US", "SOFR", "daily", "USD", "percent"),
+        "EFFR": ("US", "EFFR", "daily", "USD", "percent"),
+        "WRESBAL": ("US", "Bank Reserves", "weekly", "USD", "USD millions"),
     }
+    optional = []
+    optional_errors = []
+    for series_id in FRED_FORECAST_SERIES:
+        try:
+            optional.append(download_fred_series(series_id, api_key=api_key, observation_start=GLOBAL_LIQUIDITY_CONFIG["start_date"]))
+        except FredApiError as exc:
+            optional_errors.append(empty_raw_row("FRED", "Federal Reserve Economic Data", f"https://fred.stlouisfed.org/series/{series_id}", series_id, "US", series_id, "mixed", "USD", "native", "ERROR", f"Refresh failed: {type(exc).__name__}"))
+    if optional:
+        frame = pd.concat([frame, *optional], ignore_index=True)
     rows = []
     downloaded = fmt_datetime(now_utc())
     for _, row in frame.iterrows():
@@ -319,7 +351,8 @@ def fred_raw(api_key: str | None = None) -> pd.DataFrame:
                 "notes": "RELEASE_DATE_UNAVAILABLE",
             }
         )
-    return pd.DataFrame(rows, columns=RAW_COLUMNS)
+    result = pd.DataFrame(rows, columns=RAW_COLUMNS)
+    return pd.concat([result, *optional_errors], ignore_index=True) if optional_errors else result
 
 
 def ecb_m2_raw() -> pd.DataFrame:
@@ -663,6 +696,15 @@ def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
     source_url = str(GLOBAL_LIQUIDITY_CONFIG["pboc_money_supply_url"])
     mcp_error = ""
     try:
+        investing_frame = china_m2_investing_update_raw(api_key=api_key)
+        if not investing_frame.empty:
+            investing_frame["source_mode"] = "FALLBACK_SOURCE"
+            return investing_frame[RAW_COLUMNS]
+    except Exception as exc:
+        investing_error = str(exc)
+    else:
+        investing_error = ""
+    try:
         mcp_frame = tradingview_mcp_china_m2_raw()
         if not mcp_frame.empty:
             return mcp_frame
@@ -697,7 +739,7 @@ def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
         fallback = china_m2_fred_tradingview_fallback_raw(api_key=api_key, official_error=str(exc))
         if not fallback.empty:
             if "notes" in fallback.columns and mcp_error:
-                fallback["notes"] = fallback["notes"].astype(str) + f"; TradingView MCP primary unavailable: {mcp_error}"
+                fallback["notes"] = fallback["notes"].astype(str) + f"; TradingView MCP primary unavailable: {mcp_error}; Investing fallback unavailable: {investing_error}"
             if "source_mode" in fallback.columns:
                 fallback["source_mode"] = "FALLBACK_SOURCE"
             return fallback
@@ -712,7 +754,7 @@ def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
             "CNY",
             "CNY 100 million",
             "ERROR",
-            f"TradingView MCP primary unavailable: {mcp_error}; Official PBoC parser unavailable: {exc}. Missing data is not filled with zero.",
+            f"TradingView MCP primary unavailable: {mcp_error}; Investing fallback unavailable: {investing_error}; Official PBoC parser unavailable: {exc}. Missing data is not filled with zero.",
         )
 
 
@@ -804,6 +846,194 @@ def tradingview_headers() -> dict[str, str]:
         "Origin": "https://www.tradingview.com",
         "Referer": "https://www.tradingview.com/economic-calendar/",
     }
+
+
+def investing_headers() -> dict[str, str]:
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.investing.com/",
+    }
+
+
+def _parse_investing_release_html(html: str) -> pd.DataFrame:
+    """Parse the visible Investing release table without requiring future rows."""
+    month_names: dict[str, int] = {}
+    for number in range(1, 13):
+        month = pd.Timestamp(year=2000, month=number, day=1)
+        month_names[month.month_name().lower()] = number
+        month_names[month.strftime("%b").lower()] = number
+    embedded_rows: list[dict[str, Any]] = []
+    occurrences_start = html.find('"occurrences":[')
+    occurrences_end = html.find('],', occurrences_start) if occurrences_start >= 0 else -1
+    occurrence_payload = html[occurrences_start:occurrences_end] if occurrences_start >= 0 and occurrences_end > occurrences_start else html
+    embedded_pattern = re.compile(
+        r'\{"actual":(?P<actual>[-+]?\d+(?:\.\d+)?).*?"occurrence_time":"(?P<release>[^\"]+)".*?"reference_period":"(?P<reference>[A-Za-z]{3,9})"',
+        flags=re.DOTALL,
+    )
+    for match in embedded_pattern.finditer(occurrence_payload):
+        release_date = pd.to_datetime(match.group("release"), errors="coerce")
+        reference_month = month_names.get(match.group("reference").lower())
+        if pd.isna(release_date) or reference_month is None:
+            continue
+        reference_year = int(release_date.year) - int(reference_month > release_date.month)
+        embedded_rows.append(
+            {
+                "observation_date": pd.Timestamp(reference_year, reference_month, 1),
+                "release_date": pd.Timestamp(release_date).tz_localize(None).normalize(),
+                "actual": float(match.group("actual")),
+                "forecast": np.nan,
+                "previous": np.nan,
+            }
+        )
+    if embedded_rows:
+        return pd.DataFrame(embedded_rows).sort_values(["observation_date", "release_date"]).drop_duplicates("observation_date", keep="last").reset_index(drop=True)
+    try:
+        tables = pd.read_html(StringIO(html), flavor="lxml")
+    except Exception as exc:
+        raise RuntimeError(f"Investing release table parse failed: {exc}") from exc
+    matching_tables: list[pd.DataFrame] = []
+    for candidate in tables:
+        columns = [str(value).strip().lower() for value in candidate.columns]
+        if all(any(token in column for column in columns) for token in ["release date", "actual", "previous"]):
+            matching_tables.append(candidate)
+    if not matching_tables:
+        raise RuntimeError("Investing release table not found")
+    table = max(matching_tables, key=len)
+    data = table.iloc[:, :5].copy()
+    data.columns = ["release_date", "release_time", "actual", "forecast", "previous"]
+    rows: list[dict[str, Any]] = []
+    for _, row in data.iterrows():
+        date_text = str(row.get("release_date") or "")
+        match = re.search(r"([A-Za-z]{3,9}\s+\d{1,2},\s+20\d{2})", date_text)
+        if not match:
+            continue
+        release_date = pd.to_datetime(match.group(1), errors="coerce")
+        ref_match = re.search(r"\(([A-Za-z]{3,9})\)", date_text)
+        if pd.isna(release_date) or not ref_match:
+            continue
+        reference_month = month_names.get(ref_match.group(1).lower())
+        if reference_month is None:
+            continue
+        reference_year = int(release_date.year) - int(reference_month > release_date.month)
+        actual_text = str(row.get("actual") or "").replace(",", "").strip()
+        actual_match = re.search(r"[-+]?\d+(?:\.\d+)?", actual_text)
+        actual = float(actual_match.group(0)) if actual_match else np.nan
+        if not np.isfinite(actual):
+            continue
+        rows.append(
+            {
+                "observation_date": pd.Timestamp(reference_year, reference_month, 1),
+                "release_date": pd.Timestamp(release_date).normalize(),
+                "actual": actual,
+                "forecast": pd.to_numeric(str(row.get("forecast") or "").replace(",", ""), errors="coerce"),
+                "previous": pd.to_numeric(str(row.get("previous") or "").replace(",", ""), errors="coerce"),
+            }
+        )
+    if not rows:
+        raise RuntimeError("Investing release table contains no completed numeric observations")
+    return pd.DataFrame(rows).sort_values(["observation_date", "release_date"]).drop_duplicates("observation_date", keep="last").reset_index(drop=True)
+
+
+def investing_china_m2_yoy_raw(start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
+    url = str(GLOBAL_LIQUIDITY_CONFIG["investing_china_m2_url"])
+    response = get_with_retries(url, headers=investing_headers())
+    parsed = _parse_investing_release_html(response.text)
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    parsed = parsed.loc[parsed["observation_date"].between(start.to_period("M").to_timestamp(), end.to_period("M").to_timestamp())].copy()
+    if parsed.empty:
+        return pd.DataFrame(columns=["observation_date", "release_date", "series_id", "yoy_pct"])
+    return parsed.rename(columns={"actual": "yoy_pct"})[["observation_date", "release_date", "yoy_pct"]].assign(series_id=TRADINGVIEW_CNM2_YOY_SERIES)[["observation_date", "release_date", "series_id", "yoy_pct"]]
+
+
+def _existing_raw_series_frame(series_id: str) -> pd.DataFrame:
+    if not RAW_STORAGE_PATH.exists():
+        return pd.DataFrame(columns=RAW_COLUMNS)
+    try:
+        frame = pd.read_csv(RAW_STORAGE_PATH)
+    except Exception:
+        return pd.DataFrame(columns=RAW_COLUMNS)
+    for column in RAW_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = np.nan
+    frame["observation_date"] = pd.to_datetime(frame["observation_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    frame["raw_value"] = pd.to_numeric(frame["raw_value"], errors="coerce")
+    return frame.loc[frame["series_id"].astype(str).eq(series_id)].dropna(subset=["observation_date", "raw_value"])[RAW_COLUMNS].copy()
+
+
+def china_m2_investing_update_raw(api_key: str | None = None) -> pd.DataFrame:
+    """Keep the saved CNM2 levels and extend them from Investing YoY releases."""
+    existing = _existing_raw_series_frame(CHINA_M2_SERIES_ID)
+    if not existing.empty:
+        base = existing[["observation_date", "raw_value"]].rename(columns={"observation_date": "Date", "raw_value": "Value"})
+        base["Date"] = pd.to_datetime(base["Date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+        base = base.sort_values("Date").drop_duplicates("Date", keep="last")
+    else:
+        fred = download_fred_series_batch(
+            (FRED_CHINA_M2_LEGACY_SERIES,),
+            api_key=api_key,
+            observation_start=GLOBAL_LIQUIDITY_CONFIG["start_date"],
+        )
+        base = fred.dropna(subset=["Date", "Value"])[["Date", "Value"]].copy()
+        base["Date"] = pd.to_datetime(base["Date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+        base["Value"] = pd.to_numeric(base["Value"], errors="coerce") / 100_000_000.0
+        base = base.dropna(subset=["Date", "Value"]).sort_values("Date").drop_duplicates("Date", keep="last")
+    if base.empty:
+        raise RuntimeError("No saved CNM2 level history or FRED base is available")
+    yoy = investing_china_m2_yoy_raw(base["Date"].max() - pd.DateOffset(months=12), now_utc() + pd.DateOffset(days=45))
+    reconstructed = reconstruct_china_m2_from_yoy(base, yoy, overwrite_existing=True)
+    downloaded = fmt_datetime(now_utc())
+    rows: list[dict[str, Any]] = []
+    if existing.empty:
+        for _, row in base.iterrows():
+            rows.append(
+                {
+                    "observation_date": row["Date"],
+                    "release_date": pd.NaT,
+                    "source": "FRED_IMF",
+                    "source_name": "FRED / IMF International Financial Statistics",
+                    "source_mode": "FALLBACK_SOURCE",
+                    "source_url": f"https://fred.stlouisfed.org/series/{FRED_CHINA_M2_LEGACY_SERIES}",
+                    "series_id": CHINA_M2_SERIES_ID,
+                    "region": "China",
+                    "metric": "M2",
+                    "frequency": "monthly",
+                    "currency": "CNY",
+                    "unit": "CNY 100 million",
+                    "raw_value": float(row["Value"]),
+                    "download_timestamp": downloaded,
+                    "data_status": "FALLBACK_SOURCE",
+                    "notes": "Preserved FRED IMF base; updated from Investing China M2 YoY releases.",
+                }
+            )
+    for _, row in reconstructed.iterrows():
+        rows.append(
+            {
+                "observation_date": row["observation_date"],
+                "release_date": row["release_date"],
+                "source": "INVESTING_COM",
+                "source_name": "Investing.com / China M2 Money Stock YoY",
+                "source_mode": "FALLBACK_SOURCE",
+                "source_url": str(GLOBAL_LIQUIDITY_CONFIG["investing_china_m2_url"]),
+                "series_id": CHINA_M2_SERIES_ID,
+                "region": "China",
+                "metric": "M2",
+                "frequency": "monthly",
+                "currency": "CNY",
+                "unit": "CNY 100 million",
+                "raw_value": float(row["raw_value"]),
+                "download_timestamp": downloaded,
+                "data_status": "CURRENT",
+                "notes": f"Absolute CNY level reconstructed from prior-year level and Investing YoY={row['yoy_pct']:.3f}%; converted to USD downstream using USDCNY.",
+            }
+        )
+    incoming = pd.DataFrame(rows, columns=RAW_COLUMNS)
+    combined = pd.concat([existing, incoming], ignore_index=True) if not existing.empty else incoming
+    combined["observation_date"] = pd.to_datetime(combined["observation_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    combined["raw_value"] = pd.to_numeric(combined["raw_value"], errors="coerce")
+    combined["_priority"] = np.where(combined["source"].eq("INVESTING_COM"), 2, 1)
+    return combined.dropna(subset=["observation_date", "raw_value"]).sort_values(["observation_date", "_priority", "download_timestamp"]).drop_duplicates(["observation_date", "series_id"], keep="last")[RAW_COLUMNS].reset_index(drop=True)
 
 
 def tradingview_china_m2_yoy_raw(start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
@@ -902,6 +1132,51 @@ def tradingview_pboc_total_assets_latest_raw() -> pd.DataFrame:
     )
 
 
+def tradingeconomics_pboc_total_assets_latest_raw() -> pd.DataFrame:
+    """Read the latest Trading Economics value, already quoted in CNY Hundred Million."""
+    page_url = str(GLOBAL_LIQUIDITY_CONFIG["tradingeconomics_cncbbs_url"])
+    response = get_with_retries(page_url, headers=investing_headers())
+    text = clean_text(BeautifulSoup(response.text, "html.parser").get_text(" ") if BeautifulSoup is not None else response.text)
+    match = re.search(
+        r"Banks Balance Sheet in China .*? to\s+([\d,.]+)\s+CNY Hundred Million in\s+([A-Za-z]+)\s+from .*?of\s+(20\d{2})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        raise RuntimeError("Trading Economics CNCBBS page does not contain the latest value/reference month")
+    source_value = pd.to_numeric(match.group(1).replace(",", ""), errors="coerce")
+    observation_date = pd.to_datetime(f"1 {match.group(2)} {match.group(3)}", errors="coerce")
+    if not np.isfinite(source_value) or pd.isna(observation_date):
+        raise RuntimeError("Trading Economics CNCBBS latest value is not numeric")
+    # Trading Economics labels the observation CNY Hundred Million.  The
+    # published CNCBBS level is ten times larger than the historical series
+    # basis used by the application, so normalize before storing the raw level.
+    raw_value = float(source_value) / 10.0
+    return pd.DataFrame(
+        [
+            {
+                "observation_date": pd.Timestamp(observation_date).to_period("M").to_timestamp(),
+                "release_date": pd.NaT,
+                "source": "TRADINGECONOMICS",
+                "source_name": "Trading Economics / China Banks Balance Sheet",
+                "source_mode": "FALLBACK_SOURCE",
+                "source_url": page_url,
+                "series_id": PBOC_TOTAL_ASSETS_SERIES_ID,
+                "region": "China",
+                "metric": "PBoC Total Assets",
+                "frequency": "monthly",
+                "currency": "CNY",
+                "unit": "CNY 100 million",
+                "raw_value": raw_value,
+                "download_timestamp": fmt_datetime(now_utc()),
+                "data_status": "CURRENT",
+                "notes": f"Trading Economics source unit is CNY Hundred Million; source value {float(source_value):.2f} normalized by /10 to the historical CNCBBS level basis.",
+            }
+        ],
+        columns=RAW_COLUMNS,
+    )
+
+
 def parse_tradingview_observation_month(html: str) -> pd.Timestamp | None:
     text = clean_text(BeautifulSoup(html, "html.parser").get_text(" ") if BeautifulSoup is not None else html)
     match = re.search(r"Observation period\s+([A-Za-z]{3,9})\s+(\d{4})", text)
@@ -913,7 +1188,7 @@ def parse_tradingview_observation_month(html: str) -> pd.Timestamp | None:
     return pd.Timestamp(parsed).to_period("M").to_timestamp()
 
 
-def reconstruct_china_m2_from_yoy(fred_frame: pd.DataFrame, yoy: pd.DataFrame) -> pd.DataFrame:
+def reconstruct_china_m2_from_yoy(fred_frame: pd.DataFrame, yoy: pd.DataFrame, overwrite_existing: bool = False) -> pd.DataFrame:
     if yoy.empty:
         return pd.DataFrame(columns=["observation_date", "release_date", "raw_value", "yoy_pct"])
     values = fred_frame.set_index("Date")["Value"].sort_index().astype(float).to_dict()
@@ -921,7 +1196,7 @@ def reconstruct_china_m2_from_yoy(fred_frame: pd.DataFrame, yoy: pd.DataFrame) -
     rows = []
     for _, row in yoy.sort_values("observation_date").iterrows():
         observation_date = pd.Timestamp(row["observation_date"])
-        if observation_date <= latest_fred_date:
+        if observation_date <= latest_fred_date and not overwrite_existing:
             continue
         base_date = observation_date - pd.DateOffset(years=1)
         base_value = values.get(base_date)
@@ -1187,17 +1462,14 @@ def write_pboc_total_assets_table(frame: pd.DataFrame) -> None:
 def pboc_total_assets_raw() -> pd.DataFrame:
     source_url = str(GLOBAL_LIQUIDITY_CONFIG["pboc_balance_sheet_url"])
     mcp_error = ""
-    try:
-        mcp_frame = tradingview_mcp_pboc_total_assets_raw()
-        if not mcp_frame.empty:
-            write_pboc_total_assets_table(mcp_frame)
-            return mcp_frame
-    except Exception as exc:
-        mcp_error = str(exc)
 
     local_frames: list[pd.DataFrame] = []
     try:
         local_frames.append(pboc_total_assets_table_raw())
+    except Exception:
+        local_frames.append(pd.DataFrame(columns=RAW_COLUMNS))
+    try:
+        local_frames.append(tradingeconomics_pboc_total_assets_latest_raw())
     except Exception:
         local_frames.append(pd.DataFrame(columns=RAW_COLUMNS))
     try:
@@ -1211,7 +1483,7 @@ def pboc_total_assets_raw() -> pd.DataFrame:
         local_and_tradingview["raw_value"] = pd.to_numeric(local_and_tradingview["raw_value"], errors="coerce")
         local_and_tradingview = local_and_tradingview.dropna(subset=["observation_date", "raw_value"])
         if not local_and_tradingview.empty:
-            source_priority = {"PBOC_LOCAL_TABLE": 0, "TRADINGVIEW": 1}
+            source_priority = {"PBOC_LOCAL_TABLE": 0, "TRADINGVIEW": 1, "TRADINGECONOMICS": 2}
             local_and_tradingview["_source_priority"] = local_and_tradingview["source"].map(source_priority).fillna(0)
             frame = (
                 local_and_tradingview.sort_values(["observation_date", "_source_priority", "download_timestamp"])
@@ -1224,6 +1496,14 @@ def pboc_total_assets_raw() -> pd.DataFrame:
                 frame["notes"] = frame["notes"].astype(str) + f"; TradingView MCP primary unavailable: {mcp_error}"
             write_pboc_total_assets_table(frame)
             return frame
+
+    try:
+        mcp_frame = tradingview_mcp_pboc_total_assets_raw()
+        if not mcp_frame.empty:
+            write_pboc_total_assets_table(mcp_frame)
+            return mcp_frame
+    except Exception as exc:
+        mcp_error = str(exc)
 
     try:
         links = discover_pboc_balance_sheet_links(source_url)
@@ -1657,6 +1937,22 @@ def build_weekly_layer(raw: pd.DataFrame) -> pd.DataFrame:
     weekly["dxy_4w_pct"] = weekly["dxy"].pct_change(4, fill_method=None)
     weekly["dxy_13w_pct"] = weekly["dxy"].pct_change(13, fill_method=None)
     weekly["dxy_26w_pct"] = weekly["dxy"].pct_change(26, fill_method=None)
+    forecast_sources = {
+        "US10Y_TermPremium": ("THREEFYTP10", 1.0),
+        "SOFR": ("SOFR", 1.0),
+        "EFFR": ("EFFR", 1.0),
+        "US_BankReserves": ("WRESBAL", 1.0 / 1000.0),
+    }
+    for column, (series_id, multiplier) in forecast_sources.items():
+        lag = 5 if series_id == "THREEFYTP10" else 2 if series_id == "WRESBAL" else 1
+        weekly[column] = weekly_available_last(raw_series(raw, series_id), lag).reindex(index).ffill() * multiplier
+    for weeks in (4, 13, 26):
+        weekly[f"US10Y_TermPremium_{weeks}W_Change"] = weekly["US10Y_TermPremium"].diff(weeks)
+        weekly[f"US_BankReserves_{weeks}W_Change"] = weekly["US_BankReserves"].diff(weeks)
+        weekly[f"US_BankReserves_{weeks}W_PctChange"] = weekly["US_BankReserves"].pct_change(weeks, fill_method=None) * 100.0
+    weekly["SOFR_EFFR_Spread"] = weekly["SOFR"] - weekly["EFFR"]
+    for weeks in (4, 13):
+        weekly[f"SOFR_EFFR_{weeks}W_Change"] = weekly["SOFR_EFFR_Spread"].diff(weeks)
     weekly["data_status"] = np.where(
         weekly["us_net_liquidity_usd_bn"].notna() & weekly["global_cb_assets_usd_bn"].notna(),
         "CURRENT",
@@ -1677,6 +1973,14 @@ def weekly_last(series: pd.Series) -> pd.Series:
     out = series.copy()
     out.index = pd.to_datetime(out.index)
     return out.resample("W-FRI").last().dropna()
+
+
+def weekly_available_last(series: pd.Series, business_day_lag: int) -> pd.Series:
+    if series.empty:
+        return series
+    available = series.copy()
+    available.index = pd.to_datetime(available.index) + pd.offsets.BDay(business_day_lag)
+    return available.resample("W-FRI").last().dropna()
 
 
 def weekly_dxy() -> pd.Series:

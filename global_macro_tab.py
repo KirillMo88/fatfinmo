@@ -18,6 +18,13 @@ from global_liquidity import (
     start_background_update_if_stale as start_global_liquidity_update_if_stale,
     update_global_liquidity,
 )
+from macro_research_export import (
+    DEFAULT_START_DATE,
+    EXPORT_CATEGORY_OPTIONS,
+    EXPORT_LAYER_OPTIONS,
+    EXPORT_MODEL_USAGE_OPTIONS,
+    build_weekly_macro_research_workbook,
+)
 
 
 SLOW_REFRESH_SECONDS = 21600
@@ -52,17 +59,80 @@ def render_global_macro_tab(api_key: str | None = None) -> None:
     st.caption(
         "Monitoring/data layer only. No combined Global Macro Score is calculated here; strategy tabs consume only the factors they need."
     )
+    st.markdown(
+        """
+<style>
+.global-macro-table-wrap {
+    width: 100%;
+    overflow-x: hidden;
+}
+.global-macro-table-wrap table.global-macro-table {
+    width: 100% !important;
+    table-layout: fixed !important;
+    border-collapse: collapse;
+    font-size: 0.72rem;
+}
+.global-macro-table-wrap table.global-macro-table th,
+.global-macro-table-wrap table.global-macro-table td {
+    width: auto !important;
+    max-width: none !important;
+    padding: 0.38rem 0.42rem !important;
+    white-space: nowrap !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.2;
+    height: 1.9rem;
+    max-height: 1.9rem;
+}
+.global-macro-table-wrap table.global-macro-table th {
+    font-weight: 700;
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
     if "global_macro_refresh_nonce" not in st.session_state:
         st.session_state["global_macro_refresh_nonce"] = 0
-    controls = st.columns([1.2, 5.8])
+    controls = st.columns([1.2, 1.0, 1.0, 1.4, 3.4])
     with controls[0]:
         force_refresh = st.button("Refresh Global Macro", use_container_width=True, key="global_macro_refresh")
     with controls[1]:
+        export_start = st.date_input("Export start", value=pd.Timestamp(DEFAULT_START_DATE).date(), key="macro_research_export_start")
+    with controls[2]:
+        export_end = st.date_input("Export end", value=pd.Timestamp.now(tz="UTC").date(), key="macro_research_export_end")
+    with controls[4]:
         st.markdown(
             f"<div style='padding-top:1.55rem; color:#94a3b8; font-size:0.78rem;'>"
             f"Liquidity storage: {GLOBAL_LIQUIDITY_STORAGE_DIR}</div>",
             unsafe_allow_html=True,
         )
+    export_filters = st.columns([1.35, 2.35, 2.35, 2.0])
+    with export_filters[0]:
+        export_layers = st.multiselect(
+            "Export Layer",
+            options=EXPORT_LAYER_OPTIONS,
+            default=["All"],
+            help="All exports every layer; remove it to select individual layers.",
+            key="macro_research_export_layers",
+        )
+    with export_filters[1]:
+        export_model_usages = st.multiselect(
+            "Export Model usage",
+            options=EXPORT_MODEL_USAGE_OPTIONS,
+            default=["All"],
+            help="All exports every model usage; remove it to select individual usages.",
+            key="macro_research_export_model_usages",
+        )
+    with export_filters[2]:
+        export_categories = st.multiselect(
+            "Export Category",
+            options=EXPORT_CATEGORY_OPTIONS,
+            default=["All"],
+            help="All exports every category; remove it to select individual categories.",
+            key="macro_research_export_categories",
+        )
+    with export_filters[3]:
+        export_research = st.button("Export Weekly Macro Dataset", use_container_width=True, key="global_macro_research_export")
     _render_tradingview_mcp_panel()
 
     if force_refresh:
@@ -83,11 +153,40 @@ def render_global_macro_tab(api_key: str | None = None) -> None:
     if snapshot.empty:
         st.warning("Global Macro data is not available yet.")
         return
+    if export_research:
+        with st.spinner("Building weekly macro research workbook..."):
+            try:
+                workbook_bytes, filename = build_weekly_macro_research_workbook(
+                    api_key=api_key,
+                    start_date=pd.Timestamp(export_start),
+                    end_date=pd.Timestamp(export_end),
+                    layers=export_layers,
+                    model_usages=export_model_usages,
+                    categories=export_categories,
+                )
+                st.session_state["global_macro_research_export_payload"] = {"bytes": workbook_bytes, "filename": filename}
+            except Exception as exc:
+                st.warning(f"Weekly macro research export failed: {exc}")
+    export_payload = st.session_state.get("global_macro_research_export_payload")
+    if isinstance(export_payload, dict) and export_payload.get("bytes"):
+        st.download_button(
+            "Download Weekly Macro Dataset .xlsx",
+            data=export_payload["bytes"],
+            file_name=str(export_payload.get("filename") or "global_macro_research_weekly.xlsx"),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=False,
+            key="global_macro_research_download",
+        )
 
     _render_global_macro_summary(snapshot)
+    table_widths = {
+        "instrument": _global_macro_column_width(snapshot, "Instrument"),
+        "source": _global_macro_column_width(snapshot, "Source"),
+    }
     for block in [
         "Markets",
         "Global Liquidity",
+        "Funding Conditions",
         "FX / USD",
         "Inflation",
         "Rates & Curves",
@@ -98,7 +197,7 @@ def render_global_macro_tab(api_key: str | None = None) -> None:
         if block_df.empty:
             continue
         st.markdown(f"### {block}")
-        st.dataframe(_style_global_macro_table(block_df, block), use_container_width=True, hide_index=True)
+        st.markdown(_global_macro_table_html(block_df, block, table_widths), unsafe_allow_html=True)
 
 
 def _render_tradingview_mcp_panel() -> None:
@@ -172,12 +271,47 @@ def _render_tradingview_mcp_panel() -> None:
 
 
 def _render_tradingview_mcp_validation(tv_mcp: Any) -> None:
-    symbols = ["ECONOMICS:CNM2", "ECONOMICS:CNCBBS", "ECONOMICS:USBCOI", "ECONOMICS:USNMPMI"]
+    symbols = [
+        "ECONOMICS:CNM2",
+        "ECONOMICS:CNCBBS",
+        "ECONOMICS:USBCOI",
+        "TVC:DE10Y",
+        "TVC:FR10Y",
+        "TVC:CN10Y",
+        "TVC:JP10Y",
+    ]
     reports = []
     previews = []
-    with st.spinner("Validating TradingView economic symbols..."):
+    with st.spinner("Validating TradingView MCP symbols..."):
         for symbol in symbols:
             try:
+                if symbol.startswith("TVC:"):
+                    frame = tv_mcp.get_ohlcv_data(symbol, interval="1D", count=5000)
+                    dates = pd.to_datetime(frame["date"], errors="coerce")
+                    values = pd.to_numeric(frame["close"], errors="coerce")
+                    reports.append(
+                        {
+                            "Symbol": symbol,
+                            "Description": "TradingView bond yield OHLCV",
+                            "Source": "TradingView MCP / get_ohlcv",
+                            "Unit": "percentage points",
+                            "Scale": "close",
+                            "Frequency": "daily",
+                            "First available date": dates.min().strftime("%Y-%m-%d") if dates.notna().any() else "n/a",
+                            "Last available date": dates.max().strftime("%Y-%m-%d") if dates.notna().any() else "n/a",
+                            "Latest value": values.iloc[-1] if not values.dropna().empty else np.nan,
+                            "Number of observations": int(values.notna().sum()),
+                            "Null count": int(values.isna().sum()),
+                            "Duplicate date count": int(dates.duplicated().sum()),
+                            "Data Status": "OK" if not values.dropna().empty else "MISSING",
+                            "Validation": "OK" if len(values.dropna()) >= 24 else "INSUFFICIENT_HISTORY",
+                        }
+                    )
+                    sample = frame.head(5).copy()
+                    sample = pd.concat([sample, frame.tail(5)], ignore_index=True)
+                    sample.insert(0, "symbol", symbol)
+                    previews.append(sample)
+                    continue
                 result = tv_mcp.get_economic_data(symbol, date_from="2010-01-01", force=True)
                 valid, status = tv_mcp.validate_economic_result(result, min_observations=24, max_stale_days=120)
                 summary = tv_mcp.validation_summary(result)
@@ -241,7 +375,7 @@ def load_global_macro_snapshot(api_key_signature: str = "", refresh_nonce: int =
     specs.extend(_global_liquidity_specs(raw_liquidity, monthly_liquidity, weekly_liquidity))
     specs.extend(_fx_specs(raw_liquidity, market))
     specs.extend(_inflation_specs(fred))
-    specs.extend(_rates_specs(fred))
+    specs.extend(_rates_specs(fred, weekly_liquidity))
     specs.extend(_growth_specs(fred, market))
     specs.extend(_risk_specs(fred, market))
     rows = [_series_row(spec, now) for spec in specs]
@@ -263,6 +397,7 @@ def _download_fred_macro_series(api_key: str | None) -> dict[str, pd.Series]:
         "IRLTLT01CNM156N",
         "IRLTLT01JPM156N",
         "NAPM",
+        "RSAFS",
         "NMFCI",
         "ICSA",
         "CFNAI",
@@ -338,18 +473,22 @@ def _global_liquidity_specs(raw: pd.DataFrame, monthly: pd.DataFrame, weekly: pd
         _liquidity_spec("Euro Area M2 Money Supply", "ECB Data API", monthly, "ea_m2_usd_bn", "monthly"),
         _liquidity_spec("China M2 Money Supply", _source_label(raw, "Money & Quasi-money (M2)", "Fallback / China M2"), monthly, "china_m2_usd_bn", "monthly"),
         _liquidity_spec("Japan M2 Money Supply", "BoJ Time-Series API", monthly, "japan_m2_usd_bn", "monthly"),
-        _liquidity_spec("Global Central Bank Assets", "Derived / Fed + ECB + BoJ + PBoC", monthly, "global_cb_assets_usd_bn", "monthly"),
-        _liquidity_spec("Federal Reserve Total Assets", "FRED / WALCL", monthly, "fed_assets_usd_bn", "monthly"),
-        _liquidity_spec("European Central Bank Total Assets", "ECB Data API / ILM", monthly, "ecb_assets_usd_bn", "monthly"),
-        _liquidity_spec("Bank of Japan Total Assets", "BoJ Time-Series API", monthly, "boj_assets_usd_bn", "monthly"),
-        _liquidity_spec("People's Bank of China Total Assets", _source_label(raw, "PBOC_TOTAL_ASSETS", "PBoC / TradingView fallback"), monthly, "pboc_assets_usd_bn", "monthly"),
-        _liquidity_spec("US Net Liquidity", "FRED / WALCL - WTREGEN - RRPONTSYD", weekly, "us_net_liquidity_usd_bn", "weekly"),
     ]
     regime = _global_liquidity_monitor_frame(monthly, weekly)
     specs.extend(
         [
-            _score_spec("Global Liquidity Score", "Derived / M2 + CB + USNL impulses", regime, "global_liquidity_score"),
             _absolute_spec("Global Liquidity Direction 13W", "Derived / score delta 13W", regime, "direction_13w", "score points"),
+            _score_spec("Global Liquidity Score", "Derived / M2 + CB + USNL impulses", regime, "global_liquidity_score"),
+            _liquidity_spec("Global Central Bank Assets", "Derived / Fed + ECB + BoJ + PBoC", monthly, "global_cb_assets_usd_bn", "monthly"),
+            _liquidity_spec("Federal Reserve Total Assets", "FRED / WALCL", monthly, "fed_assets_usd_bn", "monthly"),
+            _liquidity_spec("European Central Bank Total Assets", "ECB Data API / ILM", monthly, "ecb_assets_usd_bn", "monthly"),
+            _liquidity_spec("Bank of Japan Total Assets", "BoJ Time-Series API", monthly, "boj_assets_usd_bn", "monthly"),
+            _liquidity_spec("People's Bank of China Total Assets", _source_label(raw, "PBOC_TOTAL_ASSETS", "PBoC / TradingView fallback"), monthly, "pboc_assets_usd_bn", "monthly"),
+            _liquidity_spec("US Net Liquidity", "FRED / WALCL - WTREGEN - RRPONTSYD", weekly, "us_net_liquidity_usd_bn", "weekly"),
+            _liquidity_spec("U.S. Bank Reserves", "FRED / WRESBAL", weekly, "US_BankReserves", "weekly"),
+            _absolute_spec("SOFR", "FRED / SOFR", weekly, "SOFR", "%", block="Funding Conditions"),
+            _absolute_spec("EFFR", "FRED / EFFR", weekly, "EFFR", "%", block="Funding Conditions"),
+            _absolute_spec("SOFR-EFFR Spread", "Derived / SOFR - EFFR", weekly, "SOFR_EFFR_Spread", "percentage points", block="Funding Conditions"),
             _state_spec("Global M2 Trend", "Derived / 13W + 26W + 52W trend", regime, "trend_state"),
             _state_spec("Long Liquidity Cycle", "Derived / 65M reference cycle", regime, "long_cycle_phase"),
         ]
@@ -385,9 +524,16 @@ def _score_spec(instrument: str, source: str, frame: pd.DataFrame, column: str) 
     )
 
 
-def _absolute_spec(instrument: str, source: str, frame: pd.DataFrame, column: str, unit: str) -> MacroSeriesSpec:
+def _absolute_spec(
+    instrument: str,
+    source: str,
+    frame: pd.DataFrame,
+    column: str,
+    unit: str,
+    block: str = "Global Liquidity",
+) -> MacroSeriesSpec:
     return MacroSeriesSpec(
-        block="Global Liquidity",
+        block=block,
         instrument=instrument,
         source=source,
         change_type="absolute",
@@ -435,21 +581,69 @@ def _inflation_specs(fred: dict[str, pd.Series]) -> list[MacroSeriesSpec]:
     ]
 
 
-def _rates_specs(fred: dict[str, pd.Series]) -> list[MacroSeriesSpec]:
+def _rates_specs(fred: dict[str, pd.Series], weekly: pd.DataFrame | None = None) -> list[MacroSeriesSpec]:
     us2y = _clean_series(fred.get("DGS2"))
     us10y = _clean_series(fred.get("DGS10"))
     us3m = _clean_series(fred.get("DGS3MO"))
+    international_rates = [
+        ("Germany 10-Year Government Bond Yield", "GE10Y", "TVC:DE10Y", "FRED / IRLTLT01DEM156N", fred.get("IRLTLT01DEM156N")),
+        ("France 10-Year Government Bond Yield", "FR10Y", "TVC:FR10Y", "FRED / IRLTLT01FRM156N", fred.get("IRLTLT01FRM156N")),
+        ("China 10-Year Government Bond Yield", "CN10Y", "TVC:CN10Y", "FRED / IRLTLT01CNM156N", fred.get("IRLTLT01CNM156N")),
+        ("Japan 10-Year Government Bond Yield", "JP10Y", "TVC:JP10Y", "FRED / IRLTLT01JPM156N", fred.get("IRLTLT01JPM156N")),
+    ]
+    international_specs: list[MacroSeriesSpec] = []
+    for instrument, alias, symbol, fallback_source, fallback_series in international_rates:
+        series, source, status = _tradingview_rate_series_or_fallback(symbol, alias, fallback_source, fallback_series)
+        international_specs.append(_rate_spec(instrument, source, series, status))
     return [
         _fred_bps_spec("Rates & Curves", "Federal Funds Effective Rate", "FRED / FEDFUNDS", fred.get("FEDFUNDS")),
         _fred_bps_spec("Rates & Curves", "U.S. 2-Year Treasury Yield", "FRED / DGS2", us2y),
         _fred_bps_spec("Rates & Curves", "U.S. 10-Year Treasury Yield", "FRED / DGS10", us10y),
+        _absolute_spec("U.S. 10Y Term Premium", "FRED / THREEFYTP10", weekly if weekly is not None else pd.DataFrame(), "US10Y_TermPremium", "percentage points", block="Rates & Curves"),
         _spread_spec("U.S. 2Y-10Y Treasury Curve", "Derived / DGS10 - DGS2", us10y - us2y),
         _spread_spec("U.S. 3M-10Y Treasury Curve", "Derived / DGS10 - DGS3MO", us10y - us3m),
-        _fred_bps_spec("Rates & Curves", "Germany 10-Year Government Bond Yield", "FRED / IRLTLT01DEM156N", fred.get("IRLTLT01DEM156N")),
-        _fred_bps_spec("Rates & Curves", "France 10-Year Government Bond Yield", "FRED / IRLTLT01FRM156N", fred.get("IRLTLT01FRM156N")),
-        _fred_bps_spec("Rates & Curves", "China 10-Year Government Bond Yield", "FRED / IRLTLT01CNM156N", fred.get("IRLTLT01CNM156N")),
-        _fred_bps_spec("Rates & Curves", "Japan 10-Year Government Bond Yield", "FRED / IRLTLT01JPM156N", fred.get("IRLTLT01JPM156N")),
+        *international_specs,
     ]
+
+
+def _rate_spec(instrument: str, source: str, series: pd.Series | None, status: str) -> MacroSeriesSpec:
+    return MacroSeriesSpec(
+        block="Rates & Curves",
+        instrument=instrument,
+        source=source,
+        change_type="bps",
+        current_format="percent",
+        frequency="daily/monthly",
+        unit="percentage points",
+        series=_clean_series(series),
+        data_status=status,
+    )
+
+
+def _tradingview_rate_series_or_fallback(
+    symbol: str,
+    alias: str,
+    fallback_source: str,
+    fallback_series: pd.Series | None,
+) -> tuple[pd.Series, str, str]:
+    try:
+        from tradingview_mcp import get_ohlcv_data
+
+        frame = get_ohlcv_data(symbol, interval="1D", count=5000)
+        series = _clean_series(
+            pd.Series(
+                pd.to_numeric(frame["close"], errors="coerce").values,
+                index=pd.to_datetime(frame["date"], errors="coerce"),
+            )
+        )
+        latest = _latest_index(series)
+        age_days = (pd.Timestamp.now(tz="UTC").tz_localize(None) - latest).days if latest is not None else 9999
+        if len(series) < 24 or age_days > 10:
+            raise RuntimeError(f"insufficient or stale OHLCV data: n={len(series)}, age_days={age_days}")
+        return series, f"TradingView MCP / {symbol} ({alias})", "OK"
+    except Exception:
+        series = _clean_series(fallback_series)
+        return series, f"{fallback_source} fallback", "FALLBACK_SOURCE" if not series.empty else "MISSING"
 
 
 def _growth_specs(fred: dict[str, pd.Series], market: dict[str, pd.Series]) -> list[MacroSeriesSpec]:
@@ -458,11 +652,7 @@ def _growth_specs(fred: dict[str, pd.Series], market: dict[str, pd.Series]) -> l
         "FRED / NAPM",
         fred.get("NAPM"),
     )
-    ism_services, ism_services_source, ism_services_status = _tradingview_economic_series_or_fallback(
-        "ECONOMICS:USNMPMI",
-        "FRED / NMFCI fallback",
-        fred.get("NMFCI"),
-    )
+    ism_services, ism_services_source, ism_services_status = _investing_ism_services_series_or_fallback(fred.get("NMFCI"))
     return [
         MacroSeriesSpec("Growth / Business Cycle", "U.S. ISM Manufacturing PMI", ism_manufacturing_source, "absolute", "number", "monthly", "index", ism_manufacturing, ism_manufacturing_status),
         MacroSeriesSpec("Growth / Business Cycle", "U.S. ISM Services PMI", ism_services_source, "absolute", "number", "monthly", "index", ism_services, ism_services_status),
@@ -471,6 +661,52 @@ def _growth_specs(fred: dict[str, pd.Series], market: dict[str, pd.Series]) -> l
         MacroSeriesSpec("Growth / Business Cycle", "WTI Crude Oil", "Yahoo / CL=F", "percent", "number", "daily", "price", _clean_series(market.get("WTI"))),
         MacroSeriesSpec("Growth / Business Cycle", "Copper", "Yahoo / HG=F", "percent", "number", "daily", "price", _clean_series(market.get("Copper"))),
     ]
+
+
+def _investing_ism_series_or_fallback(fallback_series: pd.Series | None) -> tuple[pd.Series, str, str]:
+    try:
+        from business_cycle import load_investing_pmi_releases, load_pmi_release_fallback
+
+        history = load_pmi_release_fallback("2010-01-01")
+        live = load_investing_pmi_releases("2010-01-01")
+        history_series = pd.Series(
+            pd.to_numeric(history["Value"], errors="coerce").values,
+            index=pd.to_datetime(history["Date"], errors="coerce"),
+        ).dropna()
+        live_series = pd.Series(
+            pd.to_numeric(live["Value"], errors="coerce").values,
+            index=pd.to_datetime(live["Date"], errors="coerce"),
+        ).dropna()
+        history_series.index = pd.to_datetime(history_series.index).tz_localize(None)
+        live_series.index = pd.to_datetime(live_series.index).tz_localize(None)
+        combined = pd.concat([_clean_series(fallback_series), _clean_series(history_series), _clean_series(live_series)]).sort_index()
+        combined = combined[~combined.index.duplicated(keep="last")]
+        if not combined.empty:
+            return combined, "Investing.com / ISM Manufacturing PMI + preserved history", "OK"
+    except Exception:
+        pass
+    series = _clean_series(fallback_series)
+    return series, "FRED / NAPM fallback", "FALLBACK_SOURCE" if not series.empty else "MISSING"
+
+
+def _investing_ism_services_series_or_fallback(fallback_series: pd.Series | None) -> tuple[pd.Series, str, str]:
+    try:
+        from business_cycle import load_investing_ism_services_releases
+
+        live = load_investing_ism_services_releases("2010-01-01")
+        live_series = pd.Series(
+            pd.to_numeric(live["Value"], errors="coerce").values,
+            index=pd.to_datetime(live["Date"], errors="coerce"),
+        ).dropna()
+        live_series.index = pd.to_datetime(live_series.index).tz_localize(None)
+        combined = pd.concat([_clean_series(fallback_series), _clean_series(live_series)]).sort_index()
+        combined = combined[~combined.index.duplicated(keep="last")]
+        if not combined.empty:
+            return combined, "Investing.com / ISM Services PMI + preserved history", "OK"
+    except Exception:
+        pass
+    series = _clean_series(fallback_series)
+    return series, "FRED / NMFCI fallback", "FALLBACK_SOURCE" if not series.empty else "MISSING"
 
 
 def _tradingview_economic_series_or_fallback(
@@ -614,9 +850,52 @@ def _style_global_macro_table(frame: pd.DataFrame, block: str = "") -> Any:
     ).apply(lambda row: _macro_change_color_row(row, block), axis=1)
 
 
+def _global_macro_table_html(frame: pd.DataFrame, block: str = "", widths: dict[str, int] | None = None) -> str:
+    widths = widths or {
+        "instrument": _global_macro_column_width(frame, "Instrument"),
+        "source": _global_macro_column_width(frame, "Source"),
+    }
+    instrument_width = widths["instrument"]
+    source_width = widths["source"]
+    styled = _style_global_macro_table(frame, block).hide(axis="index").set_table_attributes('class="global-macro-table"')
+    table = styled.to_html()
+    return (
+        f'<div class="global-macro-table-wrap" '
+        f'style="--instrument-width:{instrument_width}px; --source-width:{source_width}px;">'
+        f'<style>'
+        f'.global-macro-table-wrap table.global-macro-table th:nth-child(1), '
+        f'.global-macro-table-wrap table.global-macro-table td:nth-child(1) '
+        f'{{width:var(--instrument-width) !important;}} '
+        f'.global-macro-table-wrap table.global-macro-table th:nth-child(9), '
+        f'.global-macro-table-wrap table.global-macro-table td:nth-child(9) '
+        f'{{width:var(--source-width) !important;}}'
+        f'</style>{table}</div>'
+    )
+
+
+def _global_macro_column_width(frame: pd.DataFrame, column: str) -> int:
+    if column not in frame.columns:
+        return 110
+    values = [str(column)] + frame[column].fillna("n/a").astype(str).tolist()
+    longest = max((len(value) for value in values), default=12)
+    return max(110, longest * 7 + 22)
+
+
 def _macro_change_color_row(row: pd.Series, block: str = "") -> list[str]:
     direction = _macro_direction(row, block)
     styles = [""] * len(row)
+    instrument = str(row.get("Instrument", ""))
+    if instrument in {
+        "United States M2 Money Supply",
+        "Euro Area M2 Money Supply",
+        "China M2 Money Supply",
+        "Japan M2 Money Supply",
+        "Federal Reserve Total Assets",
+        "European Central Bank Total Assets",
+        "Bank of Japan Total Assets",
+        "People's Bank of China Total Assets",
+    } and "Instrument" in row.index:
+        styles[row.index.get_loc("Instrument")] = "text-align: right;"
     if direction == 0:
         return styles
     for idx, column in enumerate(row.index):

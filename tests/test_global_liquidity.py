@@ -151,7 +151,7 @@ def test_china_m2_fred_tradingview_fallback_converts_fred_units(monkeypatch):
     assert np.isclose(fallback.iloc[-1]["raw_value"], 1_935_492.4277372)
 
 
-def test_pboc_m2_partial_official_history_falls_back(monkeypatch):
+def test_pboc_m2_partial_official_history_falls_back(monkeypatch, tmp_path):
     fallback = pd.DataFrame(
         [
             raw_row(
@@ -168,6 +168,7 @@ def test_pboc_m2_partial_official_history_falls_back(monkeypatch):
     )
 
     monkeypatch.setattr(gl, "tradingview_mcp_china_m2_raw", lambda: (_ for _ in ()).throw(RuntimeError("stale")))
+    monkeypatch.setattr(gl, "RAW_STORAGE_PATH", tmp_path / "missing_raw.csv")
     monkeypatch.setattr(gl, "discover_pboc_money_supply_links", lambda url: [url])
     monkeypatch.setattr(gl, "parse_pboc_money_supply_page", lambda url: [raw_row("2026-08-01", gl.CHINA_M2_SERIES_ID, 3_567_027.0)])
     monkeypatch.setattr(gl, "china_m2_fred_tradingview_fallback_raw", lambda api_key=None, official_error="": fallback.copy())
@@ -263,6 +264,7 @@ def test_pboc_total_assets_raw_prefers_local_table(monkeypatch, tmp_path):
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_BUNDLED_PATH", tmp_path / "bundled_pboc_total_assets.csv")
     monkeypatch.setattr(gl, "tradingview_mcp_pboc_total_assets_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
     monkeypatch.setattr(gl, "tradingview_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
+    monkeypatch.setattr(gl, "tradingeconomics_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("network parser should not be called when local table exists")
@@ -289,6 +291,7 @@ def test_pboc_total_assets_raw_uses_tradingview_latest_over_seed(monkeypatch, tm
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_STORAGE_PATH", tmp_path / "storage_pboc_total_assets.csv")
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_BUNDLED_PATH", tmp_path / "bundled_pboc_total_assets.csv")
     monkeypatch.setattr(gl, "tradingview_mcp_pboc_total_assets_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
+    monkeypatch.setattr(gl, "tradingeconomics_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
     monkeypatch.setattr(
         gl,
         "tradingview_pboc_total_assets_latest_raw",
@@ -321,6 +324,7 @@ def test_pboc_total_assets_raw_prefers_valid_mcp(monkeypatch, tmp_path):
     monkeypatch.setenv("PBOC_TOTAL_ASSETS_TABLE_PATH", str(tmp_path / "missing.csv"))
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_STORAGE_PATH", tmp_path / "storage_pboc_total_assets.csv")
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_BUNDLED_PATH", tmp_path / "bundled_pboc_total_assets.csv")
+    monkeypatch.setattr(gl, "tradingeconomics_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
     monkeypatch.setattr(
         gl,
         "tradingview_mcp_pboc_total_assets_raw",
@@ -362,6 +366,16 @@ def test_parse_tradingview_observation_month():
     html = "<div>Observation period</div><span>Jul 2026</span>"
 
     assert gl.parse_tradingview_observation_month(html) == pd.Timestamp("2026-07-01")
+
+
+def test_tradingeconomics_cncbbs_normalizes_source_scale(monkeypatch):
+    response = type("Response", (), {"text": "Banks Balance Sheet in China increased to 4,936,948.06 CNY Hundred Million in August from 4,915,100.33 CNY Hundred Million in July of 2026."})()
+    monkeypatch.setattr(gl, "get_with_retries", lambda *args, **kwargs: response)
+
+    row = gl.tradingeconomics_pboc_total_assets_latest_raw().iloc[0]
+
+    assert np.isclose(row["raw_value"], 493_694.806)
+    assert row["unit"] == "CNY 100 million"
 
 
 def test_weekly_fast_cb_layer_uses_fed_and_ecb_only(monkeypatch):
@@ -437,3 +451,14 @@ def test_impulse_state_labels():
         "EXPANSION",
         "STRONG_EXPANSION",
     ]
+
+
+def test_forecast_fred_series_use_completed_week_availability():
+    daily = pd.Series([1.0, 2.0], index=pd.to_datetime(["2026-09-17", "2026-09-18"]))
+    available = gl.weekly_available_last(daily, 1)
+    assert available.loc["2026-09-18"] == 1.0
+    assert available.loc["2026-09-25"] == 2.0
+    reserves = pd.Series([1000.0], index=pd.to_datetime(["2026-09-16"]))
+    assert gl.weekly_available_last(reserves, 2).loc["2026-09-18"] == 1000.0
+    term_premium = pd.Series([0.96], index=pd.to_datetime(["2026-09-11"]))
+    assert gl.weekly_available_last(term_premium, 5).loc["2026-09-18"] == 0.96

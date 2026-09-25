@@ -13,6 +13,43 @@ from .utils import cache_file_is_fresh, classify_score, rolling_percentile_rank
 COT_MOMENTUM_LABELS = ("STRONG_BULLISH_COT", "BULLISH_COT", "NEUTRAL", "BEARISH_COT", "STRONG_BEARISH_COT")
 
 
+def load_comex_gold_cot_from_positioning() -> tuple[pd.DataFrame, str | None]:
+    try:
+        from positioning import cftc_asset_series, read_processed
+
+        master = read_processed("cftc_master")
+        selected = cftc_asset_series(master, "GOLD", "Managed Money")
+    except Exception:
+        return pd.DataFrame(columns=cot_score_columns()), None
+    if selected.empty:
+        return pd.DataFrame(columns=cot_score_columns()), None
+
+    out = pd.DataFrame(
+        {
+            "date": pd.to_datetime(selected["Date"], errors="coerce") + pd.Timedelta(days=3),
+            "cot_report_date": pd.to_datetime(selected["Date"], errors="coerce").dt.date,
+            "market_and_exchange_names": selected.get("Exchange", pd.Series(index=selected.index, dtype="object")).astype(str),
+            "contract_market_name": selected.get("Raw_Contract_Name", pd.Series(index=selected.index, dtype="object")).astype(str),
+            "commodity_name": selected.get("Canonical_Asset", pd.Series("GOLD", index=selected.index)).astype(str),
+            "cot_open_interest": pd.to_numeric(selected["Open_Interest"], errors="coerce"),
+            "cot_mm_long": pd.to_numeric(selected["Long"], errors="coerce"),
+            "cot_mm_short": pd.to_numeric(selected["Short"], errors="coerce"),
+            "cot_mm_spread": pd.to_numeric(selected.get("Spreading", pd.Series(index=selected.index, dtype="float64")), errors="coerce"),
+            "cot_mm_net": pd.to_numeric(selected["Net"], errors="coerce"),
+            "cot_mm_net_pct_oi": pd.to_numeric(selected["NetPctOI"], errors="coerce") / 100.0,
+            "cot_mm_net_pct_oi_percentile": pd.to_numeric(selected["NetPctOI_3Y_Percentile"], errors="coerce"),
+            "cot_change_4w": pd.to_numeric(selected["NetPctOI_4W_Change"], errors="coerce") / 100.0,
+        }
+    )
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.to_period("W-FRI").dt.end_time.dt.normalize()
+    out = out.dropna(subset=["date", "cot_open_interest", "cot_mm_long", "cot_mm_short"]).sort_values("date")
+    out["cot_momentum_score"] = rolling_percentile_rank(out["cot_change_4w"], GOLD_REGIME_CONFIG["percentile"]["window_weeks"], GOLD_REGIME_CONFIG["percentile"]["minimum_weeks"])
+    out["cot_momentum_state"] = out["cot_momentum_score"].map(classify_cot_momentum_state)
+    out["cot_net_position_state"] = out["cot_mm_net_pct_oi_percentile"].map(classify_cot_position_state)
+    contract = str(out["contract_market_name"].iloc[-1]) if not out.empty else None
+    return out[cot_score_columns()], contract
+
+
 def download_cftc_cot(config: dict | None = None, cache_dir: Path | None = None) -> pd.DataFrame:
     cfg = (config or GOLD_REGIME_CONFIG)["cot"]
     directory = cache_dir or Path("persistent") / "finance_cache" / "gold_regime"

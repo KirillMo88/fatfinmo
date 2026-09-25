@@ -11,8 +11,11 @@ from market_model import (
     calculate_macro_transition_risk,
     calculate_macro_transition_risk_history,
     calculate_overall_transition_status,
+    calculate_positioning_risk_history,
+    calculate_tail_risk_history,
     classify_credit_state,
     classify_global_liquidity_backdrop,
+    classify_positioning_state,
     fast_transition_state,
     transition_state,
 )
@@ -191,3 +194,103 @@ def test_opportunity_state_handles_transition_layers():
     )
 
     assert classify_opportunity_state(row) == "FAST_TRANSITION_WARNING"
+
+
+def test_positioning_state_bands():
+    assert classify_positioning_state(np.nan) == "DATA_INCOMPLETE"
+    assert classify_positioning_state(39.9) == "BENIGN"
+    assert classify_positioning_state(40.0) == "NORMAL"
+    assert classify_positioning_state(60.0) == "ELEVATED"
+    assert classify_positioning_state(75.0) == "CROWDED"
+    assert classify_positioning_state(90.0) == "EXTREME"
+
+
+def test_positioning_risk_uses_publication_date_and_requires_components():
+    aaii = pd.DataFrame(
+        {
+            "Date": ["2024-01-05", "2024-01-12"],
+            "AAII_Bearish_3Y_Percentile": [20.0, 80.0],
+        }
+    )
+    cftc = pd.DataFrame(
+        {
+            "Date": ["2024-01-09"],
+            "Publication_Date": ["2024-01-12"],
+            "Canonical_Asset": ["VIX"],
+            "Participant_Category": ["Asset Manager"],
+            "Preferred_For_Dashboard": [True],
+            "NetPctOI": [10.0],
+            "NetPctOI_3Y_Percentile": [60.0],
+        }
+    )
+
+    history = calculate_positioning_risk_history(aaii, cftc)
+
+    latest = history.iloc[-1]
+    assert latest["Date"] == pd.Timestamp("2024-01-12")
+    assert latest["PositioningRisk"] == 70.0
+    assert latest["PositioningState"] == "ELEVATED"
+
+
+def test_positioning_risk_deduplicates_vix_publication_weeks():
+    aaii = pd.DataFrame(
+        {
+            "Date": ["2024-01-12"],
+            "AAII_Bearish_3Y_Percentile": [80.0],
+        }
+    )
+    cftc = pd.DataFrame(
+        {
+            "Date": ["2024-01-09", "2024-01-10"],
+            "Publication_Date": ["2024-01-12", "2024-01-12"],
+            "Canonical_Asset": ["VIX", "VIX"],
+            "Participant_Category": ["Asset Manager", "Asset Manager"],
+            "Preferred_For_Dashboard": [True, True],
+            "NetPctOI": [10.0, 12.0],
+            "NetPctOI_3Y_Percentile": [60.0, 40.0],
+        }
+    )
+
+    history = calculate_positioning_risk_history(aaii, cftc)
+
+    latest = history.iloc[-1]
+    assert latest["VIX_AssetManager_NetPctOI"] == 12.0
+    assert latest["PositioningRisk"] == 60.0
+
+
+def test_positioning_risk_renormalizes_available_components_without_zero_fill():
+    cftc = pd.DataFrame(
+        {
+            "Date": ["2024-01-09"],
+            "Canonical_Asset": ["VIX"],
+            "Participant_Category": ["Asset Manager"],
+            "Preferred_For_Dashboard": [True],
+            "NetPctOI": [10.0],
+            "NetPctOI_3Y_Percentile": [35.0],
+        }
+    )
+
+    history = calculate_positioning_risk_history(pd.DataFrame(), cftc)
+
+    assert history["PositioningRisk"].iloc[-1] == 35.0
+    assert history["PositioningState"].iloc[-1] == "BENIGN"
+
+
+def test_tail_risk_allows_fast_credit_escalation_without_positioning():
+    history = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2024-01-05")],
+            "Market_Regime": ["BULL"],
+            "Credit_Risk": [75.0],
+            "Fast_Transition_Risk": [60.0],
+            "Macro_Transition_Risk": [20.0],
+            "Global_Liquidity_Score": [85.0],
+            "Global_Liquidity_Direction_13W": [5.0],
+            "Global_Liquidity_Direction_13W_State": ["IMPROVING"],
+        }
+    )
+
+    result = calculate_tail_risk_history(history)
+
+    assert result["TailRiskFlag"].iloc[-1] == "EXTREME"
+    assert result["TailRiskReason"].iloc[-1] == "CREDIT|FAST"
