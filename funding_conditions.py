@@ -174,18 +174,37 @@ def build_history(sources: dict[str, pd.DataFrame], move: pd.Series | None = Non
     iorb = sources.get("IORB", pd.DataFrame())
     daily["IORB"] = _asof(iorb, dates).to_numpy()
     daily["SOFR99_IORB_Spread"] = daily["SOFR99"] - daily["IORB"]
-    if move is None or move.dropna().empty:
-        daily["MOVE"] = np.nan
-        daily["MOVE_Z"] = np.nan
-    else:
+    move_source = pd.Series(dtype="float64")
+    move_frame = pd.DataFrame()
+    if move is not None and not move.dropna().empty:
         move_source = pd.to_numeric(move, errors="coerce").dropna().sort_index()
         move_source.index = pd.to_datetime(move_source.index).tz_localize(None).normalize()
         move_source = move_source[~move_source.index.duplicated(keep="last")]
         move_z = expanding_z(move_source.loc[move_source.index >= "2010-01-01"], 156)
         move_frame = pd.DataFrame({"ObservationDate": move_z.index, "AvailableDate": move_z.index,
                                    "Value": move_source.reindex(move_z.index).to_numpy(), "MOVE_Z": move_z.to_numpy()})
-        daily["MOVE"] = _asof(move_frame, dates).to_numpy()
-        daily["MOVE_Z"] = _asof(move_frame, dates, "MOVE_Z").to_numpy()
+
+        # FRED releases can lag market closes. Keep the latest released core
+        # values as-of while allowing newer completed MOVE observations into
+        # the report history.
+        market_dates = pd.DatetimeIndex(move_frame["AvailableDate"]).unique()
+        base = daily.sort_values("Date").drop_duplicates("Date", keep="last")
+        extended_dates = pd.DatetimeIndex(base["Date"]).union(market_dates).sort_values()
+        if len(extended_dates) > len(base):
+            daily = pd.merge_asof(
+                pd.DataFrame({"Date": extended_dates}),
+                base,
+                on="Date",
+                direction="backward",
+            )
+
+    if move is None or move.dropna().empty:
+        daily["MOVE"] = np.nan
+        daily["MOVE_Z"] = np.nan
+    else:
+        report_dates = pd.DatetimeIndex(daily["Date"])
+        daily["MOVE"] = _asof(move_frame, report_dates).to_numpy()
+        daily["MOVE_Z"] = _asof(move_frame, report_dates, "MOVE_Z").to_numpy()
     daily["CollateralStress"] = daily["MOVE_Z"].clip(lower=0, upper=4)
 
     money = daily["MoneyMarketStress"]
@@ -388,6 +407,12 @@ def load_sources(api_key: str | None, refresh: bool = False) -> tuple[dict[str, 
 
 def refresh_snapshot(api_key: str | None = None, refresh: bool = False) -> FundingSnapshot:
     sources, move, source_status = load_sources(api_key, refresh)
+    sofr = sources["SOFR99"]
+    dff = sources["DFF"]
+    core_releases = sofr[["ObservationDate", "AvailableDate"]].merge(
+        dff[["ObservationDate", "AvailableDate"]], on="ObservationDate", how="inner"
+    )
+    core_data_asof = core_releases[["AvailableDate_x", "AvailableDate_y"]].max(axis=1).max()
     snapshot = build_history(sources, move)
     if snapshot.daily["MoneyMarketStress"].notna().sum() < 52:
         raise RuntimeError("Insufficient released SOFR99/DFF observations")
@@ -396,7 +421,7 @@ def refresh_snapshot(api_key: str | None = None, refresh: bool = False) -> Fundi
     snapshot.weekly["LastUpdated"] = calculated_at
     status = {
         "ModelVersion": MODEL_VERSION,
-        "DataAsOf": str(snapshot.daily["Date"].max().date()),
+        "DataAsOf": str(pd.Timestamp(core_data_asof).date()),
         "CalculatedAt": calculated_at,
         "MOVEDataAsOf": str(pd.Timestamp(move.dropna().index.max()).date()) if not move.dropna().empty else None,
         "MOVEBusinessDaysOld": _move_business_days_old(move),
