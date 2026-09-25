@@ -1,10 +1,11 @@
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 
 from fund_flows import (
     FundFlowObservation,
     calculate_fund_flow_metrics,
+    calculate_fund_flow_history_metrics,
     fund_flow_proxy_tickers,
     get_fund_flow_metrics,
     normalize_ticker_for_etf_com,
@@ -79,6 +80,26 @@ def test_calculate_fund_flow_metrics_can_use_fallback_aum():
     assert metrics.flow_1m_pct == 3.0
     assert metrics.flow_3m_pct == 6.0
     assert metrics.method == "latest_aum_fallback"
+
+
+def test_calculate_fund_flow_history_metrics_adds_absolute_and_normalized_fields():
+    observations = [
+        FundFlowObservation(
+            "SPY",
+            date(2025, 1, 3) + timedelta(days=7 * index),
+            net_flow=1_000_000.0 + index * 10_000.0,
+            aum=1_000_000_000.0,
+        )
+        for index in range(60)
+    ]
+
+    history = calculate_fund_flow_history_metrics(observations)
+
+    assert {"ETF_Flow_1W", "ETF_Flow_4W", "ETF_Flow_13W", "ETF_Flow_Intensity_4W", "ETF_Flow_3Y_Pctl"}.issubset(history.columns)
+    assert history.iloc[-1]["ETF_Flow_4W"] == sum(row.net_flow for row in observations[-4:])
+    assert history.iloc[-1]["ETF_Flow_13W"] == sum(row.net_flow for row in observations[-13:])
+    assert np.isfinite(history.iloc[-1]["ETF_Flow_Intensity_4W"])
+    assert np.isfinite(history.iloc[-1]["ETF_Flow_3Y_Pctl"])
 
 
 def test_get_fund_flow_metrics_fetches_and_caches_observations(tmp_path):

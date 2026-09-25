@@ -311,6 +311,14 @@ def compact_market_snapshot(market: dict[str, Any]) -> dict[str, Any]:
         "macro_risk_state": "Macro_Transition_State",
         "global_liquidity_backdrop": "Global_Liquidity_Backdrop",
         "negative_confirmations": "Negative_Confirmation_Count",
+        "positioning_risk": "PositioningRisk",
+        "positioning_state": "PositioningState",
+        "tail_risk_flag": "TailRiskFlag",
+        "tail_risk_reason": "TailRiskReason",
+        "liquidity_warning": "LiquidityWarning",
+        "credit_warning": "CreditWarning",
+        "fast_warning": "FastWarning",
+        "macro_warning": "MacroWarning",
     }
     out = {target: clean_value(market.get(source)) for target, source in keys.items()}
     out["confirmations"] = {

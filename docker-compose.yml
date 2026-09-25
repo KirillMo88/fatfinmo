@@ -24,6 +24,11 @@ services:
       - ./persistent/bybit_derivatives:/app/persistent/bybit_derivatives
       - ./persistent/cio_view:/app/persistent/cio_view
       - ./persistent/global_liquidity:/app/persistent/global_liquidity
+      - ./persistent/rates_financial_conditions:/app/persistent/rates_financial_conditions
+      - ./persistent/funding_conditions:/app/persistent/funding_conditions
+      - ./persistent/treasury_fiscal_regime:/app/persistent/treasury_fiscal_regime
+      - ./persistent/business_cycle:/app/persistent/business_cycle
+      - ./persistent/macro_surprises:/app/persistent/macro_surprises
       - ./persistent/positioning:/app/persistent/positioning
       - ./persistent/snapshots:/app/persistent/snapshots
       - ./persistent/job_status:/app/persistent/job_status
@@ -49,6 +54,11 @@ services:
       - ./persistent/bybit_derivatives:/app/persistent/bybit_derivatives
       - ./persistent/cio_view:/app/persistent/cio_view
       - ./persistent/global_liquidity:/app/persistent/global_liquidity
+      - ./persistent/rates_financial_conditions:/app/persistent/rates_financial_conditions
+      - ./persistent/funding_conditions:/app/persistent/funding_conditions
+      - ./persistent/treasury_fiscal_regime:/app/persistent/treasury_fiscal_regime
+      - ./persistent/business_cycle:/app/persistent/business_cycle
+      - ./persistent/macro_surprises:/app/persistent/macro_surprises
       - ./persistent/positioning:/app/persistent/positioning
       - ./persistent/snapshots:/app/persistent/snapshots
       - ./persistent/job_status:/app/persistent/job_status

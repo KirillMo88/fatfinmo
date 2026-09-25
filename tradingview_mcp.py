@@ -32,8 +32,10 @@ CLIENT_PATH = DEFAULT_STORAGE_DIR / "client.json"
 TOKEN_PATH = DEFAULT_STORAGE_DIR / "token.json"
 PENDING_AUTH_PATH = DEFAULT_STORAGE_DIR / "pending_auth.json"
 ECONOMIC_CACHE_PATH = DEFAULT_STORAGE_DIR / "economic_history.csv"
+OHLCV_CACHE_DIR = DEFAULT_STORAGE_DIR / "ohlcv"
 TOOLS_CACHE_PATH = DEFAULT_STORAGE_DIR / "tools.json"
 ECONOMIC_HISTORY_TTL_SECONDS = 86400
+OHLCV_HISTORY_TTL_SECONDS = 86400
 
 
 @dataclass(frozen=True)
@@ -362,6 +364,52 @@ def get_economic_data(symbol: str, date_from: str = "2010-01-01", date_to: str |
         raise TradingViewMcpError(f"{symbol} returned no economic observations.")
     append_cached_economic(result)
     return result
+
+
+def get_ohlcv_data(
+    symbol: str,
+    interval: str = "1D",
+    count: int = 5000,
+    force: bool = False,
+) -> pd.DataFrame:
+    """Return historical OHLCV bars from TradingView MCP with a local cache."""
+    if not mcp_enabled():
+        raise TradingViewMcpError("TradingView MCP is disabled.")
+    safe_symbol = "".join(character if character.isalnum() else "_" for character in symbol)
+    cache_path = OHLCV_CACHE_DIR / f"{safe_symbol}_{interval}.csv"
+    if not force and cache_path.exists() and now_ts() - cache_path.stat().st_mtime < OHLCV_HISTORY_TTL_SECONDS:
+        try:
+            cached = pd.read_csv(cache_path)
+            cached["date"] = pd.to_datetime(cached["date"], errors="coerce")
+            return cached.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+        except Exception:
+            pass
+
+    payload = call_tool("get_ohlcv", {"symbol": symbol, "interval": interval, "count": min(int(count), 5000)})
+    bars = payload.get("bars")
+    if not isinstance(bars, list) and isinstance(payload.get("data"), dict):
+        bars = payload["data"].get("bars")
+    if not isinstance(bars, list) or not bars:
+        raise TradingViewMcpError(f"{symbol} returned no OHLCV observations.")
+    frame = pd.DataFrame(bars)
+    required = {"t", "c"}
+    if not required.issubset(frame.columns):
+        raise TradingViewMcpError(f"{symbol} returned malformed OHLCV observations.")
+    out = pd.DataFrame(
+        {
+            "date": pd.to_datetime(pd.to_numeric(frame["t"], errors="coerce"), unit="s", utc=True).dt.tz_localize(None),
+            "open": pd.to_numeric(frame.get("o"), errors="coerce"),
+            "high": pd.to_numeric(frame.get("h"), errors="coerce"),
+            "low": pd.to_numeric(frame.get("l"), errors="coerce"),
+            "close": pd.to_numeric(frame["c"], errors="coerce"),
+            "volume": pd.to_numeric(frame.get("v"), errors="coerce"),
+        }
+    ).dropna(subset=["date", "close"]).sort_values("date").drop_duplicates("date", keep="last")
+    if out.empty:
+        raise TradingViewMcpError(f"{symbol} returned no valid OHLCV observations.")
+    OHLCV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    out.to_csv(cache_path, index=False)
+    return out.reset_index(drop=True)
 
 
 def read_cached_economic(symbol: str) -> TradingViewEconomicResult | None:

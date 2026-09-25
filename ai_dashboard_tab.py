@@ -555,7 +555,7 @@ def style_ai_fig(fig: go.Figure, title: str) -> go.Figure:
         plot_bgcolor="#0f131a",
         font={"color": "#e5e7eb", "size": 11},
         margin={"l": 58, "r": 72, "t": 60, "b": 44},
-        hovermode="x unified",
+        hovermode="closest",
         legend={"orientation": "h", "yanchor": "top", "y": -0.16, "xanchor": "left", "x": 0},
     )
     fig.update_xaxes(tickformat="%b'%y", showgrid=False, zeroline=False, color="#cbd5e1", linecolor="#475569")

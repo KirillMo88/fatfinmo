@@ -13,6 +13,11 @@ import pandas as pd
 
 import app
 import positioning
+from liquidity_forecast import ERROR_PATH, SNAPSHOT_PATH, refresh_forecast_snapshot
+from rates_financial_conditions import SNAPSHOT_PATH as RATES_FC_SNAPSHOT_PATH, refresh_snapshot as refresh_rates_fc_snapshot
+from funding_conditions import WEEKLY_PATH as FUNDING_SNAPSHOT_PATH, refresh_snapshot as refresh_funding_snapshot
+from treasury_fiscal_regime import SNAPSHOT_PATH as TREASURY_FISCAL_SNAPSHOT_PATH, refresh_snapshot as refresh_treasury_fiscal_snapshot
+from treasury_funding_policy import refresh_snapshot as refresh_treasury_funding_policy_snapshot
 
 
 JOB_DIR = Path("persistent") / "job_status"
@@ -144,6 +149,68 @@ def run_weekly_positioning() -> None:
         raise
 
 
+def run_liquidity_forecast() -> None:
+    started = time.time()
+    try:
+        with job_lock("liquidity_forecast"):
+            frame, status = refresh_forecast_snapshot(api_key=os.getenv("FRED_API_KEY"))
+            ERROR_PATH.unlink(missing_ok=True)
+        log_job("liquidity_forecast", started, "CURRENT", len(frame), source_status=status.get("SourceStatus"))
+    except FileExistsError:
+        log_job("liquidity_forecast", started, "SKIPPED_LOCKED")
+    except Exception as exc:
+        ERROR_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ERROR_PATH.write_text(json.dumps({"FailedAt": pd.Timestamp.now(tz="UTC").isoformat(), "Reason": type(exc).__name__, "SnapshotRetained": SNAPSHOT_PATH.exists()}), encoding="utf-8")
+        log_job("liquidity_forecast", started, "FAILED", error=str(exc))
+        raise
+
+
+def run_rates_financial_conditions() -> None:
+    started = time.time()
+    try:
+        with job_lock("rates_financial_conditions"):
+            snapshot = refresh_rates_fc_snapshot(api_key=os.getenv("FRED_API_KEY"))
+        log_job("rates_financial_conditions", started, "CURRENT", len(snapshot.history), source_status=snapshot.status.get("SourceStatus"))
+    except FileExistsError:
+        log_job("rates_financial_conditions", started, "SKIPPED_LOCKED")
+    except Exception as exc:
+        log_job("rates_financial_conditions", started, "FAILED", error=str(exc))
+        raise
+
+
+def run_funding_conditions() -> None:
+    started = time.time()
+    try:
+        with job_lock("funding_conditions"):
+            snapshot = refresh_funding_snapshot(api_key=os.getenv("FRED_API_KEY"))
+        log_job("funding_conditions", started, "CURRENT", len(snapshot.weekly), source_status=snapshot.status.get("SourceStatus"))
+    except FileExistsError:
+        log_job("funding_conditions", started, "SKIPPED_LOCKED")
+    except Exception as exc:
+        log_job("funding_conditions", started, "FAILED", error=str(exc))
+        raise
+
+
+def run_treasury_fiscal_regime() -> None:
+    started = time.time()
+    try:
+        with job_lock("treasury_fiscal_regime"):
+            snapshot = refresh_treasury_fiscal_snapshot(api_key=os.getenv("FRED_API_KEY"))
+            funding_policy = refresh_treasury_funding_policy_snapshot(
+                api_key=os.getenv("FRED_API_KEY"), treasury_snapshot=snapshot,
+            )
+        log_job("treasury_fiscal_regime", started, "CURRENT", len(snapshot.weekly),
+                source_status={
+                    "TreasuryFiscal": snapshot.status.get("SourceStatus"),
+                    "TreasuryFundingPolicy": funding_policy.status,
+                })
+    except FileExistsError:
+        log_job("treasury_fiscal_regime", started, "SKIPPED_LOCKED")
+    except Exception as exc:
+        log_job("treasury_fiscal_regime", started, "FAILED", error=str(exc))
+        raise
+
+
 def parse_utc_hhmm(value: str, fallback: str) -> dt_time:
     raw = (value or fallback).strip()
     try:
@@ -219,12 +286,24 @@ def run_scheduler() -> None:
     if os.getenv("SCREENER_RUN_NIGHTLY_ON_START_IF_MISSING", "1").strip().lower() in {"1", "true", "yes"}:
         if latest_screener_snapshot_time() is None:
             run_job_safely("nightly_analytics_startup", run_nightly_analytics)
+        if not SNAPSHOT_PATH.exists():
+            run_job_safely("liquidity_forecast_startup", run_liquidity_forecast)
+        if not RATES_FC_SNAPSHOT_PATH.exists():
+            run_job_safely("rates_financial_conditions_startup", run_rates_financial_conditions)
+        if not FUNDING_SNAPSHOT_PATH.exists():
+            run_job_safely("funding_conditions_startup", run_funding_conditions)
+        if not TREASURY_FISCAL_SNAPSHOT_PATH.exists():
+            run_job_safely("treasury_fiscal_regime_startup", run_treasury_fiscal_regime)
 
     while True:
         now_dt = datetime.now(timezone.utc)
         now_seconds = time.time()
         if now_dt >= next_nightly:
             run_job_safely("nightly_analytics", run_nightly_analytics)
+            run_job_safely("liquidity_forecast", run_liquidity_forecast)
+            run_job_safely("rates_financial_conditions", run_rates_financial_conditions)
+            run_job_safely("funding_conditions", run_funding_conditions)
+            run_job_safely("treasury_fiscal_regime", run_treasury_fiscal_regime)
             next_nightly = next_daily_run(datetime.now(timezone.utc), nightly_at)
             log_scheduler(f"Next nightly_analytics={next_nightly.isoformat()}")
         if now_dt >= next_weekly:
@@ -239,12 +318,20 @@ def run_scheduler() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screener refresh jobs")
-    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "weekly-positioning", "scheduler"])
+    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "liquidity-forecast", "rates-financial-conditions", "funding-conditions", "treasury-fiscal-regime", "weekly-positioning", "scheduler"])
     args = parser.parse_args()
     if args.job == "market-performance":
         update_market_performance_overlay()
     elif args.job == "nightly-analytics":
         run_nightly_analytics()
+    elif args.job == "liquidity-forecast":
+        run_liquidity_forecast()
+    elif args.job == "rates-financial-conditions":
+        run_rates_financial_conditions()
+    elif args.job == "funding-conditions":
+        run_funding_conditions()
+    elif args.job == "treasury-fiscal-regime":
+        run_treasury_fiscal_regime()
     elif args.job == "weekly-positioning":
         run_weekly_positioning()
     elif args.job == "scheduler":

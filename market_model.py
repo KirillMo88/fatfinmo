@@ -74,10 +74,263 @@ MARKET_MODEL_CONFIG = {
 
 FRED_MARKET_SERIES_IDS = ("WALCL", "RRPONTSYD", "WTREGEN", "DGS2", "DFII10", "BAMLH0A0HYM2")
 YAHOO_MARKET_TICKERS = ("SPY", "IWM", "XLI", "XLP", "^VIX", "DX-Y.NYB", "CL=F")
+POSITIONING_MODEL_VERSION = "POSITIONING_V1"
+TAIL_RISK_MODEL_VERSION = "TAILRISK_V1"
 
 
 def market_model_config() -> dict:
     return deepcopy(MARKET_MODEL_CONFIG)
+
+
+def calculate_positioning_risk_history(aaii: pd.DataFrame | None, cftc_master: pd.DataFrame | None) -> pd.DataFrame:
+    aaii_component = positioning_aaii_bearish_percentile(aaii)
+    vix_component = positioning_vix_asset_manager_percentile(cftc_master)
+    index = union_series_index([aaii_component, vix_component])
+    if index.empty:
+        return pd.DataFrame(
+            columns=[
+                "Date",
+                "AAII_Bearish_3Y_Percentile",
+                "VIX_AssetManager_NetPctOI",
+                "VIX_AssetManager_NetPctOI_3Y_Percentile",
+                "PositioningRisk",
+                "PositioningState",
+                "PositioningModel_Version",
+            ]
+        )
+    frame = pd.DataFrame(index=index)
+    frame["AAII_Bearish_3Y_Percentile"] = aaii_component.reindex(index).ffill()
+    frame["VIX_AssetManager_NetPctOI_3Y_Percentile"] = vix_component.reindex(index).ffill()
+    vix_net = positioning_vix_asset_manager_net_pct_oi(cftc_master).reindex(index).ffill()
+    frame["VIX_AssetManager_NetPctOI"] = vix_net
+    components = frame[["AAII_Bearish_3Y_Percentile", "VIX_AssetManager_NetPctOI_3Y_Percentile"]]
+    weights = pd.DataFrame(
+        {
+            "AAII_Bearish_3Y_Percentile": 0.50,
+            "VIX_AssetManager_NetPctOI_3Y_Percentile": 0.50,
+        },
+        index=frame.index,
+    ).where(components.notna(), 0.0)
+    weight_sum = weights.sum(axis=1).replace(0.0, np.nan)
+    frame["PositioningRisk"] = (components.fillna(0.0).mul(weights).sum(axis=1) / weight_sum).clip(0.0, 100.0)
+    frame["PositioningState"] = frame["PositioningRisk"].map(classify_positioning_state)
+    frame["PositioningModel_Version"] = POSITIONING_MODEL_VERSION
+    return frame.reset_index().rename(columns={"index": "Date"})
+
+
+def calculate_tail_risk_history(history: pd.DataFrame, positioning_history: pd.DataFrame | None = None) -> pd.DataFrame:
+    if history is None or history.empty or "Date" not in history.columns:
+        return pd.DataFrame(
+            columns=[
+                "Date",
+                "PositioningRisk",
+                "PositioningState",
+                "LiquidityWarning",
+                "CreditWarning",
+                "FastWarning",
+                "MacroWarning",
+                "TailRiskFlag",
+                "TailRiskReason",
+                "TailRiskModel_Version",
+            ]
+        )
+    frame = history.copy()
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+    frame = frame.dropna(subset=["Date"]).sort_values("Date")
+    if positioning_history is not None and not positioning_history.empty:
+        pos = positioning_history.copy()
+        pos["Date"] = pd.to_datetime(pos["Date"], errors="coerce")
+        pos = pos.dropna(subset=["Date"]).sort_values("Date")
+        keep = [
+            "Date",
+            "AAII_Bearish_3Y_Percentile",
+            "VIX_AssetManager_NetPctOI",
+            "VIX_AssetManager_NetPctOI_3Y_Percentile",
+            "PositioningRisk",
+            "PositioningState",
+            "PositioningModel_Version",
+        ]
+        frame = pd.merge_asof(frame, pos[[col for col in keep if col in pos.columns]], on="Date", direction="backward")
+    if "PositioningRisk" not in frame.columns:
+        frame["PositioningRisk"] = np.nan
+    if "PositioningState" not in frame.columns:
+        frame["PositioningState"] = frame["PositioningRisk"].map(classify_positioning_state)
+    frame["LiquidityWarning"] = frame.apply(
+        lambda row: liquidity_warning(row.get("Global_Liquidity_Score"), row.get("Global_Liquidity_Direction_13W"), row.get("Global_Liquidity_Direction_13W_State"), row.get("Global_Liquidity_Backdrop")),
+        axis=1,
+    )
+    credit_risk = numeric_column(frame, "Credit_Risk")
+    fast_risk = numeric_column(frame, "Fast_Transition_Risk")
+    macro_risk = numeric_column(frame, "Macro_Transition_Risk")
+    frame["CreditWarning"] = credit_risk >= 60.0
+    frame["CreditHigh"] = credit_risk >= 75.0
+    frame["CreditExtreme"] = credit_risk >= 90.0
+    fast_direction_state = frame.get("Fast_Risk_Direction_4W_State", pd.Series("", index=frame.index)).astype(str).str.upper()
+    frame["FastWarning"] = (fast_risk >= 40.0) | fast_direction_state.eq("RAPID_DETERIORATION")
+    frame["FastExtreme"] = fast_risk >= 60.0
+    frame["MacroWarning"] = macro_risk >= 40.0
+    frame["MacroHigh"] = macro_risk >= 60.0
+    classified = frame.apply(classify_tail_risk_row, axis=1, result_type="expand")
+    frame["TailRiskFlag"] = classified[0]
+    frame["TailRiskReason"] = classified[1]
+    frame["TailRiskModel_Version"] = TAIL_RISK_MODEL_VERSION
+    return frame
+
+
+def numeric_column(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(np.nan, index=frame.index, dtype="float64")
+    return pd.to_numeric(frame[column], errors="coerce")
+
+
+def positioning_aaii_bearish_percentile(aaii: pd.DataFrame | None) -> pd.Series:
+    if aaii is None or aaii.empty or "Date" not in aaii.columns:
+        return pd.Series(dtype="float64")
+    frame = aaii.copy()
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+    frame = frame.dropna(subset=["Date"]).sort_values("Date")
+    if "AAII_Bearish_3Y_Percentile" in frame.columns:
+        values = pd.to_numeric(frame["AAII_Bearish_3Y_Percentile"], errors="coerce")
+    elif "AAII_Bearish" in frame.columns:
+        values = trailing_percentile(pd.to_numeric(frame["AAII_Bearish"], errors="coerce"), 156, 52)
+    else:
+        return pd.Series(dtype="float64")
+    dates = frame["Date"].dt.to_period("W-FRI").dt.end_time.dt.normalize()
+    return weekly_last_series(pd.Series(values.values, index=dates)).dropna().sort_index()
+
+
+def positioning_vix_asset_manager_percentile(cftc_master: pd.DataFrame | None) -> pd.Series:
+    selected = select_vix_asset_manager(cftc_master)
+    if selected.empty:
+        return pd.Series(dtype="float64")
+    if "NetPctOI_3Y_Percentile" in selected.columns:
+        values = pd.to_numeric(selected["NetPctOI_3Y_Percentile"], errors="coerce")
+    else:
+        values = trailing_percentile(pd.to_numeric(selected["NetPctOI"], errors="coerce"), 156, 52)
+    dates = cftc_publication_week_dates(selected)
+    return weekly_last_series(pd.Series(values.values, index=dates)).dropna().sort_index()
+
+
+def positioning_vix_asset_manager_net_pct_oi(cftc_master: pd.DataFrame | None) -> pd.Series:
+    selected = select_vix_asset_manager(cftc_master)
+    if selected.empty or "NetPctOI" not in selected.columns:
+        return pd.Series(dtype="float64")
+    dates = cftc_publication_week_dates(selected)
+    return weekly_last_series(pd.Series(pd.to_numeric(selected["NetPctOI"], errors="coerce").values, index=dates)).dropna().sort_index()
+
+
+def weekly_last_series(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return series
+    return series.sort_index().groupby(level=0).last()
+
+
+def select_vix_asset_manager(cftc_master: pd.DataFrame | None) -> pd.DataFrame:
+    if cftc_master is None or cftc_master.empty:
+        return pd.DataFrame()
+    frame = cftc_master.copy()
+    if {"Canonical_Asset", "Participant_Category"}.issubset(frame.columns):
+        mask = frame["Canonical_Asset"].astype(str).eq("VIX") & frame["Participant_Category"].astype(str).eq("Asset Manager")
+        if "Preferred_For_Dashboard" in frame.columns:
+            mask &= frame["Preferred_For_Dashboard"].astype(bool)
+        selected = frame.loc[mask].copy()
+    else:
+        selected = pd.DataFrame()
+    if selected.empty and "Raw_Contract_Name" in frame.columns:
+        selected = frame.loc[
+            frame["Raw_Contract_Name"].astype(str).str.upper().str.contains("VIX", na=False)
+            & frame["Participant_Category"].astype(str).eq("Asset Manager")
+        ].copy()
+    return selected.sort_values("Date") if "Date" in selected.columns else selected
+
+
+def cftc_publication_week_dates(frame: pd.DataFrame) -> pd.Series:
+    if "Publication_Date" in frame.columns:
+        publication = pd.to_datetime(frame["Publication_Date"], errors="coerce")
+    else:
+        publication = pd.to_datetime(frame["Date"], errors="coerce") + pd.Timedelta(days=3)
+    return publication.dt.to_period("W-FRI").dt.end_time.dt.normalize()
+
+
+def classify_positioning_state(value: float) -> str:
+    risk = safe_numeric(value)
+    if not np.isfinite(risk):
+        return "DATA_INCOMPLETE"
+    if risk < 40.0:
+        return "BENIGN"
+    if risk < 60.0:
+        return "NORMAL"
+    if risk < 75.0:
+        return "ELEVATED"
+    if risk < 90.0:
+        return "CROWDED"
+    return "EXTREME"
+
+
+def liquidity_warning(score: float, direction_13w: float, direction_state: str = "", backdrop: str = "") -> bool:
+    value = safe_numeric(score)
+    direction = safe_numeric(direction_13w)
+    state = str(direction_state or "").upper()
+    back = str(backdrop or "").upper()
+    if back in {"LIQUIDITY_WARNING", "NEGATIVE", "STRONGLY_NEGATIVE", "SUPPORTIVE_BUT_WEAKENING"}:
+        return True
+    if state in {"DETERIORATING", "DETERIORATING_FAST"} and (not np.isfinite(value) or value < 80.0):
+        return True
+    return bool(np.isfinite(direction) and direction < 0.0 and (not np.isfinite(value) or value < 80.0))
+
+
+def classify_tail_risk_row(row: pd.Series) -> tuple[str, str]:
+    positioning = safe_numeric(row.get("PositioningRisk"))
+    credit = safe_numeric(row.get("Credit_Risk"))
+    fast = safe_numeric(row.get("Fast_Transition_Risk"))
+    macro = safe_numeric(row.get("Macro_Transition_Risk"))
+    liquidity = bool(row.get("LiquidityWarning"))
+    structural = str(row.get("Market_Regime", "")).upper()
+    p60 = np.isfinite(positioning) and positioning >= 60.0
+    p75 = np.isfinite(positioning) and positioning >= 75.0
+    p90 = np.isfinite(positioning) and positioning >= 90.0
+    c60 = np.isfinite(credit) and credit >= 60.0
+    c75 = np.isfinite(credit) and credit >= 75.0
+    c90 = np.isfinite(credit) and credit >= 90.0
+    f40 = np.isfinite(fast) and fast >= 40.0
+    f60 = np.isfinite(fast) and fast >= 60.0
+    m40 = np.isfinite(macro) and macro >= 40.0
+
+    if (
+        (p75 and liquidity and c75)
+        or (p90 and (m40 or c75 or f40))
+        or (f60 and c75)
+        or (structural == "STRESS" and (c75 or f60))
+        or (liquidity and c90)
+    ):
+        return "EXTREME", tail_risk_reason(positioning, liquidity, credit, fast, macro)
+    if (
+        (p60 and liquidity and c60)
+        or (p60 and c75)
+        or (liquidity and c75)
+        or (p75 and f40)
+        or (p75 and m40)
+        or (f60 and c60)
+    ):
+        return "HIGH", tail_risk_reason(positioning, liquidity, credit, fast, macro)
+    if p60 or liquidity or c60 or f40 or m40:
+        return "WATCH", tail_risk_reason(positioning, liquidity, credit, fast, macro)
+    return "NORMAL", ""
+
+
+def tail_risk_reason(positioning: float, liquidity: bool, credit: float, fast: float, macro: float) -> str:
+    reasons = []
+    if np.isfinite(positioning) and positioning >= 60.0:
+        reasons.append("POSITIONING")
+    if liquidity:
+        reasons.append("LIQUIDITY")
+    if np.isfinite(credit) and credit >= 60.0:
+        reasons.append("CREDIT")
+    if np.isfinite(fast) and fast >= 40.0:
+        reasons.append("FAST")
+    if np.isfinite(macro) and macro >= 40.0:
+        reasons.append("MACRO")
+    return "|".join(reasons)
 
 
 def calculate_market_model(

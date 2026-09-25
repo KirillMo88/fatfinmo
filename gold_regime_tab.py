@@ -261,7 +261,7 @@ def style_gold_plotly(fig: go.Figure, height: int, title: str, subtitle: str | N
         plot_bgcolor="#0f131a",
         font={"color": "#e5e7eb", "size": 11},
         margin={"l": 58, "r": 72, "t": 62, "b": 38},
-        hovermode="x unified",
+        hovermode="closest",
         legend={"orientation": "h", "yanchor": "top", "y": -0.16, "xanchor": "left", "x": 0},
     )
     fig.update_xaxes(

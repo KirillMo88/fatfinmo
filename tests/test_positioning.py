@@ -12,6 +12,8 @@ from positioning import (
     cftc_dashboard_frame,
     export_positioning_xlsx,
     normalize_cftc,
+    parse_aaii_live_results_html,
+    read_aaii_historical_workbook,
     resolve_canonical_contracts,
     validate_cftc_master,
 )
@@ -89,6 +91,58 @@ def test_aaii_and_naaim_metrics_are_point_in_time():
     assert np.isfinite(aaii.iloc[-1]["AAII_BullBearSpread_3Y_Percentile"])
     assert np.isfinite(naaim.iloc[-1]["NAAIM_3Y_Percentile"])
     assert np.isclose(naaim.iloc[-1]["NAAIM_4W_Change"], naaim.iloc[-1]["NAAIM_Exposure"] - naaim.iloc[-5]["NAAIM_Exposure"])
+
+
+def test_aaii_metrics_parse_embedded_excel_header():
+    raw = pd.DataFrame(
+        [
+            [None, None, "AAII header"],
+            ["Reported", None, None],
+            ["Date", "Bullish", "Neutral", "Bearish"],
+            [pd.Timestamp("2024-01-04"), 0.40, 0.30, 0.30],
+            [pd.Timestamp("2024-01-11"), 0.45, 0.25, 0.30],
+        ]
+    )
+
+    metrics = calculate_aaii_metrics(raw)
+
+    assert list(metrics["Date"]) == [pd.Timestamp("2024-01-04"), pd.Timestamp("2024-01-11")]
+    assert np.isclose(metrics.iloc[-1]["AAII_Bullish"], 45.0)
+    assert np.isclose(metrics.iloc[-1]["AAII_Bearish"], 30.0)
+
+
+def test_aaii_live_results_html_parser():
+    html = """
+    <table>
+      <thead><tr><th>Date</th><th>Bullish</th><th>Neutral</th><th>Bearish</th></tr></thead>
+      <tbody><tr><td>09/11/2025</td><td>28.0%</td><td>35.0%</td><td>37.0%</td></tr></tbody>
+    </table>
+    """
+
+    parsed = parse_aaii_live_results_html(html)
+    metrics = calculate_aaii_metrics(parsed)
+
+    assert pd.Timestamp("2025-09-11") in set(metrics["Date"])
+    assert np.isclose(metrics.iloc[-1]["AAII_Bearish"], 37.0)
+
+
+def test_read_aaii_historical_workbook_promotes_sentiment_sheet(tmp_path):
+    path = tmp_path / "aaii_historical.xlsx"
+    raw = pd.DataFrame(
+        [
+            [None, None, "AAII header"],
+            ["Reported", None, None],
+            ["Date", "Bullish", "Neutral", "Bearish"],
+            [pd.Timestamp("2024-01-04"), 0.40, 0.30, 0.30],
+        ]
+    )
+    with pd.ExcelWriter(path, engine="xlsxwriter") as writer:
+        raw.to_excel(writer, sheet_name="SENTIMENT", index=False, header=False)
+
+    parsed = read_aaii_historical_workbook(path)
+
+    assert parsed.shape[0] == 1
+    assert pd.to_datetime(parsed.iloc[0]["Date"]) == pd.Timestamp("2024-01-04")
 
 
 def test_export_chunks_large_cftc_master(monkeypatch):

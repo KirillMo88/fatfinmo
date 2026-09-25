@@ -11,7 +11,7 @@ import yfinance as yf
 from fred_client import download_fred_series_batch
 
 from .config import GOLD_REGIME_CONFIG
-from .cot import calculate_cot_momentum_score, download_cftc_cot, extract_comex_gold_cot
+from .cot import calculate_cot_momentum_score, download_cftc_cot, extract_comex_gold_cot, load_comex_gold_cot_from_positioning
 from .etf_flows import aggregate_gold_etf_flows, load_gold_etf_flows
 from .macro import calculate_gold_macro_from_fred
 from .models import Freshness, GoldRegimeSnapshot
@@ -63,9 +63,11 @@ def build_gold_regime_snapshot(
     etf_history = aggregate_gold_etf_flows(etf_daily, cfg["etf_tickers"], cfg)
 
     try:
-        cot_raw = download_cftc_cot(cfg, cache)
-        cot_frame, contract_name = extract_comex_gold_cot(cot_raw, cache)
-        cot_history = calculate_cot_momentum_score(cot_frame, cfg)
+        cot_history, contract_name = load_comex_gold_cot_from_positioning()
+        if cot_history.empty:
+            cot_raw = download_cftc_cot(cfg, cache)
+            cot_frame, contract_name = extract_comex_gold_cot(cot_raw, cache)
+            cot_history = calculate_cot_momentum_score(cot_frame, cfg)
     except Exception:
         contract_name = None
         cot_history = pd.DataFrame()

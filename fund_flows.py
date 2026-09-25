@@ -192,6 +192,105 @@ def calculate_fund_flow_metrics(
     )
 
 
+def calculate_fund_flow_history_metrics(
+    observations: Iterable[FundFlowObservation] | pd.DataFrame,
+    percentile_window: int = 156,
+    percentile_min_periods: int = 52,
+) -> pd.DataFrame:
+    """Build weekly 4W flow intensity and point-in-time trailing percentile."""
+    columns = [
+        "date",
+        "ETF_Flow_1W",
+        "ETF_Flow_4W",
+        "ETF_Flow_13W",
+        "ETF_Total_AUM",
+        "ETF_Coverage_Count",
+        "ETF_Flow_Intensity_4W",
+        "ETF_Flow_3Y_Pctl",
+    ]
+    frame = observations.copy() if isinstance(observations, pd.DataFrame) else _observations_to_frame(observations)
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    daily = frame.dropna(subset=["date", "net_flow"]).copy()
+    if daily.empty:
+        return pd.DataFrame(columns=columns)
+    weekly_by_ticker = (
+        daily.set_index("date")
+        .groupby("ticker")
+        .resample("W-FRI")
+        .agg(net_flow=("net_flow", "sum"), aum=("aum", "last"))
+        .dropna(subset=["net_flow"])
+        .reset_index()
+    )
+    weekly = (
+        weekly_by_ticker.groupby("date")
+        .agg(
+            ETF_Flow_1W=("net_flow", "sum"),
+            ETF_Total_AUM=("aum", "sum"),
+            ETF_Coverage_Count=("ticker", "nunique"),
+        )
+        .sort_index()
+    )
+    weekly["ETF_Flow_4W"] = weekly["ETF_Flow_1W"].rolling(4, min_periods=1).sum()
+    weekly["ETF_Flow_13W"] = weekly["ETF_Flow_1W"].rolling(13, min_periods=1).sum()
+    aum_reference = pd.to_numeric(weekly["ETF_Total_AUM"], errors="coerce").replace(0.0, np.nan)
+    intensity = (weekly["ETF_Flow_4W"] / aum_reference) * 100.0
+    fallback_scale = weekly["ETF_Flow_1W"].abs().rolling(
+        percentile_window,
+        min_periods=percentile_min_periods,
+    ).median()
+    fallback_intensity = weekly["ETF_Flow_4W"] / (4.0 * fallback_scale.replace(0.0, np.nan))
+    weekly["ETF_Flow_Intensity_4W"] = intensity.where(intensity.notna(), fallback_intensity)
+    weekly["ETF_Flow_3Y_Pctl"] = _trailing_percentile(
+        weekly["ETF_Flow_Intensity_4W"],
+        percentile_window,
+        percentile_min_periods,
+    )
+    return weekly.reset_index()[columns]
+
+
+def load_fund_flow_history(
+    ticker: str,
+    start_date: date,
+    end_date: date | None = None,
+    cache_path: Path | None = None,
+    fetcher: Callable[[str, date, date], list[FundFlowObservation]] | None = None,
+) -> pd.DataFrame:
+    """Load and, when needed, backfill cached ETF flow observations for export."""
+    normalized = str(ticker or "").strip().upper()
+    provider_tickers = fund_flow_proxy_tickers(normalized) or (normalize_ticker_for_etf_com(normalized),)
+    provider_tickers = tuple(value for value in provider_tickers if value)
+    if not provider_tickers:
+        return pd.DataFrame()
+
+    start = pd.Timestamp(start_date).date()
+    end = pd.Timestamp(end_date or datetime.now(timezone.utc).date()).date()
+    cache = FundFlowCache(cache_path or default_fund_flow_cache_path())
+    fetch = fetcher or fetch_etf_com_fund_flow_history
+    observations: list[FundFlowObservation] = []
+    for provider_ticker in provider_tickers:
+        earliest = cache.earliest_observation_date(provider_ticker)
+        latest = cache.latest_observation_date(provider_ticker)
+        needs_backfill = earliest is None or earliest > start
+        needs_refresh = latest is None or latest < end
+        if needs_backfill or (needs_refresh and cache.should_attempt_update(provider_ticker, end)):
+            request_start = start if needs_backfill else latest + timedelta(days=1)
+            try:
+                fetched = fetch(provider_ticker, request_start, end)
+                if fetched:
+                    cache.upsert_observations(fetched)
+                cache.mark_attempt(provider_ticker, success=True, new_count=len(fetched))
+            except Exception as exc:
+                cache.mark_attempt(provider_ticker, success=False, error=str(exc))
+                logger.warning("ETF flow history request failed: %s error=%s", provider_ticker, exc)
+        observations.extend(cache.load_observations(provider_ticker, start_date=start))
+
+    if normalized in FUND_FLOW_PROXY_TICKERS:
+        observations = _aggregate_proxy_observations(normalized, observations)
+    return _observations_to_frame(observations)
+
+
 def get_fund_flow_metrics(
     ticker: str,
     cache_path: Path | None = None,
@@ -413,6 +512,16 @@ class FundFlowCache:
             return None
         return date.fromisoformat(row["max_date"])
 
+    def earliest_observation_date(self, ticker: str) -> date | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MIN(date) AS min_date FROM observations WHERE ticker = ? AND source = ?",
+                (ticker, ETF_COM_SOURCE),
+            ).fetchone()
+        if not row or not row["min_date"]:
+            return None
+        return date.fromisoformat(row["min_date"])
+
     def should_attempt_update(self, ticker: str, today: date) -> bool:
         status = self.get_status(ticker)
         latest = self.latest_observation_date(ticker)
@@ -551,6 +660,7 @@ def _reference_aum(df: pd.DataFrame, target: date) -> float | None:
 def _observations_to_frame(observations: Iterable[FundFlowObservation]) -> pd.DataFrame:
     rows = [
         {
+            "ticker": obs.ticker,
             "date": pd.Timestamp(obs.date),
             "net_flow": obs.net_flow,
             "aum": obs.aum,
@@ -558,8 +668,20 @@ def _observations_to_frame(observations: Iterable[FundFlowObservation]) -> pd.Da
         for obs in observations
     ]
     if not rows:
-        return pd.DataFrame(columns=["date", "net_flow", "aum"])
+        return pd.DataFrame(columns=["ticker", "date", "net_flow", "aum"])
     return pd.DataFrame(rows).sort_values("date")
+
+
+def _trailing_percentile(series: pd.Series, window: int, min_periods: int) -> pd.Series:
+    values = pd.to_numeric(series, errors="coerce")
+
+    def rank_last(window_values: np.ndarray) -> float:
+        clean = window_values[np.isfinite(window_values)]
+        if len(clean) < min_periods or not np.isfinite(window_values[-1]):
+            return np.nan
+        return float((clean <= window_values[-1]).sum() / len(clean) * 100.0)
+
+    return values.rolling(window, min_periods=min_periods).apply(rank_last, raw=True)
 
 
 def _extract_candidate_rows(payload: Any) -> list[dict[str, Any]]:
