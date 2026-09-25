@@ -23,6 +23,7 @@ from treasury_funding_policy import refresh_snapshot as refresh_treasury_funding
 JOB_DIR = Path("persistent") / "job_status"
 JOB_LOG_PATH = JOB_DIR / "refresh_jobs.jsonl"
 DEFAULT_NIGHTLY_UTC = "02:30"
+DEFAULT_FUNDING_LATE_RETRY_UTC = "05:00"
 DEFAULT_WEEKLY_POSITIONING_UTC = "12:30"
 DEFAULT_MARKET_PERFORMANCE_INTERVAL_SECONDS = 600
 DEFAULT_SCHEDULER_POLL_SECONDS = 30
@@ -165,11 +166,11 @@ def run_liquidity_forecast() -> None:
         raise
 
 
-def run_rates_financial_conditions() -> None:
+def run_rates_financial_conditions(refresh: bool = False) -> None:
     started = time.time()
     try:
         with job_lock("rates_financial_conditions"):
-            snapshot = refresh_rates_fc_snapshot(api_key=os.getenv("FRED_API_KEY"))
+            snapshot = refresh_rates_fc_snapshot(api_key=os.getenv("FRED_API_KEY"), refresh=refresh)
         log_job("rates_financial_conditions", started, "CURRENT", len(snapshot.history), source_status=snapshot.status.get("SourceStatus"))
     except FileExistsError:
         log_job("rates_financial_conditions", started, "SKIPPED_LOCKED")
@@ -188,6 +189,34 @@ def run_funding_conditions() -> None:
         log_job("funding_conditions", started, "SKIPPED_LOCKED")
     except Exception as exc:
         log_job("funding_conditions", started, "FAILED", error=str(exc))
+        raise
+
+
+def run_funding_conditions_late_retry() -> None:
+    started = time.time()
+    try:
+        with job_lock("funding_conditions"):
+            snapshot = refresh_funding_snapshot(api_key=os.getenv("FRED_API_KEY"), refresh=True)
+        log_job("funding_conditions_late_retry", started, "CURRENT", len(snapshot.weekly),
+                source_status=snapshot.status.get("SourceStatus"))
+    except FileExistsError:
+        log_job("funding_conditions_late_retry", started, "SKIPPED_LOCKED")
+    except Exception as exc:
+        log_job("funding_conditions_late_retry", started, "FAILED", error=str(exc))
+        raise
+
+
+def run_rates_financial_conditions_late_retry() -> None:
+    started = time.time()
+    try:
+        with job_lock("rates_financial_conditions"):
+            snapshot = refresh_rates_fc_snapshot(api_key=os.getenv("FRED_API_KEY"), refresh=True)
+        log_job("rates_financial_conditions_late_retry", started, "CURRENT", len(snapshot.history),
+                source_status=snapshot.status.get("SourceStatus"))
+    except FileExistsError:
+        log_job("rates_financial_conditions_late_retry", started, "SKIPPED_LOCKED")
+    except Exception as exc:
+        log_job("rates_financial_conditions_late_retry", started, "FAILED", error=str(exc))
         raise
 
 
@@ -265,6 +294,10 @@ def run_job_safely(name: str, func) -> None:
 
 def run_scheduler() -> None:
     nightly_at = parse_utc_hhmm(os.getenv("SCREENER_NIGHTLY_UTC", DEFAULT_NIGHTLY_UTC), DEFAULT_NIGHTLY_UTC)
+    funding_retry_at = parse_utc_hhmm(
+        os.getenv("SCREENER_FUNDING_LATE_RETRY_UTC", DEFAULT_FUNDING_LATE_RETRY_UTC),
+        DEFAULT_FUNDING_LATE_RETRY_UTC,
+    )
     weekly_at = parse_utc_hhmm(
         os.getenv("SCREENER_WEEKLY_POSITIONING_UTC", DEFAULT_WEEKLY_POSITIONING_UTC),
         DEFAULT_WEEKLY_POSITIONING_UTC,
@@ -275,11 +308,13 @@ def run_scheduler() -> None:
 
     now = datetime.now(timezone.utc)
     next_nightly = next_daily_run(now, nightly_at)
+    next_funding_retry = next_daily_run(now, funding_retry_at)
     next_weekly = next_weekly_run(now, weekly_weekday, weekly_at)
     next_overlay = time.time()
 
     log_scheduler(
         f"Scheduler started; nightly={next_nightly.isoformat()}, "
+        f"funding_late_retry={next_funding_retry.isoformat()}, "
         f"weekly_positioning={next_weekly.isoformat()}, overlay_interval={overlay_interval}s"
     )
 
@@ -310,6 +345,11 @@ def run_scheduler() -> None:
             run_job_safely("weekly_positioning", run_weekly_positioning)
             next_weekly = next_weekly_run(datetime.now(timezone.utc), weekly_weekday, weekly_at)
             log_scheduler(f"Next weekly_positioning={next_weekly.isoformat()}")
+        if now_dt >= next_funding_retry:
+            run_job_safely("rates_financial_conditions_late_retry", run_rates_financial_conditions_late_retry)
+            run_job_safely("funding_conditions_late_retry", run_funding_conditions_late_retry)
+            next_funding_retry = next_daily_run(datetime.now(timezone.utc), funding_retry_at)
+            log_scheduler(f"Next funding_conditions_late_retry={next_funding_retry.isoformat()}")
         if now_seconds >= next_overlay:
             run_job_safely("market_performance_10m", update_market_performance_overlay)
             next_overlay = time.time() + max(60, overlay_interval)

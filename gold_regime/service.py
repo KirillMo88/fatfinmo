@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from finance_core import drop_incomplete_daily_bar
 from fred_client import download_fred_series_batch
 
 from .config import GOLD_REGIME_CONFIG
@@ -119,7 +120,7 @@ def load_yahoo_weekly(tickers: list[str]) -> dict[str, pd.DataFrame]:
 
     out = {}
     for ticker in tickers:
-        daily = extract_ohlcv(px, ticker)
+        daily = drop_incomplete_daily_bar(extract_ohlcv(px, ticker))
         out[ticker] = build_weekly_ohlcv(daily) if not daily.empty else pd.DataFrame()
     return out
 
@@ -163,6 +164,8 @@ def build_weekly_ohlcv(daily: pd.DataFrame) -> pd.DataFrame:
     )
     today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
     weekly = weekly.loc[weekly.index <= today]
+    if not weekly.empty and pd.Timestamp(weekly.index[-1]) > pd.Timestamp(values.index[-1]).normalize():
+        weekly = weekly.iloc[:-1]
     return weekly.dropna(subset=["Close"])
 
 

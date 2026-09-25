@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import httpx
 import numpy as np
 import pandas as pd
 
-from finance_core import download_completed_ohlcv
+from finance_core import download_completed_ohlcv, market_business_days_old
 from fred_client import download_fred_series, get_fred_api_key
 
 
@@ -20,6 +21,10 @@ WEEKLY_PATH = STORAGE_DIR / "weekly_history.parquet"
 STATUS_PATH = STORAGE_DIR / "status.json"
 FRED_IDS = ("SOFR99", "DFF", "IORB", "WRESBAL", "GDP")
 CORE_IDS = ("SOFR99", "DFF", "WRESBAL", "GDP")
+MOVE_CACHE_MAX_AGE = pd.Timedelta(hours=20)
+MOVE_MAX_BUSINESS_DAYS_OLD = 2
+MOVE_FETCH_ATTEMPTS = 3
+MOVE_FETCH_RETRY_SECONDS = 5
 STATES = (
     "NORMAL",
     "TECHNICAL FUNDING PRESSURE",
@@ -321,6 +326,47 @@ def _load_iorb_fallback(api_key: str | None, refresh: bool = False) -> tuple[pd.
         return pd.DataFrame(), "UNAVAILABLE"
 
 
+def _move_business_days_old(move: pd.Series, now: pd.Timestamp | None = None) -> int | None:
+    return market_business_days_old(move, now)
+
+
+def _load_move_series(move_path: Path, refresh: bool = False) -> tuple[pd.Series, str]:
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+    cached = pd.Series(dtype="float64")
+    if move_path.exists():
+        try:
+            cached = pd.to_numeric(pd.read_parquet(move_path)["Close"], errors="coerce").dropna()
+        except Exception:
+            cached = pd.Series(dtype="float64")
+
+    cache_is_fresh = move_path.exists() and now - pd.Timestamp(move_path.stat().st_mtime, unit="s") < MOVE_CACHE_MAX_AGE
+    if cache_is_fresh and not refresh:
+        return cached, "CACHE"
+
+    fetched = pd.Series(dtype="float64")
+    for attempt in range(MOVE_FETCH_ATTEMPTS):
+        bars = download_completed_ohlcv("^MOVE", period="max")
+        if not bars.empty and bars["Close"].notna().sum() >= 156:
+            fetched = pd.to_numeric(bars["Close"], errors="coerce").dropna()
+            if _move_business_days_old(fetched) is not None and _move_business_days_old(fetched) <= MOVE_MAX_BUSINESS_DAYS_OLD:
+                break
+        if attempt < MOVE_FETCH_ATTEMPTS - 1:
+            time.sleep(MOVE_FETCH_RETRY_SECONDS)
+
+    if not fetched.empty:
+        fetched_latest = pd.Timestamp(fetched.index.max())
+        cached_latest = pd.Timestamp(cached.index.max()) if not cached.empty else None
+        source_is_stale = (_move_business_days_old(fetched) or 0) > MOVE_MAX_BUSINESS_DAYS_OLD
+        if cached_latest is not None and fetched_latest < cached_latest:
+            return cached, "MARKET_STALE_CACHE"
+        STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        fetched.to_frame("Close").to_parquet(move_path)
+        return fetched, "MARKET_STALE" if source_is_stale else "MARKET"
+    if not cached.empty:
+        return cached, "STALE_CACHE"
+    return pd.Series(dtype="float64"), "UNAVAILABLE"
+
+
 def load_sources(api_key: str | None, refresh: bool = False) -> tuple[dict[str, pd.DataFrame], pd.Series, dict]:
     sources: dict[str, pd.DataFrame] = {}
     status: dict[str, str] = {}
@@ -333,23 +379,7 @@ def load_sources(api_key: str | None, refresh: bool = False) -> tuple[dict[str, 
             sources[series_id], status[series_id] = _load_iorb_fallback(api_key, refresh)
     move_path = STORAGE_DIR / "move_price.parquet"
     now = pd.Timestamp.now(tz="UTC").tz_localize(None)
-    fresh = move_path.exists() and now - pd.Timestamp(move_path.stat().st_mtime, unit="s") < pd.Timedelta(hours=20)
-    if fresh and not refresh:
-        move = pd.read_parquet(move_path)["Close"]
-        status["MOVE"] = "CACHE"
-    else:
-        bars = download_completed_ohlcv("^MOVE", period="max")
-        if not bars.empty and bars["Close"].notna().sum() >= 156:
-            move = pd.to_numeric(bars["Close"], errors="coerce").dropna()
-            STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-            move.to_frame("Close").to_parquet(move_path)
-            status["MOVE"] = "MARKET"
-        elif move_path.exists():
-            move = pd.read_parquet(move_path)["Close"]
-            status["MOVE"] = "STALE_CACHE"
-        else:
-            move = pd.Series(dtype="float64")
-            status["MOVE"] = "UNAVAILABLE"
+    move, status["MOVE"] = _load_move_series(move_path, refresh)
     if not move.empty and now.normalize() - pd.Timestamp(move.dropna().index.max()).tz_localize(None).normalize() > pd.Timedelta(days=10):
         move = pd.Series(dtype="float64")
         status["MOVE"] = "STALE_SOURCE"
@@ -368,6 +398,8 @@ def refresh_snapshot(api_key: str | None = None, refresh: bool = False) -> Fundi
         "ModelVersion": MODEL_VERSION,
         "DataAsOf": str(snapshot.daily["Date"].max().date()),
         "CalculatedAt": calculated_at,
+        "MOVEDataAsOf": str(pd.Timestamp(move.dropna().index.max()).date()) if not move.dropna().empty else None,
+        "MOVEBusinessDaysOld": _move_business_days_old(move),
         "SourceStatus": source_status,
         "TimingConvention": "SOFR99/DFF/WRESBAL/GDP use FRED initial releases; IORB uses one-business-day-lagged current vintage if ALFRED is unavailable; completed MOVE daily close",
     }

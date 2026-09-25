@@ -60,6 +60,46 @@ def drop_incomplete_daily_bar(
     return out
 
 
+def market_business_days_old(data: pd.Series | pd.DataFrame, now_utc: datetime | pd.Timestamp | None = None) -> int | None:
+    """Return the age of the latest completed market observation in business days."""
+    if data is None or len(data.index) == 0:
+        return None
+    dates = pd.to_datetime(data.index, errors="coerce")
+    if isinstance(dates, pd.DatetimeIndex) and dates.tz is not None:
+        dates = dates.tz_convert("UTC").tz_localize(None)
+    dates = dates[~pd.isna(dates)]
+    if len(dates) == 0:
+        return None
+    latest = pd.Timestamp(dates.max()).normalize()
+    current = pd.Timestamp(now_utc or datetime.now(timezone.utc))
+    if current.tzinfo is not None:
+        current = current.tz_convert("UTC").tz_localize(None)
+    current = current.normalize()
+    if latest >= current:
+        return 0
+    return max(0, len(pd.bdate_range(latest, current)) - 1)
+
+
+def download_completed_ohlcv_fresh(
+    ticker: str,
+    period: str = "10y",
+    max_business_days_old: int = 2,
+    attempts: int = 3,
+    retry_seconds: float = 5.0,
+    now_utc: datetime | pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, str]:
+    """Fetch completed bars and reject a non-empty but stale Yahoo response."""
+    last = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    for attempt in range(max(1, attempts)):
+        last = download_completed_ohlcv(ticker, period=period)
+        if not last.empty and market_business_days_old(last, now_utc) is not None:
+            if market_business_days_old(last, now_utc) <= max_business_days_old:
+                return last, "CURRENT"
+        if attempt < max(1, attempts) - 1:
+            time.sleep(retry_seconds)
+    return last, "STALE" if not last.empty else "UNAVAILABLE"
+
+
 def is_krw_quoted_ticker(ticker: str) -> bool:
     return str(ticker or "").strip().upper() in KRW_QUOTED_TICKERS
 
