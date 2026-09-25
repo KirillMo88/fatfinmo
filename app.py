@@ -2618,7 +2618,7 @@ def _render_liquidity_contribution_chart(frame: pd.DataFrame, block: str) -> Non
         }
         total_col = "global_cb_assets_usd_bn"
     level_label = "Global M2" if block == "m2" else "Global CB Assets"
-    level_color = "#fb7185" if block == "m2" else "#22c55e"
+    level_color = "#38bdf8"
     rows = []
     for label, column in components.items():
         if column not in frame.columns:
@@ -2670,7 +2670,7 @@ def _render_liquidity_contribution_chart(frame: pd.DataFrame, block: str) -> Non
                 mode="lines",
                 name=level_label,
                 yaxis="y2",
-                line={"color": level_color, "width": 1.8, "dash": "dash"},
+                line={"color": level_color, "width": 2.0},
                 hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{level_label}: %{{y:,.0f}}B<extra></extra>",
             )
         )
@@ -2757,7 +2757,7 @@ def _render_us_net_liquidity_chart(frame: pd.DataFrame) -> None:
                 mode="lines",
                 name="US Net Liquidity",
                 yaxis="y2",
-                line={"color": "#f97316", "width": 1.8, "dash": "dash"},
+                line={"color": "#38bdf8", "width": 2.0},
                 hovertemplate="Date: %{x|%Y-%m-%d}<br>US Net Liquidity: %{y:,.0f}B<extra></extra>",
             )
         )
