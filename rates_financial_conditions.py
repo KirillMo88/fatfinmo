@@ -9,7 +9,7 @@ import httpx
 import numpy as np
 import pandas as pd
 
-from finance_core import download_completed_ohlcv
+from finance_core import download_completed_ohlcv_fresh, market_business_days_old
 from fred_client import download_fred_series, get_fred_api_key
 
 
@@ -23,6 +23,7 @@ STATUS_PATH = STORAGE_DIR / "status.json"
 FRED_IDS = ("DGS2", "DGS10", "DFII10", "FEDFUNDS", "BAMLH0A0HYM2", "BAMLC0A0CM", "NFCI", "ANFCI")
 INITIAL_RELEASE_IDS = ("FEDFUNDS", "NFCI", "ANFCI")
 MARKET_TICKERS = {"DXY": "DX-Y.NYB", "MOVE": "^MOVE", "SPY": "SPY", "QQQ": "QQQ", "GLD": "GLD", "BTC": "BTC-USD"}
+MARKET_MAX_BUSINESS_DAYS_OLD = 7
 REGIMES = (
     "BROAD EASING",
     "RATES TIGHTENING / MARKET RESILIENT",
@@ -383,17 +384,26 @@ def load_sources(api_key: str | None, refresh: bool = False) -> tuple[dict[str, 
     for name, ticker in MARKET_TICKERS.items():
         path = STORAGE_DIR / f"{name.lower()}_price.parquet"
         fresh = path.exists() and now - pd.Timestamp(path.stat().st_mtime, unit="s") < pd.Timedelta(days=1)
-        if fresh and not refresh:
-            price = pd.read_parquet(path)["Close"]
+        cached = pd.read_parquet(path)["Close"] if path.exists() else pd.Series(dtype="float64")
+        if fresh and not refresh and market_business_days_old(cached) is not None and market_business_days_old(cached) <= MARKET_MAX_BUSINESS_DAYS_OLD:
+            price = cached
             status[name] = "CACHE"
         else:
-            bars = download_completed_ohlcv(ticker, period="max")
+            bars, fetch_status = download_completed_ohlcv_fresh(
+                ticker, period="max", max_business_days_old=MARKET_MAX_BUSINESS_DAYS_OLD,
+            )
             if not bars.empty and len(bars) >= (100 if name == "BTC" else 156):
                 price = pd.to_numeric(bars["Close"], errors="coerce").dropna()
-                price.to_frame("Close").to_parquet(path)
-                status[name] = "MARKET"
-            elif path.exists():
-                price = pd.read_parquet(path)["Close"]
+                fetched_latest = pd.Timestamp(price.index.max()) if not price.empty else None
+                cached_latest = pd.Timestamp(cached.index.max()) if not cached.empty else None
+                if cached_latest is not None and fetched_latest is not None and fetched_latest < cached_latest:
+                    price = cached
+                    status[name] = "MARKET_STALE_CACHE"
+                else:
+                    price.to_frame("Close").to_parquet(path)
+                    status[name] = "MARKET" if fetch_status == "CURRENT" else "MARKET_STALE"
+            elif not cached.empty:
+                price = cached
                 status[name] = "STALE_CACHE"
             else:
                 raise RuntimeError(f"Required market series {name} ({ticker}) unavailable")
@@ -401,14 +411,18 @@ def load_sources(api_key: str | None, refresh: bool = False) -> tuple[dict[str, 
     return fred, market, status
 
 
-def refresh_snapshot(api_key: str | None = None) -> RatesSnapshot:
-    fred, market, sources = load_sources(api_key)
+def refresh_snapshot(api_key: str | None = None, refresh: bool = False) -> RatesSnapshot:
+    fred, market, sources = load_sources(api_key, refresh=refresh)
     today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
     last_friday = today - pd.Timedelta(days=(today.weekday() - 4) % 7)
     if today.weekday() == 4:
         last_friday -= pd.Timedelta(days=7)
-    stale = [name for name, series in {**fred, **market}.items()
+    stale = [name for name, series in fred.items()
              if series.dropna().empty or pd.Timestamp(series.dropna().index.max()) < last_friday - pd.Timedelta(days=60 if name == "FEDFUNDS" else 21)]
+    stale.extend(
+        name for name, series in market.items()
+        if market_business_days_old(series) is None or market_business_days_old(series) > MARKET_MAX_BUSINESS_DAYS_OLD
+    )
     if stale:
         raise RuntimeError("Required source observations are stale: " + ", ".join(stale))
     calendar = pd.date_range("1990-01-05", last_friday, freq="W-FRI")

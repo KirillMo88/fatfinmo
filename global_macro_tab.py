@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from finance_core import download_completed_ohlcv
+from finance_core import download_completed_ohlcv_fresh, market_business_days_old
 from fred_client import FredApiError, download_fred_series
 from global_liquidity import (
     GLOBAL_LIQUIDITY_STORAGE_DIR,
@@ -432,7 +432,9 @@ def _download_market_macro_series() -> dict[str, pd.Series]:
     out: dict[str, pd.Series] = {}
     for key, ticker in tickers.items():
         try:
-            frame = download_completed_ohlcv(ticker, period="max")
+            frame, _ = download_completed_ohlcv_fresh(
+                ticker, period="max", max_business_days_old=2,
+            )
             close = pd.to_numeric(frame.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
             close.index = pd.to_datetime(close.index).tz_localize(None)
             out[key] = close.sort_index()
@@ -1157,6 +1159,16 @@ def _series_status(spec: MacroSeriesSpec, latest_date: pd.Timestamp | None, now:
         return spec.data_status
     if latest_date is None:
         return "MISSING"
+    is_yahoo_market = spec.frequency == "daily" and (
+        spec.source.startswith("Yahoo")
+        or spec.source in {"SPY", "QQQ", "GLD", "BTC-USD", "DX-Y.NYB", "CL=F", "HG=F"}
+    )
+    if is_yahoo_market:
+        age_business_days = market_business_days_old(spec.series, now)
+        status = "STALE" if age_business_days is None or age_business_days > 2 else "OK"
+        if "TradingView" in spec.source or "fallback" in spec.source or "Fallback" in spec.source:
+            status = "FALLBACK_SOURCE" if status == "OK" else status
+        return status
     age_days = max(0, (now - latest_date).days)
     stale_limit = {
         "daily": 10,

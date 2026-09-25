@@ -173,7 +173,7 @@ def render_rates_financial_conditions_tab(api_key: str | None) -> None:
     if st.button("Refresh Rates & Financial Conditions", key="rates_fc_refresh"):
         try:
             with st.spinner("Updating rates and financial conditions..."):
-                refresh_snapshot(api_key)
+                refresh_snapshot(api_key, refresh=True)
         except Exception as exc:
             st.error(f"Refresh failed; previous snapshot retained: {exc}")
     snapshot: RatesSnapshot = read_snapshot()

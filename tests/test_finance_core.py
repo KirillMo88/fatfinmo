@@ -10,6 +10,8 @@ from finance_core import (
     analyze_ticker,
     crossover_dates,
     drop_incomplete_daily_bar,
+    download_completed_ohlcv_fresh,
+    market_business_days_old,
     ticker_metrics,
     weekly_ohlcv,
 )
@@ -35,6 +37,26 @@ def test_incomplete_current_utc_bar_is_removed() -> None:
         frame, datetime(2026, 6, 14, 6, tzinfo=timezone.utc)
     )
     assert result.index.tolist() == [pd.Timestamp("2026-06-12")]
+
+
+def test_market_business_days_old_handles_weekends() -> None:
+    index = pd.DatetimeIndex(["2026-09-18"])
+    frame = make_ohlcv(pd.Series([100.0], index=index))
+    assert market_business_days_old(frame, pd.Timestamp("2026-09-21")) == 1
+    assert market_business_days_old(frame, pd.Timestamp("2026-09-20")) == 0
+
+
+def test_fresh_loader_retries_stale_nonempty_response(monkeypatch) -> None:
+    stale = make_ohlcv(pd.Series([100.0], index=pd.DatetimeIndex(["2026-09-21"])))
+    fresh = make_ohlcv(pd.Series([101.0], index=pd.DatetimeIndex(["2026-09-24"])))
+    responses = iter([stale, fresh])
+    monkeypatch.setattr("finance_core.download_completed_ohlcv", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr("finance_core.time.sleep", lambda *_args: None)
+    result, status = download_completed_ohlcv_fresh(
+        "^MOVE", max_business_days_old=2, attempts=2, now_utc=pd.Timestamp("2026-09-25"),
+    )
+    assert result.index[-1] == pd.Timestamp("2026-09-24")
+    assert status == "CURRENT"
 
 
 def test_crosses_are_limited_to_last_fourteen_bars() -> None:
@@ -78,4 +100,3 @@ def test_historical_probabilities_sum_to_one_hundred() -> None:
     assert report["horizon_bars"] == 63
     assert sum(report["probabilities"].values()) == 100.0
     assert set(report["probabilities"]) == {"bullish", "bearish", "neutral"}
-

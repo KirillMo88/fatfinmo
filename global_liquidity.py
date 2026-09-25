@@ -20,7 +20,7 @@ try:
 except ImportError:  # pragma: no cover - production Docker installs beautifulsoup4.
     BeautifulSoup = None
 
-from finance_core import download_completed_ohlcv
+from finance_core import download_completed_ohlcv, market_business_days_old
 from fred_client import FredApiError, download_fred_series, download_fred_series_batch
 
 
@@ -1992,8 +1992,14 @@ def weekly_dxy() -> pd.Series:
         return pd.Series(dtype="float64")
     close = pd.to_numeric(ohlcv["Close"], errors="coerce").dropna()
     close.index = pd.to_datetime(close.index).tz_localize(None)
+    if market_business_days_old(close) is None or market_business_days_old(close) > 2:
+        return pd.Series(dtype="float64")
     close = close.loc[pd.Timestamp(GLOBAL_LIQUIDITY_CONFIG["start_date"]) :]
-    return close.resample("W-FRI").last().dropna()
+    weekly = close.resample("W-FRI").last().dropna()
+    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    if not weekly.empty and weekly.index[-1] > today:
+        weekly = weekly.iloc[:-1]
+    return weekly
 
 
 def union_index(series_list: list[pd.Series]) -> pd.DatetimeIndex:

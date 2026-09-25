@@ -84,6 +84,24 @@ def test_funding_state_keeps_move_and_reserve_watch_separate() -> None:
     ]
 
 
+def test_move_freshness_uses_completed_business_days() -> None:
+    move = pd.Series([81.2], index=pd.DatetimeIndex(["2026-09-21"]))
+    assert funding._move_business_days_old(move, pd.Timestamp("2026-09-25")) == 4
+    assert funding._move_business_days_old(move, pd.Timestamp("2026-09-23")) == 2
+
+
+def test_move_loader_does_not_replace_newer_cache_with_stale_market_data(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "move_price.parquet"
+    cached = pd.Series([80.0], index=pd.DatetimeIndex(["2026-09-24"]), name="Close")
+    cached.to_frame().to_parquet(path)
+    fetched = pd.DataFrame({"Close": [81.2]}, index=pd.DatetimeIndex(["2026-09-21"]))
+    monkeypatch.setattr(funding, "download_completed_ohlcv", lambda *_args, **_kwargs: fetched)
+    monkeypatch.setattr(funding.time, "sleep", lambda *_args: None)
+    loaded, status = funding._load_move_series(path, refresh=True)
+    pd.testing.assert_series_equal(loaded, cached)
+    assert status == "MARKET_STALE_CACHE"
+
+
 def test_released_sources_and_core_formula() -> None:
     sources, move = _sources()
     snapshot = build_history(sources, move)

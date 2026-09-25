@@ -12,6 +12,7 @@ from ta.momentum import RSIIndicator
 
 from correction_bottom import calculate_correction_bottom_indicator
 from current_risk import CURRENT_RISK_MODEL_VERSION, calculate_current_risk_v1
+from finance_core import drop_incomplete_daily_bar
 from fred_client import FredApiError, download_fred_series
 from hy_oas import combine_hy_oas_sources, weekly_archive_available_frame
 from market_model import calculate_positioning_risk_history, market_model_config
@@ -134,7 +135,7 @@ def download_market_cycle_prices(end: pd.Timestamp) -> dict[str, pd.DataFrame]:
     for ticker in MARKET_CYCLE_TICKERS:
         try:
             raw = yf.download(ticker, period="max", interval="1d", auto_adjust=True, progress=False, threads=False)
-            frame = extract_ohlcv(raw, ticker)
+            frame = drop_incomplete_daily_bar(extract_ohlcv(raw, ticker))
             if not frame.empty:
                 frame = frame.loc[pd.to_datetime(frame.index, errors="coerce").tz_localize(None) <= end].copy()
             out[ticker] = frame
@@ -143,7 +144,7 @@ def download_market_cycle_prices(end: pd.Timestamp) -> dict[str, pd.DataFrame]:
     for ticker, output_key in CURRENT_RISK_RAW_TICKERS.items():
         try:
             raw = yf.download(ticker, period="max", interval="1d", auto_adjust=False, progress=False, threads=False)
-            frame = extract_ohlcv(raw, ticker)
+            frame = drop_incomplete_daily_bar(extract_ohlcv(raw, ticker))
             if not frame.empty:
                 frame = frame.loc[pd.to_datetime(frame.index, errors="coerce").tz_localize(None) <= end].copy()
             out[output_key] = frame
@@ -317,8 +318,14 @@ def build_weekly_frame(raw: dict[str, pd.DataFrame], end: pd.Timestamp) -> pd.Da
             close[ticker] = pd.Series(dtype="float64")
             low[ticker] = pd.Series(dtype="float64")
         else:
-            close[ticker] = pd.to_numeric(frame["Close"], errors="coerce").resample("W-FRI").last()
-            low[ticker] = pd.to_numeric(frame["Low"], errors="coerce").resample("W-FRI").min() if "Low" in frame else pd.Series(dtype="float64")
+            close_weekly = pd.to_numeric(frame["Close"], errors="coerce").resample("W-FRI").last()
+            low_weekly = pd.to_numeric(frame["Low"], errors="coerce").resample("W-FRI").min() if "Low" in frame else pd.Series(dtype="float64")
+            last_daily = pd.Timestamp(frame.index.max()).normalize()
+            if not close_weekly.empty and close_weekly.index[-1] > last_daily:
+                close_weekly = close_weekly.iloc[:-1]
+                low_weekly = low_weekly.iloc[:-1]
+            close[ticker] = close_weekly
+            low[ticker] = low_weekly
     reference = load_spx_reference_weekly(end)
     if reference.empty:
         spx = close.get("^GSPC", pd.Series(dtype="float64")).dropna()

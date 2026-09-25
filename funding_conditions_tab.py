@@ -162,7 +162,11 @@ def render_funding_conditions_tab(api_key: str | None) -> None:
     weekly["Date"] = pd.to_datetime(weekly["Date"])
     daily["Date"] = pd.to_datetime(daily["Date"])
     latest = daily.iloc[-1]
-    st.caption(f"Model {snapshot.status.get('ModelVersion', 'n/a')}  |  Data as of {snapshot.status.get('DataAsOf', 'n/a')}")
+    st.caption(
+        f"Model {snapshot.status.get('ModelVersion', 'n/a')}  |  "
+        f"Data as of {snapshot.status.get('DataAsOf', 'n/a')}  |  "
+        f"MOVE as of {snapshot.status.get('MOVEDataAsOf', 'n/a')}"
+    )
     if latest["DataCoverage"] != "FULL":
         st.warning(f"{latest['DataCoverage']}: one or more components are unavailable.")
     if latest["UnconfirmedFundingPressureFlag"]:

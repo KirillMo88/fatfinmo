@@ -6,7 +6,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from finance_core import download_completed_ohlcv
+from finance_core import download_completed_ohlcv_fresh, market_business_days_old
 from fred_client import download_fred_series
 from global_liquidity import GLOBAL_LIQUIDITY_STORAGE_DIR, update_global_liquidity
 
@@ -260,9 +260,12 @@ def refresh_forecast_snapshot(api_key: str | None = None) -> tuple[pd.DataFrame,
     source_status = {}
     today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
 
-    def freshness(series: pd.Series, max_age_days: int) -> str:
+    def freshness(series: pd.Series, max_age_days: int, market: bool = False) -> str:
         if series.empty:
             return "EMPTY"
+        if market:
+            age = market_business_days_old(series)
+            return "CURRENT" if age is not None and age <= max_age_days else "STALE"
         latest = pd.to_datetime(series.index, errors="coerce").max()
         return "CURRENT" if pd.notna(latest) and (today - latest).days <= max_age_days else "STALE"
 
@@ -297,9 +300,11 @@ def refresh_forecast_snapshot(api_key: str | None = None) -> tuple[pd.DataFrame,
         try:
             bars = market_sources.get("yahoo_weekly", {}).get(ticker, pd.DataFrame())
             if bars.empty:
-                bars = download_completed_ohlcv(ticker, period="max")
+                bars, _ = download_completed_ohlcv_fresh(
+                    ticker, period="max", max_business_days_old=7,
+                )
             prices[name] = pd.to_numeric(bars["Close"], errors="coerce").dropna()
-            source_status[name] = freshness(prices[name], 14)
+            source_status[name] = freshness(prices[name], 7, market=True)
         except Exception as exc:
             prices[name] = pd.Series(dtype="float64")
             source_status[name] = f"ERROR: {type(exc).__name__}"
