@@ -2617,6 +2617,8 @@ def _render_liquidity_contribution_chart(frame: pd.DataFrame, block: str) -> Non
             "PBoC": "pboc_assets_usd_bn",
         }
         total_col = "global_cb_assets_usd_bn"
+    level_label = "Global M2" if block == "m2" else "Global CB Assets"
+    level_color = "#fb7185" if block == "m2" else "#22c55e"
     rows = []
     for label, column in components.items():
         if column not in frame.columns:
@@ -2657,8 +2659,27 @@ def _render_liquidity_contribution_chart(frame: pd.DataFrame, block: str) -> Non
                 hovertemplate="Date: %{x|%Y-%m-%d}<br>Total: %{y:,.0f}B<extra></extra>",
             )
         )
+    level = pd.DataFrame(
+        {"Date": frame["date"], "Level": pd.to_numeric(frame.get(total_col, np.nan), errors="coerce")}
+    ).dropna(subset=["Date", "Level"])
+    if not level.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=level["Date"],
+                y=level["Level"],
+                mode="lines",
+                name=level_label,
+                yaxis="y2",
+                line={"color": level_color, "width": 1.8, "dash": "dash"},
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{level_label}: %{{y:,.0f}}B<extra></extra>",
+            )
+        )
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
-    fig.update_layout(barmode="relative", yaxis={"title": f"{horizon} change, USD bn"})
+    fig.update_layout(
+        barmode="relative",
+        yaxis={"title": f"{horizon} change, USD bn"},
+        yaxis2={"title": "Level, USD bn", "overlaying": "y", "side": "right", "showgrid": False},
+    )
     st.plotly_chart(_style_liquidity_plotly(fig, 320, title), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
 
 
@@ -2722,8 +2743,30 @@ def _render_us_net_liquidity_chart(frame: pd.DataFrame) -> None:
                 hovertemplate="Date: %{x|%Y-%m-%d}<br>Total: %{y:,.0f}B<extra></extra>",
             )
         )
+    level = pd.DataFrame(
+        {
+            "Date": frame["date"],
+            "Level": pd.to_numeric(frame.get("us_net_liquidity_usd_bn", np.nan), errors="coerce"),
+        }
+    ).dropna(subset=["Date", "Level"])
+    if not level.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=level["Date"],
+                y=level["Level"],
+                mode="lines",
+                name="US Net Liquidity",
+                yaxis="y2",
+                line={"color": "#f97316", "width": 1.8, "dash": "dash"},
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>US Net Liquidity: %{y:,.0f}B<extra></extra>",
+            )
+        )
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
-    fig.update_layout(barmode="relative", yaxis={"title": f"{horizon} change, USD bn"})
+    fig.update_layout(
+        barmode="relative",
+        yaxis={"title": f"{horizon} change, USD bn"},
+        yaxis2={"title": "Level, USD bn", "overlaying": "y", "side": "right", "showgrid": False},
+    )
     st.plotly_chart(_style_liquidity_plotly(fig, 320, "US Net Liquidity - Funding Impulse"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
 
 
