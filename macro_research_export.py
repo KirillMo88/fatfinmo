@@ -506,8 +506,12 @@ def add_global_liquidity(dataset: pd.DataFrame, metadata: list[SeriesMeta]) -> N
         "USNLImpulse": ("usnl_impulse", "US net liquidity impulse", "score"),
         "GlobalLiquidityScore": ("global_liquidity_score", "Global liquidity score", "0-100"),
         "GlobalLiquidity_Direction_13W": ("direction_13w", "13-week global liquidity score direction", "score points"),
+        "GlobalLiquidity_Direction_26W": ("direction_26w", "26-week global liquidity score direction", "score points"),
+        "GlobalLiquidity_Direction_52W": ("direction_52w", "52-week global liquidity score direction", "score points"),
         "GlobalLiquidity_State": ("final_regime_label", "Global liquidity regime", "state"),
         "GlobalLiquidity_Direction_State": ("direction_13w_state", "Global liquidity direction state", "state"),
+        "GlobalLiquidity_Direction_26W_State": ("direction_26w_state", "Global liquidity 26-week direction state", "state"),
+        "GlobalLiquidity_Direction_52W_State": ("direction_52w_state", "Global liquidity 52-week direction state", "state"),
         "LongLiquidityCycle_Phase": ("long_cycle_phase", "65M liquidity cycle phase", "state"),
     }
     for col, (source_col, description, unit) in derived_map.items():
@@ -1189,7 +1193,11 @@ def build_global_liquidity_regime_frame_for_export(monthly: pd.DataFrame, weekly
     frame["global_liquidity_score"] = 0.50 * frame["m2_impulse"] + 0.25 * frame["cb_impulse"] + 0.25 * frame["usnl_impulse"]
     frame["impulse_state"] = frame["global_liquidity_score"].map(liquidity_score_state)
     frame["direction_13w"] = frame["global_liquidity_score"] - frame["global_liquidity_score"].shift(13)
+    frame["direction_26w"] = frame["global_liquidity_score"] - frame["global_liquidity_score"].shift(26)
+    frame["direction_52w"] = frame["global_liquidity_score"] - frame["global_liquidity_score"].shift(52)
     frame["direction_13w_state"] = frame["direction_13w"].map(liquidity_direction_state)
+    frame["direction_26w_state"] = frame["direction_26w"].map(liquidity_direction_state)
+    frame["direction_52w_state"] = frame["direction_52w"].map(liquidity_direction_state)
     frame["long_cycle_phase"] = [liquidity_long_cycle_phase(date) for date in frame.index]
     frame["long_cycle_value"] = [liquidity_long_cycle_value(date) for date in frame.index]
     frame["cycle_confirmation"] = liquidity_cycle_confirmation(frame)

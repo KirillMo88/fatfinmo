@@ -1881,6 +1881,19 @@ def _liquidity_percentile_status(value: Any) -> str:
     return "EXTREME DECELERATION"
 
 
+def _liquidity_growth_status(component: str, roc_12m: Any, percentile: Any) -> str:
+    """Use component-specific ROC12m stabilization bands before percentile status."""
+    if component == "Global_CB_Assets":
+        lower, upper = -1.5, 1.5
+    else:
+        lower, upper = -1.0, 1.0
+    if roc_12m is not None and not pd.isna(roc_12m):
+        value = float(roc_12m)
+        if np.isfinite(value) and lower <= value <= upper:
+            return "STABILIZATION"
+    return _liquidity_percentile_status(percentile)
+
+
 def _render_liquidity_summary_block(title: str, value: str, rows: list[tuple[str, str]]) -> None:
     safe_title = html.escape(title)
     safe_value = html.escape(value)
@@ -1925,7 +1938,14 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
     ]
     m2_rows.extend(
         [
-            ("Growth Percentile Status (52w)", _liquidity_percentile_status(latest.get("m2_growth_pctl"))),
+            (
+                "Growth Percentile Status (52w)",
+                _liquidity_growth_status(
+                    "Global_M2",
+                    _liquidity_ordinary_roc(monthly, "global_m2_usd_bn", 12),
+                    latest.get("m2_growth_pctl"),
+                ),
+            ),
             ("Fast Impulse Percentile Status (13w)", _liquidity_percentile_status(latest.get("m2_fast_impulse_pctl"))),
             ("Medium Impulse Percentile Status (26w)", _liquidity_percentile_status(latest.get("m2_medium_impulse_pctl"))),
             ("Slow Impulse Percentile Status (39w)", _liquidity_percentile_status(latest.get("m2_slow_impulse_pctl"))),
@@ -1937,7 +1957,14 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
     ]
     cb_rows.extend(
         [
-            ("Growth Percentile Status (52w)", _liquidity_percentile_status(latest.get("cb_growth_pctl"))),
+            (
+                "Growth Percentile Status (52w)",
+                _liquidity_growth_status(
+                    "Global_CB_Assets",
+                    _liquidity_ordinary_roc(monthly, "global_cb_assets_usd_bn", 12),
+                    latest.get("cb_growth_pctl"),
+                ),
+            ),
             ("Fast Impulse Percentile Status (13w)", _liquidity_percentile_status(latest.get("cb_fast_impulse_pctl"))),
             ("Medium Impulse Percentile Status (26w)", _liquidity_percentile_status(latest.get("cb_medium_impulse_pctl"))),
             ("Slow Impulse Percentile Status (39w)", _liquidity_percentile_status(latest.get("cb_slow_impulse_pctl"))),
@@ -1949,7 +1976,14 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
     ]
     usnl_rows.extend(
         [
-            ("Growth Percentile Status (52w)", _liquidity_percentile_status(latest.get("usnl_growth_pctl"))),
+            (
+                "Growth Percentile Status (52w)",
+                _liquidity_growth_status(
+                    "US_Net_Liquidity",
+                    _liquidity_ordinary_roc(regime, "us_net_liquidity_usd_bn", 52),
+                    latest.get("usnl_growth_pctl"),
+                ),
+            ),
             ("Fast Impulse Percentile Status (13w)", _liquidity_percentile_status(latest.get("usnl_fast_impulse_pctl"))),
             ("Medium Impulse Percentile Status (26w)", _liquidity_percentile_status(latest.get("usnl_medium_impulse_pctl"))),
             ("Slow Impulse Percentile Status (39w)", _liquidity_percentile_status(latest.get("usnl_slow_impulse_pctl"))),
@@ -1962,8 +1996,10 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
     ]
     score_rows.extend(
         [
-            ("Status", _liquidity_direction_state(latest.get("direction_13w"))),
             ("Final Regime", str(latest.get("final_regime_label", "n/a"))),
+            ("Status 13W", _liquidity_direction_state(latest.get("direction_13w"))),
+            ("Status 26W", _liquidity_direction_state(latest.get("direction_26w"))),
+            ("Status 52W", _liquidity_direction_state(latest.get("direction_52w"))),
             ("65M cycle Maturity", "n/a" if pd.isna(maturity) else f"{maturity:.0f}%"),
             ("Liquidity Forecast Signal", _liquidity_display_state(forecast_signal)),
             ("Near-Term Treasury Refinancing", "n/a" if pd.isna(refinancing) else f"{refinancing:.1f}"),
@@ -2197,7 +2233,11 @@ def _build_global_liquidity_regime_frame(monthly: pd.DataFrame, weekly: pd.DataF
     frame["global_liquidity_score"] = 0.50 * frame["m2_impulse"] + 0.25 * frame["cb_impulse"] + 0.25 * frame["usnl_impulse"]
     frame["impulse_state"] = frame["global_liquidity_score"].map(_liquidity_score_state)
     frame["direction_13w"] = frame["global_liquidity_score"] - frame["global_liquidity_score"].shift(13)
+    frame["direction_26w"] = frame["global_liquidity_score"] - frame["global_liquidity_score"].shift(26)
+    frame["direction_52w"] = frame["global_liquidity_score"] - frame["global_liquidity_score"].shift(52)
     frame["direction_13w_state"] = frame["direction_13w"].map(_liquidity_direction_state)
+    frame["direction_26w_state"] = frame["direction_26w"].map(_liquidity_direction_state)
+    frame["direction_52w_state"] = frame["direction_52w"].map(_liquidity_direction_state)
     frame["long_cycle_phase"] = [ _liquidity_long_cycle_phase(date) for date in frame.index ]
     frame["long_cycle_value"] = [ _liquidity_long_cycle_value(date) for date in frame.index ]
     frame["cycle_confirmation"] = _liquidity_cycle_confirmation(frame)
