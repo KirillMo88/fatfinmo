@@ -187,8 +187,9 @@ def build_history(sources: dict[str, pd.DataFrame], move: pd.Series | None = Non
         # FRED releases can lag market closes. Keep the latest released core
         # values as-of while allowing newer completed MOVE observations into
         # the report history.
-        market_dates = pd.DatetimeIndex(move_frame["AvailableDate"]).unique()
         base = daily.sort_values("Date").drop_duplicates("Date", keep="last")
+        market_dates = pd.DatetimeIndex(move_frame["AvailableDate"]).unique()
+        market_dates = market_dates[market_dates >= pd.Timestamp(base["Date"].min())]
         extended_dates = pd.DatetimeIndex(base["Date"]).union(market_dates).sort_values()
         if len(extended_dates) > len(base):
             daily = pd.merge_asof(
