@@ -10,12 +10,15 @@ import yfinance as yf
 
 from finance_core import drop_incomplete_daily_bar
 from fred_client import download_fred_series_batch
+from business_cycle import build_business_cycle_snapshot
+from global_liquidity import read_global_liquidity
 
 from .config import GOLD_REGIME_CONFIG
 from .cot import calculate_cot_momentum_score, download_cftc_cot, extract_comex_gold_cot, load_comex_gold_cot_from_positioning
 from .etf_flows import aggregate_gold_etf_flows, load_gold_etf_flows
 from .macro import calculate_gold_macro_from_fred
-from .models import Freshness, GoldRegimeSnapshot
+from .macro2 import calculate_gold_structural_macro2_history
+from .models import Freshness, GoldRegimeSnapshot, GoldStructuralMacro2Snapshot
 from .regime import (
     additional_structural_demand_context,
     apply_gold_regime_history,
@@ -26,7 +29,7 @@ from .utils import freshness_from_date, weekly_close
 
 
 YAHOO_GOLD_REGIME_TICKERS = ["GLD", "DX-Y.NYB", "CL=F"]
-FRED_GOLD_REGIME_SERIES = ["DFII10", "DGS2"]
+FRED_GOLD_REGIME_SERIES = ["DFII10", "DGS2", "DGS10", "T5YIE", "T10YIE", "IRLTLT01JPM156N"]
 
 
 def build_gold_regime_snapshot(
@@ -93,6 +96,14 @@ def build_gold_regime_snapshot(
         current.get("forward_macro_risk", np.nan),
         current.get("structural_demand_score"),
     )
+    try:
+        structural_macro2 = build_gold_structural_macro2_snapshot(
+            yahoo_weekly=yahoo_weekly,
+            fred_data=fred_data,
+            fred_api_key=fred_api_key,
+        )
+    except Exception:
+        structural_macro2 = GoldStructuralMacro2Snapshot(current={}, history=pd.DataFrame())
 
     return GoldRegimeSnapshot(
         current=current,
@@ -101,7 +112,78 @@ def build_gold_regime_snapshot(
         etf_available_tickers=available_etfs,
         cot_contract_market_name=contract_name,
         freshness=freshness,
+        structural_macro2=structural_macro2,
     )
+
+
+def build_gold_structural_macro2_snapshot(
+    yahoo_weekly: dict[str, pd.DataFrame],
+    fred_data: pd.DataFrame,
+    fred_api_key: str | None = None,
+) -> GoldStructuralMacro2Snapshot:
+    """Build the second-generation horizon model from existing weekly pipelines."""
+    fred_weekly = _fred_weekly_series(fred_data)
+    try:
+        _, monthly_liquidity, weekly_liquidity = read_global_liquidity()
+    except Exception:
+        monthly_liquidity = pd.DataFrame()
+        weekly_liquidity = pd.DataFrame()
+    try:
+        business_cycle = build_business_cycle_snapshot(api_key=fred_api_key)
+        business_history = business_cycle.history
+        business_state = (
+            business_history.set_index(pd.to_datetime(business_history["date"], errors="coerce"))["BusinessCycleState"]
+            if not business_history.empty and "BusinessCycleState" in business_history.columns
+            else pd.Series(dtype="object")
+        )
+    except Exception:
+        business_state = pd.Series(dtype="object")
+
+    history = calculate_gold_structural_macro2_history(
+        gold_price=weekly_close(yahoo_weekly.get("GLD", pd.DataFrame())),
+        dxy=weekly_close(yahoo_weekly.get("DX-Y.NYB", pd.DataFrame())),
+        real_yield=fred_weekly.get("DFII10"),
+        us2y=fred_weekly.get("DGS2"),
+        us10y=fred_weekly.get("DGS10"),
+        jp10y=fred_weekly.get("IRLTLT01JPM156N"),
+        global_m2=_weekly_column_series(monthly_liquidity, "global_m2_usd_bn"),
+        global_cb_assets=_weekly_column_series(weekly_liquidity, "global_cb_assets_usd_bn"),
+        us_net_liquidity=_weekly_column_series(weekly_liquidity, "us_net_liquidity_usd_bn"),
+        t5yie=fred_weekly.get("T5YIE"),
+        t10yie=fred_weekly.get("T10YIE"),
+        business_cycle_state=business_state,
+    )
+    current = history.iloc[-1].to_dict() if not history.empty else {}
+    return GoldStructuralMacro2Snapshot(current=current, history=history)
+
+
+def _fred_weekly_series(frame: pd.DataFrame) -> dict[str, pd.Series]:
+    if frame is None or frame.empty:
+        return {}
+    values = frame.copy()
+    values["Series_ID"] = values["Series_ID"].astype(str).str.upper()
+    values["Date"] = pd.to_datetime(values["Date"], errors="coerce")
+    values["Value"] = pd.to_numeric(values["Value"], errors="coerce")
+    output: dict[str, pd.Series] = {}
+    for series_id, group in values.dropna(subset=["Date"]).groupby("Series_ID"):
+        series = group.sort_values("Date").set_index("Date")["Value"].dropna()
+        if not series.empty:
+            output[str(series_id)] = series.resample("W-FRI").last().ffill().dropna()
+    return output
+
+
+def _weekly_column_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if frame is None or frame.empty or column not in frame.columns:
+        return pd.Series(dtype="float64")
+    date_col = "date" if "date" in frame.columns else "Date" if "Date" in frame.columns else None
+    if date_col is None:
+        return pd.Series(dtype="float64")
+    values = pd.to_numeric(frame[column], errors="coerce")
+    index = pd.to_datetime(frame[date_col], errors="coerce")
+    series = pd.Series(values.to_numpy(), index=index).dropna().sort_index()
+    if series.empty:
+        return series
+    return series.resample("W-FRI").last().ffill().dropna()
 
 
 def load_yahoo_weekly(tickers: list[str]) -> dict[str, pd.DataFrame]:

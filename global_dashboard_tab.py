@@ -421,8 +421,10 @@ def _render_executive(d: GlobalDashboardSnapshot, macro_outlook: Any = None) -> 
             "Global Liquidity Score",
             _fmt(lq["GlobalLiquidityScore"], 1),
             [
-                ("Status", lq["GlobalLiquidityDirection"]),
                 ("Final Regime", lq["GlobalLiquidityState"]),
+                ("Status 13W", lq["GlobalLiquidityDirection"]),
+                ("Status 26W", lq["GlobalLiquidityDirection26W"]),
+                ("Status 52W", lq["GlobalLiquidityDirection52W"]),
                 ("65M cycle Maturity", _fmt(lq["LiquidityCycleMaturity"], 0) + "%"),
                 ("Liquidity Forecast Signal", lq["LiquidityForecastSignal"]),
                 ("Near-Term Treasury Refinancing", _fmt(lq["NearTermTreasuryRefinancing"], 1)),

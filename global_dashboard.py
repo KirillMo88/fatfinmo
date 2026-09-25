@@ -35,6 +35,18 @@ def _latest(frame: pd.DataFrame | None, date_column: str) -> dict[str, Any]:
     return data.iloc[-1].to_dict() if not data.empty else {}
 
 
+def _latest_with_value(frame: pd.DataFrame | None, date_column: str, value_column: str) -> dict[str, Any]:
+    """Use the latest dated observation that has the primary metric populated."""
+    if frame is None or frame.empty or value_column not in frame.columns:
+        return {}
+    data = frame.copy()
+    if date_column in data:
+        data[date_column] = pd.to_datetime(data[date_column], errors="coerce")
+        data = data.dropna(subset=[date_column]).sort_values(date_column)
+    data = data.dropna(subset=[value_column])
+    return data.iloc[-1].to_dict() if not data.empty else {}
+
+
 def _number(value: Any) -> float:
     try:
         result = float(value)
@@ -68,6 +80,20 @@ def _liquidity_percentile_status(value: Any) -> str:
     if number >= 10:
         return "DECELERATION"
     return "EXTREME DECELERATION"
+
+
+def _liquidity_growth_status(component: str, growth: Any, percentile: Any) -> str:
+    """Match the Liquidity Cycle tab's stabilization override for 52W growth."""
+    bands = {
+        "Global_M2": 1.0,
+        "Global_CB_Assets": 1.5,
+        "US_Net_Liquidity": 1.0,
+    }
+    growth_value = _number(growth)
+    band = bands.get(component)
+    if band is not None and np.isfinite(growth_value) and abs(growth_value * 100.0) <= band:
+        return "STABILIZATION"
+    return _liquidity_percentile_status(percentile)
 
 
 def _liquidity_cycle_maturity(date_value: Any) -> float:
@@ -274,7 +300,7 @@ def build_global_dashboard_snapshot(
     treasury_snapshot: Any,
     transition_snapshot: dict[str, Any] | None = None,
 ) -> GlobalDashboardSnapshot:
-    liquidity_latest = _latest(liquidity_regime, "date")
+    liquidity_latest = _latest_with_value(liquidity_regime, "date", "global_liquidity_score")
     forecast_latest = _latest(forecast_frame, "Date")
     market_current = dict(getattr(market_snapshot, "current", {}) or {})
     market_12m = _outlook_row(getattr(market_snapshot, "outlook", pd.DataFrame()))
@@ -289,20 +315,28 @@ def build_global_dashboard_snapshot(
     liquidity = {
         "GlobalLiquidityState": _text(liquidity_latest.get("final_regime_label", liquidity_latest.get("impulse_state"))),
         "GlobalLiquidityDirection": _text(liquidity_latest.get("direction_13w_state")),
+        "GlobalLiquidityDirection26W": _text(liquidity_latest.get("direction_26w_state")),
+        "GlobalLiquidityDirection52W": _text(liquidity_latest.get("direction_52w_state")),
         "GlobalLiquidityScore": _number(liquidity_latest.get("global_liquidity_score")),
         "LiquidityCyclePhase": _text(liquidity_latest.get("long_cycle_phase")),
         "GlobalM2Value": _number(liquidity_latest.get("global_m2_usd_bn")),
         "GlobalCBAssetsValue": _number(liquidity_latest.get("global_cb_assets_usd_bn")),
         "USNetLiquidityValue": _number(liquidity_latest.get("us_net_liquidity_usd_bn")),
-        "M2GrowthPercentileStatus": _liquidity_percentile_status(liquidity_latest.get("m2_growth_pctl")),
+        "M2GrowthPercentileStatus": _liquidity_growth_status(
+            "Global_M2", liquidity_latest.get("m2_growth"), liquidity_latest.get("m2_growth_pctl")
+        ),
         "M2FastImpulsePercentileStatus": _liquidity_percentile_status(liquidity_latest.get("m2_fast_impulse_pctl")),
         "M2MediumImpulsePercentileStatus": _liquidity_percentile_status(liquidity_latest.get("m2_medium_impulse_pctl")),
         "M2SlowImpulsePercentileStatus": _liquidity_percentile_status(liquidity_latest.get("m2_slow_impulse_pctl")),
-        "CBGrowthPercentileStatus": _liquidity_percentile_status(liquidity_latest.get("cb_growth_pctl")),
+        "CBGrowthPercentileStatus": _liquidity_growth_status(
+            "Global_CB_Assets", liquidity_latest.get("cb_growth"), liquidity_latest.get("cb_growth_pctl")
+        ),
         "CBFastImpulsePercentileStatus": _liquidity_percentile_status(liquidity_latest.get("cb_fast_impulse_pctl")),
         "CBMediumImpulsePercentileStatus": _liquidity_percentile_status(liquidity_latest.get("cb_medium_impulse_pctl")),
         "CBSlowImpulsePercentileStatus": _liquidity_percentile_status(liquidity_latest.get("cb_slow_impulse_pctl")),
-        "USNLGrowthPercentileStatus": _liquidity_percentile_status(liquidity_latest.get("usnl_growth_pctl")),
+        "USNLGrowthPercentileStatus": _liquidity_growth_status(
+            "US_Net_Liquidity", liquidity_latest.get("usnl_growth"), liquidity_latest.get("usnl_growth_pctl")
+        ),
         "USNLFastImpulsePercentileStatus": _liquidity_percentile_status(liquidity_latest.get("usnl_fast_impulse_pctl")),
         "USNLMediumImpulsePercentileStatus": _liquidity_percentile_status(liquidity_latest.get("usnl_medium_impulse_pctl")),
         "USNLSlowImpulsePercentileStatus": _liquidity_percentile_status(liquidity_latest.get("usnl_slow_impulse_pctl")),

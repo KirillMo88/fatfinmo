@@ -8,6 +8,7 @@ from gold_regime.config import gold_regime_config
 from gold_regime.cot import calculate_cot_momentum_score, download_cftc_cot, extract_comex_gold_cot, load_comex_gold_cot_from_positioning, normalize_cot_columns
 from gold_regime.etf_flows import aggregate_gold_etf_flows, load_gold_etf_flows
 from gold_regime.macro import calculate_gold_macro_history
+from gold_regime.macro2 import calculate_gold_structural_macro2_history, inclusive_trailing_percentile
 from gold_regime.regime import calculate_gold_tactical_flow, determine_flow_flags, determine_gold_regime
 from gold_regime.service import calculate_freshness, carry_forward_cot_history
 from gold_regime.utils import rolling_percentile_rank
@@ -15,6 +16,55 @@ from gold_regime.utils import rolling_percentile_rank
 
 def weekly(values):
     return pd.Series(values, index=pd.date_range("2020-01-03", periods=len(values), freq="W-FRI"))
+
+
+def test_macro2_percentile_is_point_in_time_and_inclusive():
+    dates = pd.date_range("2020-01-03", periods=106, freq="W-FRI")
+    values = pd.Series([0.0] * 103 + [1.0, 2.0, 3.0], index=dates)
+
+    percentile = inclusive_trailing_percentile(values, window=156, minimum=104)
+
+    assert np.isclose(percentile.iloc[103], 100.0)
+    assert np.isclose(percentile.iloc[104], 100.0)
+    assert np.isclose(percentile.iloc[105], 100.0)
+
+    changed_future = values.copy()
+    changed_future.iloc[-1] = -999.0
+    changed_percentile = inclusive_trailing_percentile(changed_future, window=156, minimum=104)
+    assert np.isclose(changed_percentile.iloc[104], percentile.iloc[104])
+
+
+def test_gold_structural_macro2_reconciles_components_and_horizons():
+    dates = pd.date_range("2020-01-03", periods=320, freq="W-FRI")
+    t = np.arange(len(dates), dtype=float)
+
+    def series(base, trend, amplitude):
+        return pd.Series(base + trend * t + amplitude * np.sin(t / 9.0), index=dates)
+
+    history = calculate_gold_structural_macro2_history(
+        gold_price=series(150.0, 0.55, 3.0),
+        dxy=series(100.0, 0.02, 0.8),
+        real_yield=series(1.0, 0.004, 0.15),
+        us2y=series(2.0, 0.006, 0.10),
+        us10y=series(3.0, 0.005, 0.12),
+        jp10y=series(0.4, 0.003, 0.08),
+        global_m2=series(100.0, 0.45, 1.5),
+        global_cb_assets=series(80.0, 0.30, 1.0),
+        us_net_liquidity=series(60.0, 0.25, 0.8),
+        t5yie=series(2.0, 0.002, 0.10),
+        t10yie=series(2.2, 0.002, 0.10),
+        business_cycle_state=pd.Series("EARLY RECOVERY", index=dates),
+    )
+
+    row = history.iloc[-1]
+    assert np.isfinite(row["StructuralMacro"])
+    assert np.isclose(row["StructuralMacro"], 0.35 * row["DXYBull"] + 0.55 * row["RealYieldBull"] + 0.10 * row["US2YBull"])
+    assert np.isclose(row["CoreMacro_9M"], 0.50 * row["StructuralMacro"] + 0.50 * row["InflationRelief_9M"])
+    assert np.isclose(row["CoreMacro_12M"], 0.60 * row["StructuralMacro"] + 0.40 * row["InflationRelief_12M"])
+    assert np.isclose(row["GLD_MACRO_12M_BeforeClamp"], row["CoreMacro_12M"] + row["SovereignStressOverlay"] + row["Gold_BC_Modifier_12M"])
+    assert row["GLD_MACRO_3M_State"] in {"STRONGLY_SUPPORTIVE", "SUPPORTIVE", "NEUTRAL_MIXED", "UNFAVORABLE", "STRONGLY_UNFAVORABLE"}
+    for column in ["StructuralMacro", "GoldLiquidity_3M", "GoldLiquidity_6M", "InflationRelief_3M", "InflationRelief_6M", "InflationRelief_9M", "InflationRelief_12M", "GLD_MACRO_3M", "GLD_MACRO_6M", "GLD_MACRO_9M", "GLD_MACRO_12M"]:
+        assert 0.0 <= row[column] <= 100.0
 
 
 def test_point_in_time_percentile_does_not_use_future_values():

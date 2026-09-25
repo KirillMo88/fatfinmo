@@ -346,6 +346,8 @@ FAST_PERFORMANCE_COLUMNS = [
     "Perf_12M_%",
 ]
 
+AI_GROUP_FORWARD_FILL_LIMIT = 5
+
 PERFORMANCE_REFERENCE_COLUMNS = [
     "PerfRef_1D",
     "PerfRef_1W",
@@ -1026,13 +1028,32 @@ def detect_divergence_for_indicator(
 # ============================================================
 # 4) Metrics function (same logic)
 # ============================================================
-@st.cache_data(show_spinner=False, ttl=SLOW_REFRESH_SECONDS)
-def build_ai_group_ohlcv(group_label: str, period: str = "10y") -> pd.DataFrame:
-    canonical = canonical_ai_group_label(group_label)
-    members = AI_UNIVERSE.get(canonical, [])
+def _aggregate_ai_group_ohlcv(normalized_frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Aggregate normalized members without changing weights on short data gaps."""
+    columns = ["Open", "High", "Low", "Close", "Volume"]
+    if not normalized_frames:
+        return pd.DataFrame(columns=columns)
+
+    common_start = max(frame.index.min() for frame in normalized_frames.values())
+    combined_index = sorted(set().union(*(frame.index for frame in normalized_frames.values())))
+    aligned_frames = {
+        member: frame.reindex(combined_index).ffill(limit=AI_GROUP_FORWARD_FILL_LIMIT)
+        for member, frame in normalized_frames.items()
+    }
+    combined = pd.concat(aligned_frames, axis=1).sort_index()
+    combined = combined.loc[combined.index >= common_start]
+    out = pd.DataFrame(index=combined.index)
+    for column in ["Open", "High", "Low", "Close"]:
+        # Forward-fill covers holidays and short Yahoo gaps; the mean therefore
+        # keeps the same member weights instead of jumping when one row is absent.
+        out[column] = combined.xs(column, axis=1, level=1).mean(axis=1, skipna=False)
+    out["Volume"] = combined.xs("Volume", axis=1, level=1).sum(axis=1, min_count=1)
+    return out.dropna(subset=["Close"]).sort_index()
+
+
+def _normalize_ai_member_frames(frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     normalized_frames: dict[str, pd.DataFrame] = {}
-    for member in members:
-        frame = download_completed_ohlcv(member, period=period)
+    for member, frame in frames.items():
         if frame.empty:
             continue
         close = pd.to_numeric(frame.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
@@ -1045,50 +1066,23 @@ def build_ai_group_ohlcv(group_label: str, period: str = "10y") -> pd.DataFrame:
         for column in ["Open", "High", "Low", "Close"]:
             normalized[column] = pd.to_numeric(normalized[column], errors="coerce") / base * 100.0
         normalized["Volume"] = pd.to_numeric(normalized["Volume"], errors="coerce")
-        normalized_frames[member] = normalized
+        normalized_frames[member] = normalized.sort_index()
+    return normalized_frames
 
-    if not normalized_frames:
-        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
-    combined = pd.concat(normalized_frames, axis=1).sort_index()
-    out = pd.DataFrame(index=combined.index)
-    for column in ["Open", "High", "Low", "Close"]:
-        out[column] = combined.xs(column, axis=1, level=1).mean(axis=1, skipna=True)
-    out["Volume"] = combined.xs("Volume", axis=1, level=1).sum(axis=1, min_count=1)
-    return out.dropna(subset=["Close"]).sort_index()
+@st.cache_data(show_spinner=False, ttl=SLOW_REFRESH_SECONDS)
+def build_ai_group_ohlcv(group_label: str, period: str = "10y") -> pd.DataFrame:
+    canonical = canonical_ai_group_label(group_label)
+    frames = {member: download_completed_ohlcv(member, period=period) for member in AI_UNIVERSE.get(canonical, [])}
+    return _aggregate_ai_group_ohlcv(_normalize_ai_member_frames(frames))
 
 
 @st.cache_data(show_spinner=False, ttl=AUTO_REFRESH_SECONDS)
 def build_ai_group_latest_ohlcv(group_label: str, period: str = "10y", refresh_bucket: int = 0) -> pd.DataFrame:
     _ = refresh_bucket
     canonical = canonical_ai_group_label(group_label)
-    members = AI_UNIVERSE.get(canonical, [])
-    normalized_frames: dict[str, pd.DataFrame] = {}
-    for member in members:
-        frame = download_latest_ohlcv(member, period=period)
-        if frame.empty:
-            continue
-        close = pd.to_numeric(frame.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
-        if close.empty:
-            continue
-        base = float(close.iloc[0])
-        if not np.isfinite(base) or base == 0.0:
-            continue
-        normalized = frame[["Open", "High", "Low", "Close", "Volume"]].copy()
-        for column in ["Open", "High", "Low", "Close"]:
-            normalized[column] = pd.to_numeric(normalized[column], errors="coerce") / base * 100.0
-        normalized["Volume"] = pd.to_numeric(normalized["Volume"], errors="coerce")
-        normalized_frames[member] = normalized
-
-    if not normalized_frames:
-        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-
-    combined = pd.concat(normalized_frames, axis=1).sort_index()
-    out = pd.DataFrame(index=combined.index)
-    for column in ["Open", "High", "Low", "Close"]:
-        out[column] = combined.xs(column, axis=1, level=1).mean(axis=1, skipna=True)
-    out["Volume"] = combined.xs("Volume", axis=1, level=1).sum(axis=1, min_count=1)
-    return out.dropna(subset=["Close"]).sort_index()
+    frames = {member: download_latest_ohlcv(member, period=period) for member in AI_UNIVERSE.get(canonical, [])}
+    return _aggregate_ai_group_ohlcv(_normalize_ai_member_frames(frames))
 
 
 def download_metrics_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
@@ -1369,7 +1363,10 @@ def compute_performance_table(slow_df: pd.DataFrame, overlay_key: str, refresh_n
         previous = previous_by_key.get(key)
         current_price = lightweight_current_price(ticker, refresh_bucket=refresh_bucket)
         if not np.isfinite(current_price):
-            current_price = pd.to_numeric(pd.Series([previous.get("CurrentPrice") if previous is not None else row.get("CurrentPrice")]), errors="coerce").iloc[0]
+            fallback_price = row.get("CurrentPrice")
+            if not is_ai_group_label(ticker) and previous is not None:
+                fallback_price = previous.get("CurrentPrice", fallback_price)
+            current_price = pd.to_numeric(pd.Series([fallback_price]), errors="coerce").iloc[0]
         values = overlay_performance_from_refs(row, current_price)
         if previous is not None:
             for col in FAST_PERFORMANCE_COLUMNS:
@@ -1881,6 +1878,19 @@ def _liquidity_percentile_status(value: Any) -> str:
     return "EXTREME DECELERATION"
 
 
+def _liquidity_growth_status(component: str, roc_12m: Any, percentile: Any) -> str:
+    """Use component-specific ROC12m stabilization bands before percentile status."""
+    if component == "Global_CB_Assets":
+        lower, upper = -1.5, 1.5
+    else:
+        lower, upper = -1.0, 1.0
+    if roc_12m is not None and not pd.isna(roc_12m):
+        value = float(roc_12m)
+        if np.isfinite(value) and lower <= value <= upper:
+            return "STABILIZATION"
+    return _liquidity_percentile_status(percentile)
+
+
 def _render_liquidity_summary_block(title: str, value: str, rows: list[tuple[str, str]]) -> None:
     safe_title = html.escape(title)
     safe_value = html.escape(value)
@@ -1925,7 +1935,14 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
     ]
     m2_rows.extend(
         [
-            ("Growth Percentile Status (52w)", _liquidity_percentile_status(latest.get("m2_growth_pctl"))),
+            (
+                "Growth Percentile Status (52w)",
+                _liquidity_growth_status(
+                    "Global_M2",
+                    _liquidity_ordinary_roc(monthly, "global_m2_usd_bn", 12),
+                    latest.get("m2_growth_pctl"),
+                ),
+            ),
             ("Fast Impulse Percentile Status (13w)", _liquidity_percentile_status(latest.get("m2_fast_impulse_pctl"))),
             ("Medium Impulse Percentile Status (26w)", _liquidity_percentile_status(latest.get("m2_medium_impulse_pctl"))),
             ("Slow Impulse Percentile Status (39w)", _liquidity_percentile_status(latest.get("m2_slow_impulse_pctl"))),
@@ -1937,7 +1954,14 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
     ]
     cb_rows.extend(
         [
-            ("Growth Percentile Status (52w)", _liquidity_percentile_status(latest.get("cb_growth_pctl"))),
+            (
+                "Growth Percentile Status (52w)",
+                _liquidity_growth_status(
+                    "Global_CB_Assets",
+                    _liquidity_ordinary_roc(monthly, "global_cb_assets_usd_bn", 12),
+                    latest.get("cb_growth_pctl"),
+                ),
+            ),
             ("Fast Impulse Percentile Status (13w)", _liquidity_percentile_status(latest.get("cb_fast_impulse_pctl"))),
             ("Medium Impulse Percentile Status (26w)", _liquidity_percentile_status(latest.get("cb_medium_impulse_pctl"))),
             ("Slow Impulse Percentile Status (39w)", _liquidity_percentile_status(latest.get("cb_slow_impulse_pctl"))),
@@ -1949,7 +1973,14 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
     ]
     usnl_rows.extend(
         [
-            ("Growth Percentile Status (52w)", _liquidity_percentile_status(latest.get("usnl_growth_pctl"))),
+            (
+                "Growth Percentile Status (52w)",
+                _liquidity_growth_status(
+                    "US_Net_Liquidity",
+                    _liquidity_ordinary_roc(regime, "us_net_liquidity_usd_bn", 52),
+                    latest.get("usnl_growth_pctl"),
+                ),
+            ),
             ("Fast Impulse Percentile Status (13w)", _liquidity_percentile_status(latest.get("usnl_fast_impulse_pctl"))),
             ("Medium Impulse Percentile Status (26w)", _liquidity_percentile_status(latest.get("usnl_medium_impulse_pctl"))),
             ("Slow Impulse Percentile Status (39w)", _liquidity_percentile_status(latest.get("usnl_slow_impulse_pctl"))),
@@ -1962,8 +1993,10 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
     ]
     score_rows.extend(
         [
-            ("Status", _liquidity_direction_state(latest.get("direction_13w"))),
             ("Final Regime", str(latest.get("final_regime_label", "n/a"))),
+            ("Status 13W", _liquidity_direction_state(latest.get("direction_13w"))),
+            ("Status 26W", _liquidity_direction_state(latest.get("direction_26w"))),
+            ("Status 52W", _liquidity_direction_state(latest.get("direction_52w"))),
             ("65M cycle Maturity", "n/a" if pd.isna(maturity) else f"{maturity:.0f}%"),
             ("Liquidity Forecast Signal", _liquidity_display_state(forecast_signal)),
             ("Near-Term Treasury Refinancing", "n/a" if pd.isna(refinancing) else f"{refinancing:.1f}"),
@@ -2197,7 +2230,11 @@ def _build_global_liquidity_regime_frame(monthly: pd.DataFrame, weekly: pd.DataF
     frame["global_liquidity_score"] = 0.50 * frame["m2_impulse"] + 0.25 * frame["cb_impulse"] + 0.25 * frame["usnl_impulse"]
     frame["impulse_state"] = frame["global_liquidity_score"].map(_liquidity_score_state)
     frame["direction_13w"] = frame["global_liquidity_score"] - frame["global_liquidity_score"].shift(13)
+    frame["direction_26w"] = frame["global_liquidity_score"] - frame["global_liquidity_score"].shift(26)
+    frame["direction_52w"] = frame["global_liquidity_score"] - frame["global_liquidity_score"].shift(52)
     frame["direction_13w_state"] = frame["direction_13w"].map(_liquidity_direction_state)
+    frame["direction_26w_state"] = frame["direction_26w"].map(_liquidity_direction_state)
+    frame["direction_52w_state"] = frame["direction_52w"].map(_liquidity_direction_state)
     frame["long_cycle_phase"] = [ _liquidity_long_cycle_phase(date) for date in frame.index ]
     frame["long_cycle_value"] = [ _liquidity_long_cycle_value(date) for date in frame.index ]
     frame["cycle_confirmation"] = _liquidity_cycle_confirmation(frame)
@@ -2577,6 +2614,8 @@ def _render_liquidity_contribution_chart(frame: pd.DataFrame, block: str) -> Non
             "PBoC": "pboc_assets_usd_bn",
         }
         total_col = "global_cb_assets_usd_bn"
+    level_label = "Global M2" if block == "m2" else "Global CB Assets"
+    level_color = "#38bdf8"
     rows = []
     for label, column in components.items():
         if column not in frame.columns:
@@ -2617,8 +2656,27 @@ def _render_liquidity_contribution_chart(frame: pd.DataFrame, block: str) -> Non
                 hovertemplate="Date: %{x|%Y-%m-%d}<br>Total: %{y:,.0f}B<extra></extra>",
             )
         )
+    level = pd.DataFrame(
+        {"Date": frame["date"], "Level": pd.to_numeric(frame.get(total_col, np.nan), errors="coerce")}
+    ).dropna(subset=["Date", "Level"])
+    if not level.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=level["Date"],
+                y=level["Level"],
+                mode="lines",
+                name=level_label,
+                yaxis="y2",
+                line={"color": level_color, "width": 2.0},
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{level_label}: %{{y:,.0f}}B<extra></extra>",
+            )
+        )
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
-    fig.update_layout(barmode="relative", yaxis={"title": f"{horizon} change, USD bn"})
+    fig.update_layout(
+        barmode="relative",
+        yaxis={"title": f"{horizon} change, USD bn"},
+        yaxis2={"title": "Level, USD bn", "overlaying": "y", "side": "right", "showgrid": False},
+    )
     st.plotly_chart(_style_liquidity_plotly(fig, 320, title), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
 
 
@@ -2682,8 +2740,30 @@ def _render_us_net_liquidity_chart(frame: pd.DataFrame) -> None:
                 hovertemplate="Date: %{x|%Y-%m-%d}<br>Total: %{y:,.0f}B<extra></extra>",
             )
         )
+    level = pd.DataFrame(
+        {
+            "Date": frame["date"],
+            "Level": pd.to_numeric(frame.get("us_net_liquidity_usd_bn", np.nan), errors="coerce"),
+        }
+    ).dropna(subset=["Date", "Level"])
+    if not level.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=level["Date"],
+                y=level["Level"],
+                mode="lines",
+                name="US Net Liquidity",
+                yaxis="y2",
+                line={"color": "#38bdf8", "width": 2.0},
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>US Net Liquidity: %{y:,.0f}B<extra></extra>",
+            )
+        )
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
-    fig.update_layout(barmode="relative", yaxis={"title": f"{horizon} change, USD bn"})
+    fig.update_layout(
+        barmode="relative",
+        yaxis={"title": f"{horizon} change, USD bn"},
+        yaxis2={"title": "Level, USD bn", "overlaying": "y", "side": "right", "showgrid": False},
+    )
     st.plotly_chart(_style_liquidity_plotly(fig, 320, "US Net Liquidity - Funding Impulse"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
 
 

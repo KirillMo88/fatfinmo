@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
+from gold_regime.macro2_view import render_gold_structural_macro2
 from global_liquidity import read_global_liquidity
 
 
@@ -98,6 +99,7 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
         key="gold_charts_range",
     )
     render_gold_history_chart(snapshot, selected_range)
+    render_gold_structural_macro2(snapshot.structural_macro2)
     render_signal_explanation(current)
     render_macro_detail(current)
     render_global_monetary_liquidity_context(current)
