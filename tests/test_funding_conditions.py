@@ -94,7 +94,8 @@ def test_move_loader_does_not_replace_newer_cache_with_stale_market_data(tmp_pat
     path = tmp_path / "move_price.parquet"
     cached = pd.Series([80.0], index=pd.DatetimeIndex(["2026-09-24"]), name="Close")
     cached.to_frame().to_parquet(path)
-    fetched = pd.DataFrame({"Close": [81.2]}, index=pd.DatetimeIndex(["2026-09-21"]))
+    fetched_index = pd.bdate_range(end="2026-09-21", periods=156)
+    fetched = pd.DataFrame({"Close": 81.2}, index=fetched_index)
     monkeypatch.setattr(funding, "download_completed_ohlcv", lambda *_args, **_kwargs: fetched)
     monkeypatch.setattr(funding.time, "sleep", lambda *_args: None)
     loaded, status = funding._load_move_series(path, refresh=True)
