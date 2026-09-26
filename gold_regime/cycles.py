@@ -8,8 +8,8 @@ from market_cycle import add_cycle_trough_metadata, cycle_direction
 
 GOLD_SHORT_CYCLE_MIN_MONTHS = 60.0
 GOLD_SHORT_CYCLE_MAX_MONTHS = 80.0
-GOLD_LONG_CYCLE_MIN_MONTHS = 180.0
-GOLD_LONG_CYCLE_MAX_MONTHS = 200.0
+GOLD_LONG_CYCLE_MIN_MONTHS = 195.0
+GOLD_LONG_CYCLE_MAX_MONTHS = 245.0
 
 
 def build_gold_cycle_history(gold_close: pd.Series) -> pd.DataFrame:
@@ -59,7 +59,7 @@ def build_gold_cycle_history(gold_close: pd.Series) -> pd.DataFrame:
         prefix="GoldLong",
         min_spacing_months=120.0,
         window_months=12,
-        full_cycle_months=190.0,
+        full_cycle_months=220.0,
     )
     monthly["GoldLongDirection"] = cycle_direction(monthly["GoldLongCycle"])
     return monthly

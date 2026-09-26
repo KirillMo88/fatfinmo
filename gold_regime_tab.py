@@ -364,7 +364,7 @@ def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str)
         shared_xaxes=True,
         row_heights=[0.45, 0.275, 0.275],
         vertical_spacing=0.045,
-        subplot_titles=("GLD Log", "Short Gold Cycle (60-80M)", "Long Gold Cycle (180-200M)"),
+        subplot_titles=("GLD Log", "Short Gold Cycle (60-80M)", "Long Gold Cycle (195-245M)"),
     )
     fig.add_trace(
         go.Scatter(
@@ -390,7 +390,7 @@ def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str)
         fig,
         620,
         "Gold Multi-Layer Cycles",
-        "GOLD | 60-80M Short Cycle | 180-200M Long Cycle | cycle input from 1960",
+        "GOLD | 60-80M Short Cycle | 195-245M Long Cycle | cycle input from 1960",
     )
 
 
