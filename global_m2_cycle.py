@@ -7,7 +7,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from ta.momentum import RSIIndicator
 
 from market_cycle import cycle_direction, fft_bandpass_cycle, standard_zscore
@@ -114,16 +113,8 @@ def build_global_m2_cycle_fig(
     start: pd.Timestamp | None = None,
     end: pd.Timestamp | None = None,
 ) -> go.Figure:
-    """Render the monthly Global M2 structural and primary-cycle layers."""
-    fig = make_subplots(
-        rows=3,
-        cols=1,
-        shared_xaxes=True,
-        row_heights=[0.38, 0.32, 0.30],
-        vertical_spacing=0.055,
-        specs=[[{}], [{}], [{"secondary_y": True}]],
-        subplot_titles=("Global M2 Level", "Primary Liquidity Cycle (30-54M)", "Structural Extension and Inputs"),
-    )
+    """Render only the primary monthly Global M2 cycle layer."""
+    fig = go.Figure()
     if full_history is None or full_history.empty:
         return _style_figure(fig, "Global M2 Monthly Cycle", 690)
 
@@ -160,38 +151,10 @@ def build_global_m2_cycle_fig(
                     fillcolor=state_colors[states.iloc[state_start]],
                     opacity=0.10,
                     line_width=0,
-                    row=2,
-                    col=1,
                 )
             state_start = idx
 
     dates = visible["Date"]
-    level_tn = pd.to_numeric(visible["GlobalM2"], errors="coerce") / 1000.0
-    sma_tn = pd.to_numeric(visible["M2SMA50M"], errors="coerce") / 1000.0
-    fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=level_tn,
-            mode="lines",
-            name="Global M2",
-            line={"color": "#f8fafc", "width": 2.1},
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>Global M2: %{y:.2f}T<extra></extra>",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=sma_tn,
-            mode="lines",
-            name="SMA50M",
-            line={"color": "#38bdf8", "width": 1.8, "dash": "dash"},
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>SMA50M: %{y:.2f}T<extra></extra>",
-        ),
-        row=1,
-        col=1,
-    )
     fig.add_trace(
         go.Scatter(
             x=dates,
@@ -199,66 +162,20 @@ def build_global_m2_cycle_fig(
             mode="lines",
             name="Primary Cycle",
             line={"color": "#38bdf8", "width": 2.0},
-            customdata=visible[["PrimaryCycleState", "M2ROC12M", "M2RSI14M"]].to_numpy(),
+            customdata=visible[["PrimaryCycleState"]].to_numpy(),
             hovertemplate=(
                 "Date: %{x|%Y-%m-%d}<br>Cycle: %{y:.2f}<br>State: %{customdata[0]}"
-                "<br>ROC12M: %{customdata[1]:.1%}<br>RSI14M: %{customdata[2]:.1f}<extra></extra>"
+                "<extra></extra>"
             ),
         ),
-        row=2,
-        col=1,
     )
-    fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=pd.to_numeric(visible["M2StructuralExtensionPct"], errors="coerce") * 100.0,
-            mode="lines",
-            name="M2 / SMA50M Extension",
-            line={"color": "#f8fafc", "width": 1.9},
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>Extension: %{y:.1f}%<extra></extra>",
-        ),
-        row=3,
-        col=1,
-        secondary_y=False,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=pd.to_numeric(visible["M2ROC12M"], errors="coerce") * 100.0,
-            mode="lines",
-            name="ROC12M",
-            line={"color": "#f97316", "width": 1.5, "dash": "dot"},
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>ROC12M: %{y:.1f}%<extra></extra>",
-        ),
-        row=3,
-        col=1,
-        secondary_y=False,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=pd.to_numeric(visible["M2RSI14M"], errors="coerce"),
-            mode="lines",
-            name="RSI14M",
-            line={"color": "#a78bfa", "width": 1.4},
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>RSI14M: %{y:.1f}<extra></extra>",
-        ),
-        row=3,
-        col=1,
-        secondary_y=True,
-    )
-    fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1}, row=2, col=1)
-    fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1}, row=3, col=1)
-    fig.add_hline(y=50, line={"color": "#64748b", "dash": "dot", "width": 1}, row=3, col=1, secondary_y=True)
-    fig.update_yaxes(title_text="USD tn", row=1, col=1)
-    fig.update_yaxes(title_text="Normalized", row=2, col=1)
-    fig.update_yaxes(title_text="Percent", row=3, col=1, secondary_y=False)
-    fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1, secondary_y=True)
+    fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1})
+    fig.update_yaxes(title_text="Normalized")
     fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikecolor="#94a3b8", spikethickness=1)
     return _style_figure(
         fig,
-        "Global M2 Monthly Cycle<br><sup>SMA50M extension | 12M ROC + RSI14M | 30-54M band-pass</sup>",
-        690,
+        "Global M2 Primary Liquidity Cycle<br><sup>12M ROC + RSI14M | 30-54M band-pass</sup>",
+        390,
     )
 
 
