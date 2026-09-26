@@ -12,6 +12,7 @@ from finance_core import drop_incomplete_daily_bar
 from fred_client import download_fred_series_batch
 from business_cycle import build_business_cycle_snapshot
 from global_liquidity import read_global_liquidity
+from tradingview_mcp import get_ohlcv_data
 
 from .config import GOLD_REGIME_CONFIG
 from .cot import calculate_cot_momentum_score, download_cftc_cot, extract_comex_gold_cot, load_comex_gold_cot_from_positioning
@@ -30,6 +31,8 @@ from .utils import freshness_from_date, weekly_close
 
 YAHOO_GOLD_REGIME_TICKERS = ["GLD", "DX-Y.NYB", "CL=F"]
 FRED_GOLD_REGIME_SERIES = ["DFII10", "DGS2", "DGS10", "T5YIE", "T10YIE", "IRLTLT01JPM156N"]
+GOLD_MCP_SYMBOL = "TVC:GOLD"
+GOLD_HISTORY_START = pd.Timestamp("1960-01-04")
 
 
 def build_gold_regime_snapshot(
@@ -42,14 +45,14 @@ def build_gold_regime_snapshot(
     cache = cache_dir or Path("persistent") / "finance_cache" / "gold_regime"
     cache.mkdir(parents=True, exist_ok=True)
     today = datetime.now(timezone.utc).date()
-    start_date = date(2016, 1, 1)
+    start_date = GOLD_HISTORY_START.date()
 
     yahoo_weekly = load_yahoo_weekly(YAHOO_GOLD_REGIME_TICKERS)
     try:
         fred_data = download_fred_series_batch(
             FRED_GOLD_REGIME_SERIES,
             api_key=fred_api_key,
-            observation_start="2010-01-01",
+            observation_start="1960-01-04",
         )
     except Exception:
         fred_data = pd.DataFrame(columns=["Series_ID", "Date", "Value"])
@@ -60,7 +63,10 @@ def build_gold_regime_snapshot(
         fred_data=fred_data,
         config=cfg,
     )
-    gold_price = weekly_close(yahoo_weekly.get("GLD", pd.DataFrame())).rename("gold_price")
+    gold_price = load_gold_mcp_weekly()
+    if gold_price.empty:
+        gold_price = weekly_close(yahoo_weekly.get("GLD", pd.DataFrame()))
+    gold_price = gold_price.rename("gold_price")
     price_history = pd.DataFrame({"date": gold_price.index, "gold_price": gold_price.values})
 
     etf_daily, available_etfs, unavailable_etfs = load_gold_etf_flows(start_date, today, cfg)
@@ -81,7 +87,7 @@ def build_gold_regime_snapshot(
     if not history.empty and "date" in history.columns:
         history["long_liquidity_cycle"] = history["date"].map(long_liquidity_cycle_phase)
     history = apply_gold_regime_history(history, gold_alpha)
-    history = history.loc[(history["date"] >= pd.Timestamp("2016-01-01")) & (history["date"] <= pd.Timestamp(today))]
+    history = history.loc[(history["date"] >= GOLD_HISTORY_START) & (history["date"] <= pd.Timestamp(today))]
     history = history.sort_values("date").reset_index(drop=True)
     current = latest_gold_regime_row(history)
     enrich_current(current, cfg)
@@ -101,6 +107,7 @@ def build_gold_regime_snapshot(
             yahoo_weekly=yahoo_weekly,
             fred_data=fred_data,
             fred_api_key=fred_api_key,
+            gold_price=gold_price,
         )
     except Exception:
         structural_macro2 = GoldStructuralMacro2Snapshot(current={}, history=pd.DataFrame())
@@ -120,6 +127,7 @@ def build_gold_structural_macro2_snapshot(
     yahoo_weekly: dict[str, pd.DataFrame],
     fred_data: pd.DataFrame,
     fred_api_key: str | None = None,
+    gold_price: pd.Series | None = None,
 ) -> GoldStructuralMacro2Snapshot:
     """Build the second-generation horizon model from existing weekly pipelines."""
     fred_weekly = _fred_weekly_series(fred_data)
@@ -139,8 +147,9 @@ def build_gold_structural_macro2_snapshot(
     except Exception:
         business_state = pd.Series(dtype="object")
 
+    selected_gold_price = gold_price if gold_price is not None and not gold_price.empty else weekly_close(yahoo_weekly.get("GLD", pd.DataFrame()))
     history = calculate_gold_structural_macro2_history(
-        gold_price=weekly_close(yahoo_weekly.get("GLD", pd.DataFrame())),
+        gold_price=selected_gold_price,
         dxy=weekly_close(yahoo_weekly.get("DX-Y.NYB", pd.DataFrame())),
         real_yield=fred_weekly.get("DFII10"),
         us2y=fred_weekly.get("DGS2"),
@@ -155,6 +164,32 @@ def build_gold_structural_macro2_snapshot(
     )
     current = history.iloc[-1].to_dict() if not history.empty else {}
     return GoldStructuralMacro2Snapshot(current=current, history=history)
+
+
+def load_gold_mcp_weekly() -> pd.Series:
+    """Load weekly GOLD history from TradingView MCP, retaining data from 1960 onward."""
+    try:
+        frame = get_ohlcv_data(GOLD_MCP_SYMBOL, interval="1W", count=5000)
+    except Exception:
+        return pd.Series(dtype="float64", name="gold_price")
+    if frame is None or frame.empty or not {"date", "close"}.issubset(frame.columns):
+        return pd.Series(dtype="float64", name="gold_price")
+
+    dates = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_localize(None)
+    closes = pd.to_numeric(frame["close"], errors="coerce")
+    values = pd.DataFrame({"date": dates, "close": closes}).dropna()
+    if values.empty:
+        return pd.Series(dtype="float64", name="gold_price")
+    latest = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    values = values.loc[(values["date"] >= GOLD_HISTORY_START) & (values["date"] <= latest)]
+    if values.empty:
+        return pd.Series(dtype="float64", name="gold_price")
+    return (
+        values.sort_values("date")
+        .drop_duplicates("date", keep="last")
+        .set_index("date")["close"]
+        .rename("gold_price")
+    )
 
 
 def _fred_weekly_series(frame: pd.DataFrame) -> dict[str, pd.Series]:
