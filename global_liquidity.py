@@ -2196,6 +2196,13 @@ def storage_has_requested_history() -> bool:
     try:
         raw = read_frame(RAW_STORAGE_PATH, RAW_COLUMNS)
         requested = pd.Timestamp(GLOBAL_LIQUIDITY_CONFIG["start_date"]).to_period("M").to_timestamp()
+
+        def reaches_requested_month(series: pd.Series) -> bool:
+            if series.empty:
+                return False
+            first_month = pd.to_datetime(series.index, errors="coerce").to_period("M").min()
+            return first_month <= requested.to_period("M")
+
         required_series = [
             "M2SL",
             GLOBAL_LIQUIDITY_CONFIG["ecb_m2_key"],
@@ -2205,15 +2212,13 @@ def storage_has_requested_history() -> bool:
         ]
         for series_id in required_series:
             series = raw_series(raw, series_id)
-            if series.empty or series.index.min() > requested:
+            if not reaches_requested_month(series):
                 return False
         japan = japan_m2_series(raw)
         euro_usd = euro_usd_series(raw)
         return (
-            not japan.empty
-            and japan.index.min() <= requested
-            and not euro_usd.empty
-            and euro_usd.index.min() <= requested
+            reaches_requested_month(japan)
+            and reaches_requested_month(euro_usd)
         )
     except Exception:
         return False
