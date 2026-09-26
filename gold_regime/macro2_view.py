@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from plotly.subplots import make_subplots
 
 from .macro2 import HORIZONS
 from .models import GoldStructuralMacro2Snapshot
@@ -24,8 +23,6 @@ SCORE_COLORS = {
 
 def render_gold_structural_macro2(
     snapshot: GoldStructuralMacro2Snapshot | None,
-    include_history_chart: bool = True,
-    selected_range: str = "MAX",
 ) -> None:
     st.markdown("### Gold Structural Macro 2")
     st.caption("Macro conditions for future Gold returns across 3–12 month horizons")
@@ -33,16 +30,11 @@ def render_gold_structural_macro2(
         st.info("Gold Structural Macro 2 data is unavailable.")
         return
 
-    history = snapshot.history.copy()
     current = snapshot.current or {}
     render_horizon_table(current)
     render_formula_details()
     render_current_term_structure(current)
     render_macro2_diagnostics(current)
-    render_macro2_narrative(current)
-    if include_history_chart:
-        render_structural_macro2_history(history, selected_range)
-    render_gold_macro2_price_chart(history, selected_range)
     render_macro2_model_details(current)
 
 
@@ -210,25 +202,6 @@ def render_macro2_narrative(current: dict[str, Any]) -> None:
     st.markdown(f"<div style='color:#cbd5e1; line-height:1.45;'>{html.escape(text)}</div>", unsafe_allow_html=True)
 
 
-def render_structural_macro2_history(history: pd.DataFrame, selected_range: str = "MAX") -> None:
-    st.markdown("#### Gold Structural Macro 2 — Structural Components")
-    data = filter_macro2_history_range(history, selected_range)
-    fig = go.Figure()
-    for column, name, color, width, dash in [
-        ("StructuralMacro", "Gold Structural Macro 2", "#00ff66", 2.6, "solid"),
-        ("DXYBull", "DXYBull", "#38bdf8", 1.2, "dot"),
-        ("RealYieldBull", "RealYieldBull", "#facc15", 1.2, "dot"),
-        ("US2YBull", "US2YBull", "#a78bfa", 1.2, "dot"),
-    ]:
-        if column in data.columns:
-            fig.add_trace(go.Scatter(x=data["date"], y=data[column], name=name, mode="lines", line={"color": color, "width": width, "dash": dash}))
-    for level, color in [(20, "#ef4444"), (40, "#f97316"), (60, "#facc15"), (80, "#22c55e")]:
-        fig.add_hline(y=level, line={"color": color, "dash": "dash", "width": 1})
-    fig.update_yaxes(range=[0, 100], title="Score")
-    fig.update_layout(height=300, margin={"l": 45, "r": 20, "t": 15, "b": 35}, template="plotly_dark", paper_bgcolor="#0b0e14", plot_bgcolor="#11161f", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
-
-
 def filter_macro2_history_range(history: pd.DataFrame, selected_range: str) -> pd.DataFrame:
     data = history.dropna(subset=["date"]).copy()
     dates = pd.to_datetime(data["date"], errors="coerce")
@@ -244,25 +217,22 @@ def filter_macro2_history_range(history: pd.DataFrame, selected_range: str) -> p
 
 
 def render_gold_macro2_price_chart(history: pd.DataFrame, selected_range: str = "MAX") -> None:
-    st.markdown("#### Gold — Log Scale and Final Gold Macro Score")
+    st.markdown("#### Gold — Final Macro Score")
     horizon = st.radio("Macro horizon", list(HORIZONS), horizontal=True, index=0, key="gold_macro2_horizon")
     score_column = f"GLD_MACRO_{horizon}"
     data = filter_macro2_history_range(history, selected_range)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.58, 0.42], subplot_titles=("Gold — Log Scale", f"Final Gold Macro Score — {horizon}"))
-    if "gold_price" in data.columns:
-        fig.add_trace(go.Scatter(x=data["date"], y=data["gold_price"], name="GLD", line={"color": "#f8fafc", "width": 1.8}, hovertemplate="%{x|%Y-%m-%d}<br>GLD: %{y:.2f}<extra></extra>"), row=1, col=1)
+    fig = go.Figure()
     bands = [(0, 20, "#ef4444"), (20, 40, "#f97316"), (40, 60, "#facc15"), (60, 80, "#86efac"), (80, 100, "#22c55e")]
     for low, high, color in bands:
-        fig.add_hrect(y0=low, y1=high, fillcolor=color, opacity=0.08, line_width=0, row=2, col=1)
+        fig.add_hrect(y0=low, y1=high, fillcolor=color, opacity=0.08, line_width=0)
     if score_column in data.columns:
         liquidity_column = f"GoldLiquidity_{horizon}" if horizon in {"3M", "6M"} else None
         tooltip_columns = [column for column in ["gold_price", "StructuralMacro", liquidity_column, f"InflationRelief_{horizon}", "SovereignStressOverlay", "BusinessCycleState", f"Gold_BC_Modifier_{horizon}", "Gold_Rate_Regime", "JP10Y_Shock_Pct"] if column and column in data.columns]
         customdata = data[tooltip_columns].to_numpy() if tooltip_columns else None
         labels = "<br>".join(f"{column}: %{{customdata[{index}]}}" for index, column in enumerate(tooltip_columns))
-        fig.add_trace(go.Scatter(x=data["date"], y=data[score_column], name=f"GLD Macro {horizon}", line={"color": "#38bdf8", "width": 2.2}, customdata=customdata, hovertemplate=f"%{{x|%Y-%m-%d}}<br>Score: %{{y:.1f}}<br>{labels}<extra></extra>"), row=2, col=1)
-    fig.update_yaxes(type="log", title="GLD", row=1, col=1)
-    fig.update_yaxes(range=[0, 100], title="Score", row=2, col=1)
-    fig.update_layout(height=620, margin={"l": 50, "r": 25, "t": 45, "b": 35}, template="plotly_dark", paper_bgcolor="#0b0e14", plot_bgcolor="#11161f", hovermode="x unified")
+        fig.add_trace(go.Scatter(x=data["date"], y=data[score_column], name=f"GLD Macro {horizon}", line={"color": "#38bdf8", "width": 2.2}, customdata=customdata, hovertemplate=f"%{{x|%Y-%m-%d}}<br>Score: %{{y:.1f}}<br>{labels}<extra></extra>"))
+    fig.update_yaxes(range=[0, 100], title="Score")
+    fig.update_layout(height=340, margin={"l": 50, "r": 25, "t": 30, "b": 35}, template="plotly_dark", paper_bgcolor="#0b0e14", plot_bgcolor="#11161f", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
 
 
