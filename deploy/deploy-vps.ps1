@@ -92,7 +92,7 @@ try {
     $prepare = "set -eu; test -f '$RemoteRoot/.env'; test -d '$RemoteRoot/persistent'; test ! -e '$releasePath'; mkdir -p '$releasePath'; tar -xzf '$remoteArchive' -C '$releasePath'; ln -s '$RemoteRoot/.env' '$releasePath/.env'; ln -s '$RemoteRoot/persistent' '$releasePath/persistent'; rm -f '$remoteArchive'; docker compose -p fatfinmo -f '$releasePath/docker-compose.yml' --env-file '$RemoteRoot/.env' config -q"
     Invoke-Native -Command "ssh" -Arguments ($sshArgs + @($VpsHost, $prepare))
 
-    $deploy = "set -eu; docker compose -p fatfinmo -f '$releasePath/docker-compose.yml' --env-file '$RemoteRoot/.env' build screener screener-jobs; docker compose -p fatfinmo -f '$releasePath/docker-compose.yml' --env-file '$RemoteRoot/.env' up -d --no-deps screener screener-jobs; curl -fsS '$HealthUrl'; ln -sfn '$releasePath' '$RemoteRoot/current'"
+    $deploy = "set -eu; docker compose -p fatfinmo -f '$releasePath/docker-compose.yml' --env-file '$RemoteRoot/.env' build screener screener-jobs; docker compose -p fatfinmo -f '$releasePath/docker-compose.yml' --env-file '$RemoteRoot/.env' up -d --no-deps screener screener-jobs; health_ok=0; for health_attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do if curl -fsS '$HealthUrl'; then health_ok=1; break; fi; sleep 5; done; test `"`$health_ok`" -eq 1; ln -sfn '$releasePath' '$RemoteRoot/current'"
     Invoke-Native -Command "ssh" -Arguments ($sshArgs + @($VpsHost, $deploy))
 
     Write-Host "Deployed GitHub main $head"
