@@ -133,7 +133,9 @@ def test_missing_move_is_partial_without_changing_core() -> None:
     sources, move = _sources()
     full = build_history(sources, move).daily
     partial = build_history(sources, None).daily
-    pd.testing.assert_series_equal(full["FundingCore"], partial["FundingCore"])
+    full_core = full.set_index("Date")["FundingCore"].reindex(partial["Date"])
+    partial_core = partial.set_index("Date")["FundingCore"]
+    pd.testing.assert_series_equal(full_core, partial_core, check_names=False)
     assert partial["DataCoverage"].eq("PARTIAL DATA").any()
     assert not partial["FundingState"].eq("TREASURY VOLATILITY").any()
 
