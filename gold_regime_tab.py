@@ -13,6 +13,11 @@ from plotly.subplots import make_subplots
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
 from gold_regime.macro2_view import render_gold_structural_macro2, render_structural_macro2_history
 from global_liquidity import read_global_liquidity
+from market_cycle_tab import (
+    add_combined_cycle_risk_background,
+    add_combined_cycle_risk_regime,
+    add_cycle_risk_regime_legend_traces,
+)
 
 
 GOLD_X_AXIS_DATE_FORMAT = "%b'%y"
@@ -181,7 +186,6 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
     price_data["y_min"] = ymin - pad
     price_data["y_max"] = ymax + pad
 
-    st.plotly_chart(build_gold_price_plotly(price_data, ymin - pad, ymax + pad), use_container_width=True, config=GOLD_PLOTLY_CONFIG)
     gold_cycle_history = getattr(snapshot, "gold_cycle_history", pd.DataFrame())
     if isinstance(gold_cycle_history, pd.DataFrame) and not gold_cycle_history.empty:
         render_gold_cycle_chart(gold_cycle_history, selected_range)
@@ -351,6 +355,12 @@ def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str)
     if frame.empty:
         return style_gold_plotly(go.Figure(), 620, "Gold Multi-Layer Cycles")
 
+    risk_frame = frame.assign(
+        PrimaryMarketCycle=pd.to_numeric(frame["GoldShortCycle"], errors="coerce"),
+        LongMarketExtensionCycle=pd.to_numeric(frame["GoldLongCycle"], errors="coerce"),
+    )
+    risk_frame = add_combined_cycle_risk_regime(risk_frame)
+
     end_date = frame["Date"].max()
     years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
     start_date = end_date - pd.DateOffset(years=years) if years else frame["Date"].min()
@@ -364,8 +374,9 @@ def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str)
         shared_xaxes=True,
         row_heights=[0.45, 0.275, 0.275],
         vertical_spacing=0.045,
-        subplot_titles=("GLD Log", "Short Gold Cycle (60-80M)", "Long Gold Cycle (195-245M)"),
+        subplot_titles=("GOLD Log", "Short Gold Cycle (60-80M)", "Long Gold Cycle (195-245M)"),
     )
+    add_combined_cycle_risk_background(fig, risk_frame)
     fig.add_trace(
         go.Scatter(
             x=visible["Date"],
@@ -373,7 +384,14 @@ def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str)
             mode="lines",
             name="GOLD Log",
             line={"color": "#f8fafc", "width": 1.9},
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>GOLD: %{y:.2f}<extra></extra>",
+            showlegend=False,
+            customdata=risk_frame.loc[visible.index, ["CombinedCycleRiskRegime", "PrimaryCycleState", "LongCycleState"]].astype(str),
+            hovertemplate=(
+                "Date: %{x|%Y-%m-%d}<br>GOLD: %{y:.2f}<br>"
+                "Cycle Risk Regime: %{customdata[0]}<br>"
+                "Short Cycle State: %{customdata[1]}<br>"
+                "Long Cycle State: %{customdata[2]}<extra></extra>"
+            ),
         ),
         row=1,
         col=1,
@@ -382,6 +400,7 @@ def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str)
     _add_gold_cycle_trace(fig, visible, "GoldLongCycle", "Long Gold Cycle", "#facc15", 3, "GoldLong")
     for row in [2, 3]:
         fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1}, row=row, col=1)
+    add_cycle_risk_regime_legend_traces(fig)
     fig.update_yaxes(type="log", title_text="GOLD log", row=1, col=1)
     fig.update_yaxes(title_text="Normalized", row=2, col=1)
     fig.update_yaxes(title_text="Normalized", row=3, col=1)
@@ -410,6 +429,7 @@ def _add_gold_cycle_trace(
             mode="lines",
             name=name,
             line={"color": color, "width": 1.8},
+            showlegend=False,
             hovertemplate="Date: %{x|%Y-%m-%d}<br>Normalized cycle: %{y:.2f}<extra></extra>",
         ),
         row=row,
