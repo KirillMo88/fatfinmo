@@ -32,6 +32,8 @@ ECB_TOTAL_ASSETS_SERIES_ID = "ILM.W.U2.C.T000000.Z5.Z01"
 BOJ_TOTAL_ASSETS_DB = "BS01"
 BOJ_TOTAL_ASSETS_SERIES_ID = "MABJMTA"
 PBOC_TOTAL_ASSETS_SERIES_ID = "PBOC_TOTAL_ASSETS"
+CNM2_USER_HISTORY_PATH = Path(__file__).with_name("data") / "cnm2_1990_1998.csv"
+CNM2_USER_HISTORY_END = pd.Timestamp("1998-12-01")
 
 GLOBAL_LIQUIDITY_STORAGE_DIR = Path(
     os.environ.get(
@@ -46,7 +48,7 @@ PBOC_TOTAL_ASSETS_STORAGE_PATH = GLOBAL_LIQUIDITY_STORAGE_DIR / "pboc_total_asse
 PBOC_TOTAL_ASSETS_BUNDLED_PATH = Path(__file__).with_name("data") / "pboc_total_assets.csv"
 
 GLOBAL_LIQUIDITY_CONFIG = {
-    "start_date": "1999-01-01",
+    "start_date": "1990-01-01",
     "timeout": 20.0,
     "max_retries": 3,
     "ttl_seconds": 21600,
@@ -77,6 +79,7 @@ FRED_GLOBAL_SERIES = (
     "WTREGEN",
     "RRPONTSYD",
     "DEXUSEU",
+    "EXUSEC",
     "DEXJPUS",
     "DEXCHUS",
 )
@@ -312,6 +315,7 @@ def fred_raw(api_key: str | None = None) -> pd.DataFrame:
         "WTREGEN": ("US", "Treasury General Account", "weekly", "USD", "USD millions"),
         "RRPONTSYD": ("US", "Overnight Reverse Repo", "daily", "USD", "USD billions"),
         "DEXUSEU": ("FX", "EURUSD", "daily", "USD per EUR", "rate"),
+        "EXUSEC": ("FX", "ECUUSD", "monthly", "USD per ECU", "rate"),
         "DEXJPUS": ("FX", "USDJPY", "daily", "JPY per USD", "rate"),
         "DEXCHUS": ("FX", "USDCNY", "daily", "CNY per USD", "rate"),
         "THREEFYTP10": ("US", "10Y Term Premium", "daily", "USD", "percentage points"),
@@ -1729,6 +1733,7 @@ def fetch_raw_global_liquidity(api_key: str | None = None) -> pd.DataFrame:
         "MCP_PRIMARY",
         raw["source_mode"].fillna("FALLBACK_SOURCE"),
     )
+    raw = apply_user_china_m2_history(raw)
     return raw[RAW_COLUMNS]
 
 
@@ -1737,6 +1742,72 @@ def raw_series(raw: pd.DataFrame, series_id: str) -> pd.Series:
     if d.empty:
         return pd.Series(dtype="float64")
     return d.sort_values("observation_date").groupby("observation_date")["raw_value"].last()
+
+
+def user_provided_china_m2_raw() -> pd.DataFrame:
+    """Load the supplied pre-1999 China M2 history in the native CNY unit."""
+    if not CNM2_USER_HISTORY_PATH.exists():
+        return pd.DataFrame(columns=RAW_COLUMNS)
+    try:
+        source = pd.read_csv(CNM2_USER_HISTORY_PATH)
+        dates = pd.to_datetime(source.get("observation_date"), errors="coerce")
+        values = pd.to_numeric(source.get("cnm2_cny"), errors="coerce")
+        frame = pd.DataFrame(
+            {
+                "observation_date": dates.dt.to_period("M").dt.to_timestamp(),
+                "raw_value": values / 100_000_000.0,
+            }
+        )
+        frame = frame.dropna(subset=["observation_date", "raw_value"])
+        frame = frame.loc[frame["observation_date"].le(CNM2_USER_HISTORY_END)]
+        if frame.empty:
+            return pd.DataFrame(columns=RAW_COLUMNS)
+        downloaded = fmt_datetime(now_utc())
+        return pd.DataFrame(
+            {
+                "observation_date": frame["observation_date"],
+                "release_date": pd.NaT,
+                "source": "USER_PROVIDED",
+                "source_name": "User-provided CNM2 historical workbook",
+                "source_mode": "USER_PROVIDED",
+                "source_url": "local://data/cnm2_1990_1998.csv",
+                "series_id": CHINA_M2_SERIES_ID,
+                "region": "China",
+                "metric": "M2",
+                "frequency": "monthly",
+                "currency": "CNY",
+                "unit": "CNY 100 million",
+                "raw_value": frame["raw_value"],
+                "download_timestamp": downloaded,
+                "data_status": "USER_PROVIDED",
+                "notes": "Imported from CNM2 1990 1998.xlsx; source values were CNY and normalized by /100,000,000.",
+            },
+            columns=RAW_COLUMNS,
+        )
+    except Exception:
+        return pd.DataFrame(columns=RAW_COLUMNS)
+
+
+def apply_user_china_m2_history(raw: pd.DataFrame) -> pd.DataFrame:
+    supplied = user_provided_china_m2_raw()
+    if supplied.empty:
+        return raw
+    existing = raw.copy()
+    dates = pd.to_datetime(existing["observation_date"], errors="coerce")
+    pre_1999 = existing["series_id"].eq(CHINA_M2_SERIES_ID) & dates.le(CNM2_USER_HISTORY_END)
+    existing = existing.loc[~pre_1999].copy()
+    return pd.concat([existing, supplied], ignore_index=True)[RAW_COLUMNS]
+
+
+def euro_usd_series(raw: pd.DataFrame) -> pd.Series:
+    """Join pre-euro ECU/USD with the post-1998 EUR/USD series."""
+    legacy = raw_series(raw, "EXUSEC")
+    modern = raw_series(raw, "DEXUSEU")
+    if legacy.empty:
+        return modern
+    if modern.empty:
+        return legacy
+    return modern.combine_first(legacy).sort_index()
 
 
 def monthly_average(series: pd.Series) -> pd.Series:
@@ -1820,7 +1891,7 @@ def build_monthly_layer(raw: pd.DataFrame) -> pd.DataFrame:
     ea_m2 = monthly_last(raw_series(raw, GLOBAL_LIQUIDITY_CONFIG["ecb_m2_key"]))
     japan_m2 = monthly_last(japan_m2_series(raw))
     china_m2 = monthly_last(raw_series(raw, "Money & Quasi-money (M2)"))
-    eurusd = monthly_average(raw_series(raw, "DEXUSEU"))
+    eurusd = monthly_average(euro_usd_series(raw))
     usdjpy = monthly_average(raw_series(raw, "DEXJPUS"))
     usdcny = monthly_average(raw_series(raw, "DEXCHUS"))
     fed_assets = monthly_last(raw_series(raw, "WALCL")) / 1000.0
@@ -2129,7 +2200,6 @@ def storage_has_requested_history() -> bool:
             "M2SL",
             GLOBAL_LIQUIDITY_CONFIG["ecb_m2_key"],
             CHINA_M2_SERIES_ID,
-            "DEXUSEU",
             "DEXJPUS",
             "DEXCHUS",
         ]
@@ -2138,7 +2208,13 @@ def storage_has_requested_history() -> bool:
             if series.empty or series.index.min() > requested:
                 return False
         japan = japan_m2_series(raw)
-        return not japan.empty and japan.index.min() <= requested
+        euro_usd = euro_usd_series(raw)
+        return (
+            not japan.empty
+            and japan.index.min() <= requested
+            and not euro_usd.empty
+            and euro_usd.index.min() <= requested
+        )
     except Exception:
         return False
 
