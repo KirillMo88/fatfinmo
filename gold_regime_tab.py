@@ -11,7 +11,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
-from gold_regime.macro2_view import render_gold_structural_macro2, render_structural_macro2_history
+from gold_regime.macro2_view import render_gold_macro2_price_chart, render_gold_structural_macro2, render_macro2_narrative
 from global_liquidity import read_global_liquidity
 from global_m2_cycle import build_global_m2_cycle_history
 from market_cycle_tab import (
@@ -116,7 +116,9 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
         key="gold_charts_range",
     )
     render_gold_history_chart(snapshot, selected_range, snapshot.structural_macro2)
-    render_gold_structural_macro2(snapshot.structural_macro2, include_history_chart=False, selected_range=selected_range)
+    if snapshot.structural_macro2 is not None and snapshot.structural_macro2.history is not None and not snapshot.structural_macro2.history.empty:
+        render_macro2_narrative(snapshot.structural_macro2.current or {})
+    render_gold_structural_macro2(snapshot.structural_macro2)
     render_signal_explanation(current)
     render_macro_detail(current)
     render_global_monetary_liquidity_context(current)
@@ -213,18 +215,7 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
         config=GOLD_PLOTLY_CONFIG,
     )
     if structural_macro2 is not None and not structural_macro2.history.empty:
-        render_structural_macro2_history(structural_macro2.history, selected_range)
-    st.plotly_chart(
-        build_gold_score_components_plotly(
-            analytics_data,
-            "forward_macro_risk",
-            [("us2y_risk_score", "US2YRisk", "#facc15"), ("wti_risk_score", "WTIRisk", "#fb923c")],
-            "Gold Forward Macro Risk",
-            "#ff1744",
-        ),
-        use_container_width=True,
-        config=GOLD_PLOTLY_CONFIG,
-    )
+        render_gold_macro2_price_chart(structural_macro2.history, selected_range)
     st.plotly_chart(
         build_gold_score_components_plotly(
             analytics_data,
