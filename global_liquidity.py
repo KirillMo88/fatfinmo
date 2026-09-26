@@ -46,7 +46,7 @@ PBOC_TOTAL_ASSETS_STORAGE_PATH = GLOBAL_LIQUIDITY_STORAGE_DIR / "pboc_total_asse
 PBOC_TOTAL_ASSETS_BUNDLED_PATH = Path(__file__).with_name("data") / "pboc_total_assets.csv"
 
 GLOBAL_LIQUIDITY_CONFIG = {
-    "start_date": "2010-01-01",
+    "start_date": "1999-01-01",
     "timeout": 20.0,
     "max_retries": 3,
     "ttl_seconds": 21600,
@@ -58,6 +58,7 @@ GLOBAL_LIQUIDITY_CONFIG = {
     "boj_metadata_url": "https://www.stat-search.boj.or.jp/api/v1/getMetadata",
     "boj_m2_db": "MD02",
     "boj_m2_code": "MAM1NAM2M2MO",
+    "boj_m2_reference_codes": ("MAMS3ANM2C", "MAMS1ANM2C"),
     "boj_total_assets_db": BOJ_TOTAL_ASSETS_DB,
     "boj_total_assets_code": BOJ_TOTAL_ASSETS_SERIES_ID,
     "pboc_money_supply_url": "http://www.pbc.gov.cn/diaochatongjisi/116219/116319/index.html",
@@ -445,65 +446,83 @@ def parse_ecb_week_period(value: str) -> pd.Timestamp | pd.NaT:
 
 def boj_m2_raw() -> pd.DataFrame:
     url = str(GLOBAL_LIQUIDITY_CONFIG["boj_base_url"])
-    try:
-        response = get_with_retries(
-            url,
-            params={
-                "format": "json",
-                "lang": "en",
-                "db": GLOBAL_LIQUIDITY_CONFIG["boj_m2_db"],
-                "code": GLOBAL_LIQUIDITY_CONFIG["boj_m2_code"],
-                "startDate": GLOBAL_LIQUIDITY_CONFIG["start_date"][:7].replace("-", ""),
-            },
-        )
-        payload = response.json()
-        if int(payload.get("STATUS", 0)) != 200:
-            raise RuntimeError(str(payload.get("MESSAGE") or payload))
-        resultset = payload.get("RESULTSET", []) or []
-        if not resultset:
-            raise RuntimeError("BOJ response has no RESULTSET")
-        rows = []
-        downloaded = fmt_datetime(now_utc())
-        for series in resultset:
-            values = series.get("VALUES", {}) or {}
-            survey_dates = values.get("SURVEY_DATES", []) or []
-            observations = values.get("VALUES", []) or []
-            for period, value in zip(survey_dates, observations):
-                period_str = str(period)
-                rows.append(
-                    {
-                        "observation_date": pd.to_datetime(f"{period_str[:4]}-{period_str[4:6]}-01", errors="coerce"),
-                        "release_date": pd.NaT,
-                        "source": "BOJ",
-                        "source_name": "Bank of Japan Time-Series Data Search",
-                        "source_url": url,
-                        "series_id": f"{GLOBAL_LIQUIDITY_CONFIG['boj_m2_db']}'{GLOBAL_LIQUIDITY_CONFIG['boj_m2_code']}",
-                        "region": "Japan",
-                        "metric": "M2",
-                        "frequency": "monthly",
-                        "currency": "JPY",
-                        "unit": "JPY 100 million",
-                        "raw_value": pd.to_numeric(value, errors="coerce"),
-                        "download_timestamp": downloaded,
-                        "data_status": "CURRENT",
-                        "notes": "RELEASE_DATE_UNAVAILABLE",
-                    }
-                )
+    db = str(GLOBAL_LIQUIDITY_CONFIG["boj_m2_db"])
+    primary_code = str(GLOBAL_LIQUIDITY_CONFIG["boj_m2_code"])
+    reference_codes = tuple(str(code) for code in GLOBAL_LIQUIDITY_CONFIG.get("boj_m2_reference_codes", ()))
+    codes = tuple(dict.fromkeys((primary_code, *reference_codes)))
+    rows = []
+    errors = []
+    downloaded = fmt_datetime(now_utc())
+    for code in codes:
+        try:
+            response = get_with_retries(
+                url,
+                params={
+                    "format": "json",
+                    "lang": "en",
+                    "db": db,
+                    "code": code,
+                    "startDate": GLOBAL_LIQUIDITY_CONFIG["start_date"][:7].replace("-", ""),
+                },
+            )
+            payload = response.json()
+            if int(payload.get("STATUS", 0)) != 200:
+                raise RuntimeError(str(payload.get("MESSAGE") or payload))
+            resultset = payload.get("RESULTSET", []) or []
+            if not resultset:
+                raise RuntimeError("BOJ response has no RESULTSET")
+            is_reference = code != primary_code
+            series_id = f"{db}'{code}"
+            notes = (
+                "BOJ current Money Stock series"
+                if not is_reference
+                else "BOJ linked historical reference series; current series takes priority where dates overlap"
+            )
+            for series in resultset:
+                values = series.get("VALUES", {}) or {}
+                survey_dates = values.get("SURVEY_DATES", []) or []
+                observations = values.get("VALUES", []) or []
+                for period, value in zip(survey_dates, observations):
+                    period_str = str(period)
+                    rows.append(
+                        {
+                            "observation_date": pd.to_datetime(f"{period_str[:4]}-{period_str[4:6]}-01", errors="coerce"),
+                            "release_date": pd.NaT,
+                            "source": "BOJ",
+                            "source_name": "Bank of Japan Time-Series Data Search",
+                            "source_mode": "PRIMARY" if not is_reference else "LINKED_REFERENCE",
+                            "source_url": url,
+                            "series_id": series_id,
+                            "region": "Japan",
+                            "metric": "M2",
+                            "frequency": "monthly",
+                            "currency": "JPY",
+                            "unit": "JPY 100 million",
+                            "raw_value": pd.to_numeric(value, errors="coerce"),
+                            "download_timestamp": downloaded,
+                            "data_status": "CURRENT" if not is_reference else "HISTORICAL_REFERENCE",
+                            "notes": notes,
+                        }
+                    )
+        except Exception as exc:
+            errors.append(f"{code}: {exc}")
+
+    if rows:
         return pd.DataFrame(rows, columns=RAW_COLUMNS).dropna(subset=["observation_date", "raw_value"])
-    except Exception as exc:
-        return empty_raw_row(
-            "BOJ",
-            "Bank of Japan Time-Series Data Search",
-            url,
-            f"{GLOBAL_LIQUIDITY_CONFIG['boj_m2_db']}'{GLOBAL_LIQUIDITY_CONFIG['boj_m2_code']}",
-            "Japan",
-            "M2",
-            "monthly",
-            "JPY",
-            "JPY 100 million",
-            "ERROR",
-            str(exc),
-        )
+
+    return empty_raw_row(
+        "BOJ",
+        "Bank of Japan Time-Series Data Search",
+        url,
+        f"{db}'{primary_code}",
+        "Japan",
+        "M2",
+        "monthly",
+        "JPY",
+        "JPY 100 million",
+        "ERROR",
+        "; ".join(errors) or "BOJ returned no M2 observations",
+    )
 
 
 def boj_total_assets_raw() -> pd.DataFrame:
@@ -680,6 +699,16 @@ def tradingview_mcp_china_m2_raw() -> pd.DataFrame:
     )
 
 
+def frame_reaches_requested_start(frame: pd.DataFrame) -> bool:
+    if frame.empty or "observation_date" not in frame.columns:
+        return False
+    dates = pd.to_datetime(frame["observation_date"], errors="coerce").dropna()
+    if dates.empty:
+        return False
+    requested = pd.Timestamp(GLOBAL_LIQUIDITY_CONFIG["start_date"]).to_period("M").to_timestamp()
+    return dates.min() <= requested
+
+
 def tradingview_mcp_pboc_total_assets_raw() -> pd.DataFrame:
     return tradingview_mcp_economic_raw(
         "ECONOMICS:CNCBBS",
@@ -694,20 +723,23 @@ def tradingview_mcp_pboc_total_assets_raw() -> pd.DataFrame:
 
 def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
     source_url = str(GLOBAL_LIQUIDITY_CONFIG["pboc_money_supply_url"])
+    investing_error = ""
     mcp_error = ""
     try:
         investing_frame = china_m2_investing_update_raw(api_key=api_key)
-        if not investing_frame.empty:
+        if frame_reaches_requested_start(investing_frame):
             investing_frame["source_mode"] = "FALLBACK_SOURCE"
             return investing_frame[RAW_COLUMNS]
+        if not investing_frame.empty:
+            investing_error = "Investing source does not reach requested historical start"
     except Exception as exc:
         investing_error = str(exc)
-    else:
-        investing_error = ""
     try:
         mcp_frame = tradingview_mcp_china_m2_raw()
-        if not mcp_frame.empty:
+        if frame_reaches_requested_start(mcp_frame):
             return mcp_frame
+        if not mcp_frame.empty:
+            mcp_error = "TradingView MCP source does not reach requested historical start"
     except Exception as exc:
         mcp_error = str(exc)
     try:
@@ -732,8 +764,11 @@ def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
             subset=["observation_date", "series_id"],
             keep="last",
         )
-        if len(frame) < 36:
-            raise RuntimeError(f"PBoC parser returned partial M2 history: {len(frame)} observations")
+        if len(frame) < 36 or not frame_reaches_requested_start(frame):
+            raise RuntimeError(
+                f"PBoC parser returned partial M2 history: {len(frame)} observations; "
+                f"first_date={frame['observation_date'].min() if not frame.empty else 'n/a'}"
+            )
         return frame[RAW_COLUMNS]
     except Exception as exc:
         fallback = china_m2_fred_tradingview_fallback_raw(api_key=api_key, official_error=str(exc))
@@ -1720,6 +1755,21 @@ def monthly_last(series: pd.Series) -> pd.Series:
     return out.resample("MS").last().dropna()
 
 
+def japan_m2_series(raw: pd.DataFrame) -> pd.Series:
+    """Return a linked Japan M2 history, preferring the current series on overlap."""
+    db = str(GLOBAL_LIQUIDITY_CONFIG["boj_m2_db"])
+    primary = str(GLOBAL_LIQUIDITY_CONFIG["boj_m2_code"])
+    references = tuple(str(code) for code in GLOBAL_LIQUIDITY_CONFIG.get("boj_m2_reference_codes", ()))
+    linked = pd.Series(dtype="float64")
+    for code in (primary, *references):
+        candidate = raw_series(raw, f"{db}'{code}")
+        if linked.empty:
+            linked = candidate.copy()
+        else:
+            linked = linked.combine_first(candidate)
+    return linked.sort_index()
+
+
 def weekly_average(series: pd.Series) -> pd.Series:
     if series.empty:
         return series
@@ -1768,7 +1818,7 @@ def impulse_state(percentile: pd.Series) -> pd.Series:
 def build_monthly_layer(raw: pd.DataFrame) -> pd.DataFrame:
     us_m2 = monthly_last(raw_series(raw, "M2SL"))
     ea_m2 = monthly_last(raw_series(raw, GLOBAL_LIQUIDITY_CONFIG["ecb_m2_key"]))
-    japan_m2 = monthly_last(raw_series(raw, f"{GLOBAL_LIQUIDITY_CONFIG['boj_m2_db']}'{GLOBAL_LIQUIDITY_CONFIG['boj_m2_code']}"))
+    japan_m2 = monthly_last(japan_m2_series(raw))
     china_m2 = monthly_last(raw_series(raw, "Money & Quasi-money (M2)"))
     eurusd = monthly_average(raw_series(raw, "DEXUSEU"))
     usdjpy = monthly_average(raw_series(raw, "DEXJPUS"))
@@ -2065,7 +2115,32 @@ def is_storage_fresh() -> bool:
     if not MONTHLY_STORAGE_PATH.exists() or not WEEKLY_STORAGE_PATH.exists():
         return False
     age = time.time() - min(MONTHLY_STORAGE_PATH.stat().st_mtime, WEEKLY_STORAGE_PATH.stat().st_mtime)
-    return age < int(GLOBAL_LIQUIDITY_CONFIG["ttl_seconds"])
+    return age < int(GLOBAL_LIQUIDITY_CONFIG["ttl_seconds"]) and storage_has_requested_history()
+
+
+def storage_has_requested_history() -> bool:
+    """Require all M2 and FX inputs to cover the configured historical start."""
+    if not RAW_STORAGE_PATH.exists():
+        return False
+    try:
+        raw = read_frame(RAW_STORAGE_PATH, RAW_COLUMNS)
+        requested = pd.Timestamp(GLOBAL_LIQUIDITY_CONFIG["start_date"]).to_period("M").to_timestamp()
+        required_series = [
+            "M2SL",
+            GLOBAL_LIQUIDITY_CONFIG["ecb_m2_key"],
+            CHINA_M2_SERIES_ID,
+            "DEXUSEU",
+            "DEXJPUS",
+            "DEXCHUS",
+        ]
+        for series_id in required_series:
+            series = raw_series(raw, series_id)
+            if series.empty or series.index.min() > requested:
+                return False
+        japan = japan_m2_series(raw)
+        return not japan.empty and japan.index.min() <= requested
+    except Exception:
+        return False
 
 
 def start_background_update_if_stale(api_key: str | None = None, force: bool = False) -> bool:

@@ -52,6 +52,52 @@ def test_global_m2_requires_china_and_does_not_zero_fill():
     assert set(monthly["data_status"]) == {"PARTIAL_DATA"}
 
 
+def test_japan_m2_linked_history_prefers_current_series_on_overlap():
+    raw = pd.DataFrame(
+        [
+            raw_row("1999-01-01", "MD02'MAMS1ANM2C", 100.0, source="BOJ", region="Japan", currency="JPY", unit="JPY 100 million"),
+            raw_row("1999-04-01", "MD02'MAMS3ANM2C", 110.0, source="BOJ", region="Japan", currency="JPY", unit="JPY 100 million"),
+            raw_row("2003-04-01", "MD02'MAM1NAM2M2MO", 130.0, source="BOJ", region="Japan", currency="JPY", unit="JPY 100 million"),
+            raw_row("2003-04-01", "MD02'MAMS3ANM2C", 999.0, source="BOJ", region="Japan", currency="JPY", unit="JPY 100 million"),
+        ],
+        columns=gl.RAW_COLUMNS,
+    )
+
+    linked = gl.japan_m2_series(raw)
+
+    assert linked.loc[pd.Timestamp("1999-01-01")] == 100.0
+    assert linked.loc[pd.Timestamp("1999-04-01")] == 110.0
+    assert linked.loc[pd.Timestamp("2003-04-01")] == 130.0
+
+
+def test_boj_m2_raw_downloads_current_and_reference_series(monkeypatch):
+    requested_codes = []
+
+    def fake_get_with_retries(url, params):
+        requested_codes.append(params["code"])
+        return FakeResponse(
+            {
+                "STATUS": 200,
+                "RESULTSET": [
+                    {
+                        "VALUES": {
+                            "SURVEY_DATES": ["199901", "200304"],
+                            "VALUES": [100.0, 130.0],
+                        }
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(gl, "get_with_retries", fake_get_with_retries)
+
+    result = gl.boj_m2_raw()
+
+    assert requested_codes == ["MAM1NAM2M2MO", "MAMS3ANM2C", "MAMS1ANM2C"]
+    assert set(result["source_mode"]) == {"PRIMARY", "LINKED_REFERENCE"}
+    assert set(result["data_status"]) == {"CURRENT", "HISTORICAL_REFERENCE"}
+
+
 def test_monthly_layer_does_not_create_fx_only_observations():
     raw = pd.DataFrame(
         [
