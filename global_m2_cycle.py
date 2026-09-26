@@ -9,7 +9,13 @@ import pandas as pd
 import plotly.graph_objects as go
 from ta.momentum import RSIIndicator
 
-from market_cycle import add_cycle_trough_metadata, cycle_direction, fft_bandpass_cycle, standard_zscore
+from market_cycle import (
+    add_cycle_trough_metadata,
+    cycle_direction,
+    detect_spaced_extrema,
+    fft_bandpass_cycle,
+    standard_zscore,
+)
 
 
 GLOBAL_M2_CYCLE_COLUMNS = [
@@ -24,6 +30,7 @@ GLOBAL_M2_CYCLE_COLUMNS = [
     "PrimaryMarketCycle",
     "PrimaryCycleDirection",
     "PrimaryCycleState",
+    "PrimaryCyclePeak",
     "AverageLiquidityCycleLengthMonths",
     "CurrentCycleMaturityPct",
 ]
@@ -123,6 +130,15 @@ def build_global_m2_cycle_history(monthly: pd.DataFrame) -> pd.DataFrame:
         window_months=4,
         full_cycle_months=1.0,
     )
+    peak_idx = detect_spaced_extrema(
+        pd.to_numeric(frame["PrimaryMarketCycle"], errors="coerce"),
+        pd.to_datetime(frame["Date"], errors="coerce"),
+        mode="max",
+        min_spacing_months=24.0,
+        window_months=4,
+    )
+    peak_set = set(peak_idx)
+    frame["PrimaryCyclePeak"] = [idx in peak_set for idx in range(len(frame))]
     cycle_lengths = pd.to_numeric(
         frame.loc[frame["PrimaryCycleTrough"].astype(bool), "PrimaryCycleTroughToTroughMonths"],
         errors="coerce",
@@ -241,6 +257,24 @@ def build_global_m2_cycle_fig(
             ),
         ),
     )
+    for flag_col, label, color in [
+        ("PrimaryCycleTrough", "Global M2 cycle trough", "#38bdf8"),
+        ("PrimaryCyclePeak", "Global M2 cycle peak", "#f97316"),
+    ]:
+        markers = visible.loc[visible[flag_col].astype(bool)]
+        if markers.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=markers["Date"],
+                y=global_display.loc[markers.index],
+                mode="markers",
+                name=label,
+                showlegend=False,
+                marker={"color": color, "size": 7, "line": {"color": "#0f131a", "width": 1}},
+                hovertemplate=f"{label}: %{{x|%Y-%m-%d}}<br>Cycle: %{{y:.2f}}<extra></extra>",
+            )
+        )
     spy = _monthly_primary_cycle_frame(spy_history if spy_history is not None else pd.DataFrame())
     if not spy.empty:
         spy["DisplayCycle"] = _normalize_cycle_for_display(spy["PrimaryMarketCycle"])
