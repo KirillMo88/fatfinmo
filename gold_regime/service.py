@@ -33,6 +33,7 @@ YAHOO_GOLD_REGIME_TICKERS = ["GLD", "DX-Y.NYB", "CL=F"]
 FRED_GOLD_REGIME_SERIES = ["DFII10", "DGS2", "DGS10", "T5YIE", "T10YIE", "IRLTLT01JPM156N"]
 GOLD_MCP_SYMBOL = "TVC:GOLD"
 GOLD_HISTORY_START = pd.Timestamp("1960-01-04")
+GOLD_MACRO_START = pd.Timestamp("2016-01-01")
 
 
 def build_gold_regime_snapshot(
@@ -45,21 +46,21 @@ def build_gold_regime_snapshot(
     cache = cache_dir or Path("persistent") / "finance_cache" / "gold_regime"
     cache.mkdir(parents=True, exist_ok=True)
     today = datetime.now(timezone.utc).date()
-    start_date = GOLD_HISTORY_START.date()
+    start_date = GOLD_MACRO_START.date()
 
     yahoo_weekly = load_yahoo_weekly(YAHOO_GOLD_REGIME_TICKERS)
     try:
         fred_data = download_fred_series_batch(
             FRED_GOLD_REGIME_SERIES,
             api_key=fred_api_key,
-            observation_start="1960-01-04",
+            observation_start="2016-01-01",
         )
     except Exception:
         fred_data = pd.DataFrame(columns=["Series_ID", "Date", "Value"])
 
     macro_history = calculate_gold_macro_from_fred(
-        dxy=weekly_close(yahoo_weekly.get("DX-Y.NYB", pd.DataFrame())),
-        wti=weekly_close(yahoo_weekly.get("CL=F", pd.DataFrame())),
+        dxy=_series_from_start(weekly_close(yahoo_weekly.get("DX-Y.NYB", pd.DataFrame())), GOLD_MACRO_START),
+        wti=_series_from_start(weekly_close(yahoo_weekly.get("CL=F", pd.DataFrame())), GOLD_MACRO_START),
         fred_data=fred_data,
         config=cfg,
     )
@@ -149,18 +150,18 @@ def build_gold_structural_macro2_snapshot(
 
     selected_gold_price = gold_price if gold_price is not None and not gold_price.empty else weekly_close(yahoo_weekly.get("GLD", pd.DataFrame()))
     history = calculate_gold_structural_macro2_history(
-        gold_price=selected_gold_price,
-        dxy=weekly_close(yahoo_weekly.get("DX-Y.NYB", pd.DataFrame())),
-        real_yield=fred_weekly.get("DFII10"),
-        us2y=fred_weekly.get("DGS2"),
-        us10y=fred_weekly.get("DGS10"),
-        jp10y=fred_weekly.get("IRLTLT01JPM156N"),
-        global_m2=_weekly_column_series(monthly_liquidity, "global_m2_usd_bn"),
-        global_cb_assets=_weekly_column_series(weekly_liquidity, "global_cb_assets_usd_bn"),
-        us_net_liquidity=_weekly_column_series(weekly_liquidity, "us_net_liquidity_usd_bn"),
-        t5yie=fred_weekly.get("T5YIE"),
-        t10yie=fred_weekly.get("T10YIE"),
-        business_cycle_state=business_state,
+        gold_price=_series_from_start(selected_gold_price, GOLD_MACRO_START),
+        dxy=_series_from_start(weekly_close(yahoo_weekly.get("DX-Y.NYB", pd.DataFrame())), GOLD_MACRO_START),
+        real_yield=_series_from_start(fred_weekly.get("DFII10"), GOLD_MACRO_START),
+        us2y=_series_from_start(fred_weekly.get("DGS2"), GOLD_MACRO_START),
+        us10y=_series_from_start(fred_weekly.get("DGS10"), GOLD_MACRO_START),
+        jp10y=_series_from_start(fred_weekly.get("IRLTLT01JPM156N"), GOLD_MACRO_START),
+        global_m2=_series_from_start(_weekly_column_series(monthly_liquidity, "global_m2_usd_bn"), GOLD_MACRO_START),
+        global_cb_assets=_series_from_start(_weekly_column_series(weekly_liquidity, "global_cb_assets_usd_bn"), GOLD_MACRO_START),
+        us_net_liquidity=_series_from_start(_weekly_column_series(weekly_liquidity, "us_net_liquidity_usd_bn"), GOLD_MACRO_START),
+        t5yie=_series_from_start(fred_weekly.get("T5YIE"), GOLD_MACRO_START),
+        t10yie=_series_from_start(fred_weekly.get("T10YIE"), GOLD_MACRO_START),
+        business_cycle_state=_series_from_start(business_state, GOLD_MACRO_START),
     )
     current = history.iloc[-1].to_dict() if not history.empty else {}
     return GoldStructuralMacro2Snapshot(current=current, history=history)
@@ -190,6 +191,13 @@ def load_gold_mcp_weekly() -> pd.Series:
         .set_index("date")["close"]
         .rename("gold_price")
     )
+
+
+def _series_from_start(series: pd.Series | None, start: pd.Timestamp) -> pd.Series | None:
+    if series is None or series.empty:
+        return series
+    dates = pd.to_datetime(series.index, errors="coerce")
+    return series.loc[dates >= start].copy()
 
 
 def _fred_weekly_series(frame: pd.DataFrame) -> dict[str, pd.Series]:
