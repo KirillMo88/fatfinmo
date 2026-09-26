@@ -106,7 +106,7 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
         key="gold_charts_range",
     )
     render_gold_history_chart(snapshot, selected_range, snapshot.structural_macro2)
-    render_gold_structural_macro2(snapshot.structural_macro2, include_history_chart=False)
+    render_gold_structural_macro2(snapshot.structural_macro2, include_history_chart=False, selected_range=selected_range)
     render_signal_explanation(current)
     render_macro_detail(current)
     render_global_monetary_liquidity_context(current)
@@ -188,8 +188,7 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
 
     gold_cycle_history = getattr(snapshot, "gold_cycle_history", pd.DataFrame())
     if isinstance(gold_cycle_history, pd.DataFrame) and not gold_cycle_history.empty:
-        # Keep the cycle chart aligned with the full GOLD history used for its calculation.
-        render_gold_cycle_chart(gold_cycle_history, "MAX")
+        render_gold_cycle_chart(gold_cycle_history, selected_range)
     st.plotly_chart(
         build_gold_score_components_plotly(
             analytics_data,
@@ -203,7 +202,7 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
         config=GOLD_PLOTLY_CONFIG,
     )
     if structural_macro2 is not None and not structural_macro2.history.empty:
-        render_structural_macro2_history(structural_macro2.history)
+        render_structural_macro2_history(structural_macro2.history, selected_range)
     st.plotly_chart(
         build_gold_score_components_plotly(
             analytics_data,
