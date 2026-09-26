@@ -68,6 +68,7 @@ from treasury_fiscal_regime_tab import render_treasury_fiscal_regime_tab
 from treasury_funding_policy import read_snapshot as read_treasury_funding_policy_snapshot
 from gold_regime_tab import render_gold_regime_tab
 from market_cycle_tab import render_market_cycle_tab
+from global_m2_cycle import build_global_m2_cycle_fig, build_global_m2_cycle_history
 from global_liquidity import (
     GLOBAL_LIQUIDITY_STORAGE_DIR,
     freshness as global_liquidity_freshness,
@@ -2081,6 +2082,21 @@ def render_global_liquidity_dashboard_tab() -> None:
 
     st.markdown("### Global M2")
     _render_global_m2_level_growth(chart_frame, regime)
+    global_m2_cycle = build_global_m2_cycle_history(monthly)
+    if global_m2_cycle.empty:
+        st.info("No monthly Global M2 history is available for the cycle layer.")
+    else:
+        cycle_start = pd.to_datetime(chart_frame["date"], errors="coerce").min() if not chart_frame.empty else None
+        cycle_end = pd.to_datetime(chart_frame["date"], errors="coerce").max() if not chart_frame.empty else None
+        st.plotly_chart(
+            build_global_m2_cycle_fig(global_m2_cycle, cycle_start, cycle_end),
+            use_container_width=True,
+            config=LIQUIDITY_PLOTLY_CONFIG,
+        )
+        st.caption(
+            "Monthly Global M2 cycle: SMA50M structural extension; primary cycle is a standardized "
+            "12M ROC + RSI(14M) composite filtered through a 30-54M band-pass."
+        )
     with st.expander("Global M2 Momentum vs 65M Liquidity Cycle", expanded=True):
         _render_long_cycle_chart(chart_frame, regime)
     _render_liquidity_impulse_percentile_chart(chart_frame, "Global M2", "m2")
