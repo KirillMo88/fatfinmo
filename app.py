@@ -2119,8 +2119,6 @@ def render_global_liquidity_dashboard_tab() -> None:
             "Monthly Global M2 cycle: SMA50M structural extension; primary cycle is a standardized "
             "12M ROC + RSI(14M) composite filtered through a 30-54M band-pass."
         )
-    with st.expander("Global M2 Momentum vs 65M Liquidity Cycle", expanded=True):
-        _render_long_cycle_chart(chart_frame, regime)
     _render_liquidity_impulse_percentile_chart(chart_frame, "Global M2", "m2")
     _render_liquidity_impulse_percentile_chart(chart_frame, "Global CB Assets", "cb")
     _render_liquidity_impulse_percentile_chart(chart_frame, "US Net Liquidity", "usnl")
