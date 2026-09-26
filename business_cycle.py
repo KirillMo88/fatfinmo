@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,7 @@ def build_business_cycle_snapshot(
     api_key: str | None = None,
     start_date: str | pd.Timestamp = "2010-01-01",
     end_date: str | pd.Timestamp | None = None,
+    include_asset_analytics: bool = True,
 ) -> BusinessCycleSnapshot:
     end = pd.Timestamp(end_date).tz_localize(None).normalize() if end_date else pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
     display_start = pd.Timestamp(start_date).tz_localize(None).normalize()
@@ -99,10 +101,18 @@ def build_business_cycle_snapshot(
     calendar = pd.date_range(model_start, end, freq="W-FRI")
     fred = load_business_cycle_fred(api_key, observation_start=str(model_start.date()))
     full_history = build_business_cycle_history(calendar, fred)
-    asset_prices = load_asset_prices(calendar)
-    phase_returns = build_forward_return_stats(full_history, asset_prices, "BusinessCycleState", BUSINESS_PHASES)
-    regime_returns = build_forward_return_stats(full_history, asset_prices, "EconomyRegime", ECONOMY_REGIMES)
-    eta = build_eta_squared(full_history, asset_prices)
+    if include_asset_analytics:
+        asset_prices = load_asset_prices(calendar)
+        phase_returns = build_forward_return_stats(full_history, asset_prices, "BusinessCycleState", BUSINESS_PHASES)
+        regime_returns = build_forward_return_stats(full_history, asset_prices, "EconomyRegime", ECONOMY_REGIMES)
+        eta = build_eta_squared(full_history, asset_prices)
+    else:
+        # Gold Structural Macro 2 only consumes BusinessCycleState. Avoid the
+        # four max-history market downloads and derived return statistics in
+        # that path while keeping the standard Business Cycle tab unchanged.
+        phase_returns = pd.DataFrame()
+        regime_returns = pd.DataFrame()
+        eta = pd.DataFrame()
     history = full_history.loc[pd.to_datetime(full_history["date"], errors="coerce").ge(display_start)].reset_index(drop=True)
     diagnostics = build_diagnostics(history)
     quality = build_data_quality(fred, history)
@@ -113,15 +123,26 @@ def build_business_cycle_snapshot(
 def load_business_cycle_fred(api_key: str | None = None, observation_start: str = "1990-01-01") -> pd.DataFrame:
     cache = read_fred_cache()
     frames: list[pd.DataFrame] = []
-    for series_id in ALL_FRED_SERIES:
-        frame = pd.DataFrame()
+
+    def download_one(series_id: str) -> tuple[str, pd.DataFrame]:
         try:
             frame = download_fred_series(series_id, api_key=api_key, observation_start=observation_start)
             if not frame.empty:
                 frame["Description"] = ALL_FRED_SERIES[series_id]
                 frame["IsReleaseDated"] = False
+            return series_id, frame
         except (FredApiError, Exception):
-            frame = pd.DataFrame()
+            return series_id, pd.DataFrame()
+
+    downloaded: dict[str, pd.DataFrame] = {}
+    with ThreadPoolExecutor(max_workers=min(6, len(ALL_FRED_SERIES))) as executor:
+        futures = [executor.submit(download_one, series_id) for series_id in ALL_FRED_SERIES]
+        for future in as_completed(futures):
+            series_id, frame = future.result()
+            downloaded[series_id] = frame
+
+    for series_id in ALL_FRED_SERIES:
+        frame = downloaded.get(series_id, pd.DataFrame())
 
         if series_id == "NAPM":
             # Keep the full saved/release history and overlay only the latest

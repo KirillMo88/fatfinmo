@@ -138,7 +138,11 @@ def build_gold_structural_macro2_snapshot(
         monthly_liquidity = pd.DataFrame()
         weekly_liquidity = pd.DataFrame()
     try:
-        business_cycle = build_business_cycle_snapshot(api_key=fred_api_key)
+        business_cycle = build_business_cycle_snapshot(
+            api_key=fred_api_key,
+            start_date=GOLD_MACRO_START,
+            include_asset_analytics=False,
+        )
         business_history = business_cycle.history
         business_state = (
             business_history.set_index(pd.to_datetime(business_history["date"], errors="coerce"))["BusinessCycleState"]

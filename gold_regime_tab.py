@@ -16,6 +16,7 @@ from global_liquidity import read_global_liquidity
 
 GOLD_X_AXIS_DATE_FORMAT = "%b'%y"
 GOLD_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
+GOLD_ANALYTICS_START = pd.Timestamp("2016-01-01")
 
 
 @st.cache_data(show_spinner=True, ttl=21600)
@@ -106,7 +107,7 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
     render_flow_detail(current, snapshot)
     render_structural_demand(current, snapshot)
     render_freshness(snapshot)
-    render_history_table(snapshot.history)
+    render_history_table(filter_gold_analytics_history(snapshot.history))
 
 
 def extract_gold_alpha(table_df: pd.DataFrame) -> float | None:
@@ -156,6 +157,7 @@ def render_metric(label: str, value: str, detail: str) -> None:
 
 def render_gold_history_chart(snapshot: Any, selected_range: str, structural_macro2: Any = None) -> None:
     history = snapshot.history
+    analytics_history = filter_gold_analytics_history(history)
     st.markdown("### Gold Price + Gold Regime")
     if history.empty or "gold_price" not in history.columns:
         st.info("Gold price history is unavailable.")
@@ -169,6 +171,7 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
     if price_data.empty:
         st.info("Gold price history is unavailable.")
         return
+    analytics_data = filter_gold_history_range(analytics_history, selected_range)
     price_data["next_date"] = price_data["date"].shift(-1)
     price_data.loc[price_data["next_date"].isna(), "next_date"] = price_data.loc[price_data["next_date"].isna(), "date"] + pd.Timedelta(days=7)
     ymin = float(price_data["gold_price"].min())
@@ -180,7 +183,7 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
     st.plotly_chart(build_gold_price_plotly(price_data, ymin - pad, ymax + pad), use_container_width=True, config=GOLD_PLOTLY_CONFIG)
     st.plotly_chart(
         build_gold_score_components_plotly(
-            d,
+            analytics_data,
             "structural_macro_score",
             [("dxy_score", "DXYBull", "#38bdf8"), ("real_yield_score", "RealYieldBull", "#facc15"), ("us2y_bull_score", "US2YBull", "#a78bfa")],
             "Gold Structural Macro",
@@ -194,7 +197,7 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
         render_structural_macro2_history(structural_macro2.history)
     st.plotly_chart(
         build_gold_score_components_plotly(
-            d,
+            analytics_data,
             "forward_macro_risk",
             [("us2y_risk_score", "US2YRisk", "#facc15"), ("wti_risk_score", "WTIRisk", "#fb923c")],
             "Gold Forward Macro Risk",
@@ -205,7 +208,7 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
     )
     st.plotly_chart(
         build_gold_score_components_plotly(
-            d,
+            analytics_data,
             "tactical_flow_score",
             [("etf_flow_score", "ETFFlowScore", "#22d3ee"), ("cot_momentum_score", "COTMomentumScore", "#facc15")],
             "Gold Tactical Flow",
@@ -215,10 +218,10 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
         use_container_width=True,
         config=GOLD_PLOTLY_CONFIG,
     )
-    etf_fig = build_gold_etf_flows_plotly(d, positioning_chart_subtitle(snapshot, "ETF flows"))
+    etf_fig = build_gold_etf_flows_plotly(analytics_data, positioning_chart_subtitle(snapshot, "ETF flows"))
     if etf_fig is not None:
         st.plotly_chart(etf_fig, use_container_width=True, config=GOLD_PLOTLY_CONFIG)
-    cot_fig = build_gold_cot_plotly(d, positioning_chart_subtitle(snapshot, "COT"))
+    cot_fig = build_gold_cot_plotly(analytics_data, positioning_chart_subtitle(snapshot, "COT"))
     if cot_fig is not None:
         st.plotly_chart(cot_fig, use_container_width=True, config=GOLD_PLOTLY_CONFIG)
 
@@ -301,8 +304,11 @@ def build_gold_price_plotly(price_data: pd.DataFrame, ymin: float, ymax: float) 
         "DATA_INCOMPLETE": "#64748b",
     }
     fig = go.Figure()
-    for _, row in price_data.iterrows():
+    regime_data = price_data.loc[pd.to_datetime(price_data["date"], errors="coerce").ge(GOLD_ANALYTICS_START)]
+    for _, row in regime_data.iterrows():
         regime = str(row.get("gold_regime") or "DATA_INCOMPLETE")
+        if regime == "DATA_INCOMPLETE":
+            continue
         fig.add_vrect(
             x0=row["date"],
             x1=row["next_date"],
@@ -650,6 +656,14 @@ def filter_gold_history_range(history: pd.DataFrame, selected_range: str) -> pd.
     end_date = d["date"].max()
     start_date = end_date - pd.DateOffset(years=years)
     return d.loc[d["date"] >= start_date].copy()
+
+
+def filter_gold_analytics_history(history: pd.DataFrame) -> pd.DataFrame:
+    d = history.copy()
+    if d.empty or "date" not in d.columns:
+        return d
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    return d.loc[d["date"].ge(GOLD_ANALYTICS_START)].sort_values("date").reset_index(drop=True)
 
 
 def positioning_chart_subtitle(snapshot: Any, freshness_key: str) -> str:
