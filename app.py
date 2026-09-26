@@ -2386,10 +2386,6 @@ def _liquidity_cycle_months_since_anchor(value: pd.Timestamp) -> float:
     return (date.year - anchor.year) * 12 + (date.month - anchor.month) + (date.day - 1) / 30.4375
 
 
-def _liquidity_cycle_peak_date(cycle_number: int) -> pd.Timestamp:
-    return pd.Timestamp("2022-10-01") + pd.DateOffset(months=32 + (65 * cycle_number), days=15)
-
-
 def _liquidity_cycle_confirmation(frame: pd.DataFrame) -> pd.Series:
     roc = pd.to_numeric(frame.get("m2_52w", np.nan), errors="coerce")
     roc_direction = roc.diff(13)
@@ -2806,82 +2802,6 @@ def _render_us_net_liquidity_chart(frame: pd.DataFrame) -> None:
     st.plotly_chart(_style_liquidity_plotly(fig, 320, "US Net Liquidity - Funding Impulse"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
 
 
-def _render_long_cycle_chart(frame: pd.DataFrame, full_frame: pd.DataFrame) -> None:
-    if frame.empty:
-        st.info("No data for Global M2 Momentum vs 65M Liquidity Cycle.")
-        return
-    m2_roc = pd.to_numeric(full_frame.get("m2_52w", np.nan), errors="coerce")
-    normalized = (_liquidity_rolling_zscore(m2_roc, 156, 104).clip(-2, 2) * 50.0).reindex(frame.index)
-    dates = pd.to_datetime(frame["date"], errors="coerce")
-    min_date = dates.min()
-    max_date = dates.max()
-    current_peak = _liquidity_cycle_peak_date(0)
-    next_peak = _liquidity_cycle_peak_date(1)
-    cycle_end = max(max_date, next_peak) if pd.notna(max_date) else next_peak
-    cycle_dates = pd.date_range(min_date, cycle_end, freq="W-FRI") if pd.notna(min_date) else pd.DatetimeIndex([])
-    cycle = pd.Series([_liquidity_long_cycle_value(date) for date in cycle_dates], index=cycle_dates)
-    rows = []
-    for date, value in zip(frame["date"], normalized):
-        if pd.notna(date) and np.isfinite(value):
-            rows.append({"Date": date, "Series": "Normalized Global M2 ROC", "Value": float(value)})
-    for date, value in cycle.items():
-        if pd.notna(date) and np.isfinite(value):
-            rows.append({"Date": date, "Series": "65M Reference Cycle", "Value": float(value)})
-    chart_df = pd.DataFrame(rows)
-    if chart_df.empty:
-        st.info("No data for Global M2 Momentum vs 65M Liquidity Cycle.")
-        return
-    latest = _liquidity_latest_row(frame)
-    st.caption(f"Informational status: {latest.get('cycle_confirmation', 'n/a')}")
-    fig = go.Figure()
-    colors = {"Normalized Global M2 ROC": "#38bdf8", "65M Reference Cycle": "#facc15"}
-    for series in chart_df["Series"].drop_duplicates():
-        d = chart_df[chart_df["Series"].eq(series)]
-        fig.add_trace(
-            go.Scatter(
-                x=d["Date"],
-                y=d["Value"],
-                mode="lines",
-                name=series,
-                line={"color": colors.get(series, "#cbd5e1"), "width": 1.8},
-                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{series}: %{{y:.1f}}<extra></extra>",
-            )
-        )
-    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
-    trough = pd.Timestamp("2022-10-01")
-    for marker_date, label, color in [
-        (trough, "Cycle trough Oct 2022", "#ef4444"),
-        (current_peak, "Current cycle peak", "#22c55e"),
-        (next_peak, "Next cycle peak", "#22c55e"),
-    ]:
-        if pd.notna(min_date) and marker_date >= min_date and marker_date <= cycle_end:
-            marker_x = marker_date.strftime("%Y-%m-%d")
-            fig.add_shape(
-                type="line",
-                xref="x",
-                yref="paper",
-                x0=marker_x,
-                x1=marker_x,
-                y0=0,
-                y1=1,
-                line={"color": color, "dash": "dot", "width": 1},
-            )
-            fig.add_annotation(
-                x=marker_x,
-                y=1.03,
-                xref="x",
-                yref="paper",
-                text=label,
-                showarrow=False,
-                font={"color": color, "size": 10},
-                xanchor="left",
-            )
-    fig.update_layout(yaxis={"title": "-100 to +100", "range": [-100, 100]})
-    if pd.notna(min_date) and pd.notna(max_date):
-        fig.update_xaxes(range=[min_date.strftime("%Y-%m-%d"), max_date.strftime("%Y-%m-%d")])
-    st.plotly_chart(_style_liquidity_plotly(fig, 300, "Global M2 Momentum vs 65M Liquidity Cycle"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
-
-
 def _render_liquidity_impulse_percentile_chart(frame: pd.DataFrame, asset_label: str, prefix: str) -> None:
     title = f"{asset_label} Growth and Impulse Percentiles"
     if frame.empty:
@@ -2923,13 +2843,6 @@ def _render_liquidity_impulse_percentile_chart(frame: pd.DataFrame, asset_label:
         hovermode="x unified",
     )
     st.plotly_chart(_style_liquidity_plotly(fig, 320, title), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
-
-
-def _liquidity_rolling_zscore(series: pd.Series, window: int, min_periods: int) -> pd.Series:
-    values = pd.to_numeric(series, errors="coerce")
-    mean = values.rolling(window, min_periods=min_periods).mean()
-    std = values.rolling(window, min_periods=min_periods).std(ddof=0)
-    return (values - mean) / std.replace(0.0, np.nan)
 
 
 def _build_liquidity_asset_impact_table(latest: dict[str, Any]) -> pd.DataFrame:
