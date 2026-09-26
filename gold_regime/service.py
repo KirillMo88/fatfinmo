@@ -16,6 +16,7 @@ from tradingview_mcp import get_ohlcv_data
 
 from .config import GOLD_REGIME_CONFIG
 from .cot import calculate_cot_momentum_score, download_cftc_cot, extract_comex_gold_cot, load_comex_gold_cot_from_positioning
+from .cycles import build_gold_cycle_history
 from .etf_flows import aggregate_gold_etf_flows, load_gold_etf_flows
 from .macro import calculate_gold_macro_from_fred
 from .macro2 import calculate_gold_structural_macro2_history
@@ -112,6 +113,7 @@ def build_gold_regime_snapshot(
         )
     except Exception:
         structural_macro2 = GoldStructuralMacro2Snapshot(current={}, history=pd.DataFrame())
+    gold_cycle_history = build_gold_cycle_history(gold_price)
 
     return GoldRegimeSnapshot(
         current=current,
@@ -121,6 +123,7 @@ def build_gold_regime_snapshot(
         cot_contract_market_name=contract_name,
         freshness=freshness,
         structural_macro2=structural_macro2,
+        gold_cycle_history=gold_cycle_history,
     )
 
 

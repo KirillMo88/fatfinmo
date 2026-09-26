@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
 from gold_regime.macro2_view import render_gold_structural_macro2, render_structural_macro2_history
@@ -181,6 +182,9 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
     price_data["y_max"] = ymax + pad
 
     st.plotly_chart(build_gold_price_plotly(price_data, ymin - pad, ymax + pad), use_container_width=True, config=GOLD_PLOTLY_CONFIG)
+    gold_cycle_history = getattr(snapshot, "gold_cycle_history", pd.DataFrame())
+    if isinstance(gold_cycle_history, pd.DataFrame) and not gold_cycle_history.empty:
+        render_gold_cycle_chart(gold_cycle_history, selected_range)
     st.plotly_chart(
         build_gold_score_components_plotly(
             analytics_data,
@@ -330,6 +334,106 @@ def build_gold_price_plotly(price_data: pd.DataFrame, ymin: float, ymax: float) 
     )
     fig.update_yaxes(title="GLD", range=[ymin, ymax])
     return style_gold_plotly(fig, 390, "GLD Weekly Price with Gold Regime Zones")
+
+
+def render_gold_cycle_chart(history: pd.DataFrame, selected_range: str) -> None:
+    st.plotly_chart(
+        build_gold_multi_layer_cycle_fig(history, selected_range),
+        use_container_width=True,
+        config=GOLD_PLOTLY_CONFIG,
+    )
+
+
+def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str) -> go.Figure:
+    frame = history.copy()
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+    frame = frame.dropna(subset=["Date", "GOLD_Close"]).sort_values("Date")
+    if frame.empty:
+        return style_gold_plotly(go.Figure(), 620, "Gold Multi-Layer Cycles")
+
+    end_date = frame["Date"].max()
+    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    start_date = end_date - pd.DateOffset(years=years) if years else frame["Date"].min()
+    visible = frame.loc[frame["Date"].between(start_date, end_date)].copy()
+    if visible.empty:
+        visible = frame.tail(1).copy()
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.45, 0.275, 0.275],
+        vertical_spacing=0.045,
+        subplot_titles=("GLD Log", "Short Gold Cycle (60-80M)", "Long Gold Cycle (180-200M)"),
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=visible["Date"],
+            y=pd.to_numeric(visible["GOLD_Close"], errors="coerce"),
+            mode="lines",
+            name="GOLD Log",
+            line={"color": "#f8fafc", "width": 1.9},
+            hovertemplate="Date: %{x|%Y-%m-%d}<br>GOLD: %{y:.2f}<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+    _add_gold_cycle_trace(fig, visible, "GoldShortCycle", "Short Gold Cycle", "#38bdf8", 2, "GoldShort")
+    _add_gold_cycle_trace(fig, visible, "GoldLongCycle", "Long Gold Cycle", "#facc15", 3, "GoldLong")
+    for row in [2, 3]:
+        fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1}, row=row, col=1)
+    fig.update_yaxes(type="log", title_text="GOLD log", row=1, col=1)
+    fig.update_yaxes(title_text="Normalized", row=2, col=1)
+    fig.update_yaxes(title_text="Normalized", row=3, col=1)
+    fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikecolor="#94a3b8", spikethickness=1)
+    return style_gold_plotly(
+        fig,
+        620,
+        "Gold Multi-Layer Cycles",
+        "GOLD | 60-80M Short Cycle | 180-200M Long Cycle | cycle input from 1960",
+    )
+
+
+def _add_gold_cycle_trace(
+    fig: go.Figure,
+    visible: pd.DataFrame,
+    cycle_col: str,
+    name: str,
+    color: str,
+    row: int,
+    prefix: str,
+) -> None:
+    fig.add_trace(
+        go.Scatter(
+            x=visible["Date"],
+            y=pd.to_numeric(visible[cycle_col], errors="coerce"),
+            mode="lines",
+            name=name,
+            line={"color": color, "width": 1.8},
+            hovertemplate="Date: %{x|%Y-%m-%d}<br>Normalized cycle: %{y:.2f}<extra></extra>",
+        ),
+        row=row,
+        col=1,
+    )
+    trough_col = f"{prefix}Trough"
+    if trough_col not in visible.columns:
+        return
+    markers = visible.loc[visible[trough_col].fillna(False).astype(bool)].copy()
+    if markers.empty:
+        return
+    fig.add_trace(
+        go.Scatter(
+            x=markers["Date"],
+            y=pd.to_numeric(markers[cycle_col], errors="coerce"),
+            mode="markers",
+            name=f"{name} trough",
+            marker={"color": color, "size": 7, "line": {"color": "#0f131a", "width": 1}},
+            hovertemplate="Trough: %{x|%Y-%m-%d}<br>Cycle: %{y:.2f}<extra></extra>",
+            showlegend=False,
+        ),
+        row=row,
+        col=1,
+    )
 
 
 def build_gold_score_plotly(data: pd.DataFrame, metric: str, title: str, color: str, higher_is_better: bool = False) -> go.Figure:
