@@ -404,7 +404,14 @@ def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str)
     fig.update_yaxes(type="log", title_text="GOLD log", row=1, col=1)
     fig.update_yaxes(title_text="Normalized", row=2, col=1)
     fig.update_yaxes(title_text="Normalized", row=3, col=1)
-    fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikecolor="#94a3b8", spikethickness=1)
+    fig.update_xaxes(
+        range=[start_date, end_date],
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikecolor="#94a3b8",
+        spikethickness=1,
+    )
     return style_gold_plotly(
         fig,
         620,
