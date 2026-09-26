@@ -13,6 +13,7 @@ from plotly.subplots import make_subplots
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
 from gold_regime.macro2_view import render_gold_structural_macro2, render_structural_macro2_history
 from global_liquidity import read_global_liquidity
+from global_m2_cycle import build_global_m2_cycle_history
 from market_cycle_tab import (
     add_combined_cycle_risk_background,
     add_combined_cycle_risk_regime,
@@ -85,6 +86,15 @@ def load_gold_global_m2_context() -> dict[str, Any]:
         "context_state": state,
         "status": "CURRENT",
     }
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def load_gold_global_m2_cycle_history() -> pd.DataFrame:
+    try:
+        _, monthly, _ = read_global_liquidity()
+        return build_global_m2_cycle_history(monthly)
+    except Exception:
+        return pd.DataFrame()
 
 
 def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = None) -> None:
@@ -189,6 +199,7 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
     gold_cycle_history = getattr(snapshot, "gold_cycle_history", pd.DataFrame())
     if isinstance(gold_cycle_history, pd.DataFrame) and not gold_cycle_history.empty:
         render_gold_cycle_chart(gold_cycle_history, selected_range)
+        render_gold_liquidity_cycle_comparison_chart(gold_cycle_history, selected_range)
     st.plotly_chart(
         build_gold_score_components_plotly(
             analytics_data,
@@ -346,6 +357,99 @@ def render_gold_cycle_chart(history: pd.DataFrame, selected_range: str) -> None:
         use_container_width=True,
         config=GOLD_PLOTLY_CONFIG,
     )
+
+
+def render_gold_liquidity_cycle_comparison_chart(gold_history: pd.DataFrame, selected_range: str) -> None:
+    global_m2_cycle = load_gold_global_m2_cycle_history()
+    comparison = prepare_gold_liquidity_cycle_comparison(gold_history, global_m2_cycle)
+    if comparison.empty:
+        return
+    st.plotly_chart(
+        build_gold_liquidity_cycle_comparison_fig(comparison, selected_range),
+        use_container_width=True,
+        config=GOLD_PLOTLY_CONFIG,
+    )
+
+
+def prepare_gold_liquidity_cycle_comparison(
+    gold_history: pd.DataFrame,
+    global_m2_cycle: pd.DataFrame,
+) -> pd.DataFrame:
+    required_gold = {"Date", "GoldShortCycle"}
+    required_m2 = {"Date", "PrimaryMarketCycle"}
+    if (
+        gold_history is None
+        or global_m2_cycle is None
+        or gold_history.empty
+        or global_m2_cycle.empty
+        or not required_gold.issubset(gold_history.columns)
+        or not required_m2.issubset(global_m2_cycle.columns)
+    ):
+        return pd.DataFrame(columns=["Date", "GlobalM2PrimaryCycle", "ShortGoldCycle"])
+
+    gold = gold_history[["Date", "GoldShortCycle"]].copy()
+    gold["Date"] = pd.to_datetime(gold["Date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    gold["ShortGoldCycle"] = pd.to_numeric(gold["GoldShortCycle"], errors="coerce")
+    gold = gold.drop(columns="GoldShortCycle").dropna().drop_duplicates("Date", keep="last")
+
+    liquidity = global_m2_cycle[["Date", "PrimaryMarketCycle"]].copy()
+    liquidity["Date"] = pd.to_datetime(liquidity["Date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    liquidity["GlobalM2PrimaryCycle"] = pd.to_numeric(liquidity["PrimaryMarketCycle"], errors="coerce")
+    liquidity = liquidity.drop(columns="PrimaryMarketCycle").dropna().drop_duplicates("Date", keep="last")
+
+    return (
+        liquidity.merge(gold, on="Date", how="inner", validate="one_to_one")
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+
+
+def build_gold_liquidity_cycle_comparison_fig(comparison: pd.DataFrame, selected_range: str) -> go.Figure:
+    frame = comparison.copy()
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+    for column in ["GlobalM2PrimaryCycle", "ShortGoldCycle"]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.dropna(subset=["Date", "GlobalM2PrimaryCycle", "ShortGoldCycle"]).sort_values("Date")
+    if frame.empty:
+        return style_gold_plotly(go.Figure(), 310, "Global M2 Liquidity Cycle vs Short Gold Cycle")
+
+    end_date = frame["Date"].max()
+    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    start_date = end_date - pd.DateOffset(years=years) if years else frame["Date"].min()
+    visible = frame.loc[frame["Date"].between(start_date, end_date)].copy()
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=visible["Date"],
+            y=visible["GlobalM2PrimaryCycle"],
+            mode="lines",
+            name="Global M2 Primary Liquidity Cycle",
+            line={"color": "#38bdf8", "width": 2.0},
+            hovertemplate="Date: %{x|%Y-%m}<br>Global M2 cycle: %{y:.2f}<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=visible["Date"],
+            y=visible["ShortGoldCycle"],
+            mode="lines",
+            name="Short Gold Cycle",
+            line={"color": "#facc15", "width": 2.0},
+            hovertemplate="Date: %{x|%Y-%m}<br>Short Gold cycle: %{y:.2f}<extra></extra>",
+        )
+    )
+    fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1})
+    fig.update_xaxes(range=[start_date, end_date])
+    fig.update_yaxes(title_text="Normalized")
+    fig = style_gold_plotly(
+        fig,
+        310,
+        "Global M2 Primary Liquidity Cycle vs Short Gold Cycle",
+        "Monthly normalized cycles | common history",
+    )
+    fig.update_layout(hovermode="x unified")
+    return fig
 
 
 def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str) -> go.Figure:

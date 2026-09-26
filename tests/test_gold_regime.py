@@ -12,10 +12,38 @@ from gold_regime.macro2 import calculate_gold_structural_macro2_history, inclusi
 from gold_regime.regime import calculate_gold_tactical_flow, determine_flow_flags, determine_gold_regime
 from gold_regime.service import calculate_freshness, carry_forward_cot_history, load_gold_mcp_weekly
 from gold_regime.utils import rolling_percentile_rank
+from gold_regime_tab import build_gold_liquidity_cycle_comparison_fig, prepare_gold_liquidity_cycle_comparison
 
 
 def weekly(values):
     return pd.Series(values, index=pd.date_range("2020-01-03", periods=len(values), freq="W-FRI"))
+
+
+def test_gold_liquidity_cycle_comparison_aligns_monthly_history_and_range():
+    gold = pd.DataFrame(
+        {
+            "Date": pd.date_range("2020-01-31", periods=30, freq="ME"),
+            "GoldShortCycle": np.linspace(-1.5, 1.5, 30),
+        }
+    )
+    liquidity = pd.DataFrame(
+        {
+            "Date": pd.date_range("2019-07-01", periods=36, freq="MS"),
+            "PrimaryMarketCycle": np.linspace(1.5, -1.5, 36),
+        }
+    )
+
+    comparison = prepare_gold_liquidity_cycle_comparison(gold, liquidity)
+    figure = build_gold_liquidity_cycle_comparison_fig(comparison, "1Y")
+
+    assert comparison["Date"].min() == pd.Timestamp("2020-01-01")
+    assert comparison["Date"].max() == pd.Timestamp("2022-06-01")
+    assert [trace.name for trace in figure.data] == [
+        "Global M2 Primary Liquidity Cycle",
+        "Short Gold Cycle",
+    ]
+    assert min(pd.to_datetime(figure.data[0].x)) >= pd.Timestamp("2021-06-01")
+    assert figure.layout.xaxis.range[1] == pd.Timestamp("2022-06-01")
 
 
 def test_gold_mcp_history_starts_in_1960(monkeypatch):
