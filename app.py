@@ -48,6 +48,7 @@ from market_model import (
     calculate_tail_risk_history,
     classify_global_liquidity_backdrop,
     download_fred_market_data,
+    fred_series_weekly,
     market_model_config,
     weekly_close,
 )
@@ -67,6 +68,7 @@ from financial_fragility_tab import render_financial_fragility_tab
 from treasury_fiscal_regime_tab import render_treasury_fiscal_regime_tab
 from treasury_funding_policy import read_snapshot as read_treasury_funding_policy_snapshot
 from gold_regime_tab import render_gold_regime_tab
+from btc_cycle_tab import render_btc_cycle_tab
 from market_cycle_tab import load_market_cycle_snapshot_cached, render_market_cycle_tab
 from global_m2_cycle import (
     build_global_m2_cycle_fig,
@@ -5005,6 +5007,20 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
     cfg = market_model_config()
     fred_data = download_fred_market_data(api_key=get_fred_api_key_for_app())
     global_m2 = global_m2_weekly_series_for_market()
+    dxy_close = weekly_close(weekly.get("DX-Y.NYB", pd.DataFrame()))
+    fred_weekly = fred_series_weekly(fred_data)
+    btc_macro_index = dxy_close.index
+    for series_id in ["DGS2", "DFII10"]:
+        btc_macro_index = btc_macro_index.union(fred_weekly.get(series_id, pd.Series(dtype="float64")).index)
+    btc_macro_index = btc_macro_index.sort_values()
+    btc_macro_inputs = pd.DataFrame(
+        {
+            "Date": btc_macro_index,
+            "BTC_DXY_Close": dxy_close.reindex(btc_macro_index).ffill().to_numpy(),
+            "BTC_US2Y": fred_weekly.get("DGS2", pd.Series(dtype="float64")).reindex(btc_macro_index).ffill().to_numpy(),
+            "BTC_RealYield": fred_weekly.get("DFII10", pd.Series(dtype="float64")).reindex(btc_macro_index).ffill().to_numpy(),
+        }
+    )
     fast = calculate_fast_transition_risk_history(
         weekly_close(weekly.get("^VIX", pd.DataFrame())),
         weekly_close(weekly.get("DX-Y.NYB", pd.DataFrame())),
@@ -5039,6 +5055,9 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
                 "Credit_Level_State",
                 "Macro_DXY_Risk",
                 "US2Y_Risk",
+                "BTC_DXY_Close",
+                "BTC_US2Y",
+                "BTC_RealYield",
                 "Global_M2_Bull_Score_26W",
                 "Global_M2_Risk_26W",
                 "Negative_Confirmation_Count",
@@ -5090,6 +5109,9 @@ def load_market_transition_history(cache_signature: str) -> pd.DataFrame:
         how="outer",
     ).sort_values("Date")
     history["Date"] = pd.to_datetime(history["Date"])
+    if not btc_macro_inputs.empty:
+        history = pd.merge(history, btc_macro_inputs, on="Date", how="outer").sort_values("Date")
+        history[["BTC_DXY_Close", "BTC_US2Y", "BTC_RealYield"]] = history[["BTC_DXY_Close", "BTC_US2Y", "BTC_RealYield"]].ffill()
     structural = _prepare_spy_weekly_regime_frame()
     if not structural.empty:
         structural_slice = structural[["Date", "Market_Regime"]].copy()
@@ -6929,6 +6951,7 @@ def main():
         "CFTC COT",
         "Gold Regime",
         "BTC Regime",
+        "BTC Cycle",
         "Crypto Derivatives",
         "Alpha Engine",
         "Financial Fragility",
@@ -7207,6 +7230,15 @@ def main():
         render_gold_regime_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), get_fred_api_key_for_app())
     elif active_view == "BTC Regime":
         render_btc_regime_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), market_snapshot)
+    elif active_view == "BTC Cycle":
+        btc_weekly = load_btc_weekly_price()
+        try:
+            _, btc_monthly_m2, _ = read_global_liquidity()
+            btc_m2_cycle = build_global_m2_cycle_history(btc_monthly_m2)
+        except Exception:
+            btc_m2_cycle = pd.DataFrame()
+        btc_macro_history = load_market_transition_history("btc-cycle-shared-macro")
+        render_btc_cycle_tab(btc_weekly, btc_m2_cycle, btc_macro_history)
     elif active_view == "Crypto Derivatives":
         render_crypto_derivatives_tab()
     elif active_view == "Alpha Engine":
