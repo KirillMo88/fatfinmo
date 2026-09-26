@@ -22,7 +22,7 @@ SCORE_COLORS = {
 }
 
 
-def render_gold_structural_macro2(snapshot: GoldStructuralMacro2Snapshot | None) -> None:
+def render_gold_structural_macro2(snapshot: GoldStructuralMacro2Snapshot | None, include_history_chart: bool = True) -> None:
     st.markdown("### Gold Structural Macro 2")
     st.caption("Macro conditions for future Gold returns across 3–12 month horizons")
     if snapshot is None or snapshot.history.empty:
@@ -36,7 +36,8 @@ def render_gold_structural_macro2(snapshot: GoldStructuralMacro2Snapshot | None)
     render_current_term_structure(current)
     render_macro2_diagnostics(current)
     render_macro2_narrative(current)
-    render_structural_macro2_history(history)
+    if include_history_chart:
+        render_structural_macro2_history(history)
     render_gold_macro2_price_chart(history)
     render_macro2_model_details(current)
 
