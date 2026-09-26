@@ -29,3 +29,4 @@ class GoldRegimeSnapshot:
     cot_contract_market_name: str | None = None
     freshness: dict[str, Freshness] = field(default_factory=dict)
     structural_macro2: GoldStructuralMacro2Snapshot | None = None
+    gold_cycle_history: pd.DataFrame = field(default_factory=pd.DataFrame)

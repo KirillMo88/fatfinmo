@@ -67,7 +67,12 @@ from financial_fragility_tab import render_financial_fragility_tab
 from treasury_fiscal_regime_tab import render_treasury_fiscal_regime_tab
 from treasury_funding_policy import read_snapshot as read_treasury_funding_policy_snapshot
 from gold_regime_tab import render_gold_regime_tab
-from market_cycle_tab import render_market_cycle_tab
+from market_cycle_tab import load_market_cycle_snapshot_cached, render_market_cycle_tab
+from global_m2_cycle import (
+    build_global_m2_cycle_fig,
+    build_global_m2_cycle_history,
+    global_m2_cycle_phase_bands,
+)
 from global_liquidity import (
     GLOBAL_LIQUIDITY_STORAGE_DIR,
     freshness as global_liquidity_freshness,
@@ -1913,7 +1918,12 @@ def _render_liquidity_summary_block(title: str, value: str, rows: list[tuple[str
     )
 
 
-def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame, latest: dict[str, Any]) -> None:
+def _render_liquidity_regime_summary(
+    monthly: pd.DataFrame,
+    regime: pd.DataFrame,
+    latest: dict[str, Any],
+    global_m2_cycle: pd.DataFrame | None = None,
+) -> None:
     forecast_frame, _ = read_forecast_snapshot()
     valid_forecast = (
         forecast_frame.loc[forecast_frame.get("LiquidityForwardSignal", pd.Series(dtype="object")).notna()]
@@ -1924,11 +1934,6 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
 
     treasury = read_treasury_funding_policy_snapshot()
     refinancing = _liquidity_latest_numeric(treasury.monthly, "near_term_refinancing_pressure")
-    latest_date = pd.to_datetime(latest.get("date"), errors="coerce")
-    current_date = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
-    if pd.notna(latest_date):
-        latest_date = min(pd.Timestamp(latest_date).normalize(), current_date)
-
     m2_rows = [
         (f"ROC {months}m", _liquidity_fmt_roc(_liquidity_ordinary_roc(monthly, "global_m2_usd_bn", months)))
         for months in (1, 3, 6, 12)
@@ -1986,7 +1991,15 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
             ("Slow Impulse Percentile Status (39w)", _liquidity_percentile_status(latest.get("usnl_slow_impulse_pctl"))),
         ]
     )
-    maturity = _liquidity_cycle_maturity_pct(latest_date)
+    cycle_length = np.nan
+    cycle_maturity = np.nan
+    if global_m2_cycle is not None and not global_m2_cycle.empty:
+        if "AverageLiquidityCycleLengthMonths" in global_m2_cycle:
+            values = pd.to_numeric(global_m2_cycle["AverageLiquidityCycleLengthMonths"], errors="coerce").dropna()
+            cycle_length = float(values.iloc[-1]) if not values.empty else np.nan
+        if "CurrentCycleMaturityPct" in global_m2_cycle:
+            values = pd.to_numeric(global_m2_cycle["CurrentCycleMaturityPct"], errors="coerce").dropna()
+            cycle_maturity = float(values.iloc[-1]) if not values.empty else np.nan
     score_rows = [
         (f"ROC {months}m", _liquidity_fmt_roc(_liquidity_ordinary_roc(regime, "global_liquidity_score", weeks)))
         for months, weeks in ((1, 4), (3, 13), (6, 26), (12, 52))
@@ -1997,7 +2010,8 @@ def _render_liquidity_regime_summary(monthly: pd.DataFrame, regime: pd.DataFrame
             ("Status 13W", _liquidity_direction_state(latest.get("direction_13w"))),
             ("Status 26W", _liquidity_direction_state(latest.get("direction_26w"))),
             ("Status 52W", _liquidity_direction_state(latest.get("direction_52w"))),
-            ("65M cycle Maturity", "n/a" if pd.isna(maturity) else f"{maturity:.0f}%"),
+            ("Average Liquidity Cycle Length", "n/a" if pd.isna(cycle_length) else f"{cycle_length:.1f}M"),
+            ("Current Cycle Maturity", "n/a" if pd.isna(cycle_maturity) else f"{cycle_maturity:.0f}%"),
             ("Liquidity Forecast Signal", _liquidity_display_state(forecast_signal)),
             ("Near-Term Treasury Refinancing", "n/a" if pd.isna(refinancing) else f"{refinancing:.1f}"),
             ("Data Status", _liquidity_display_state(latest.get("data_status", "n/a"))),
@@ -2076,13 +2090,35 @@ def render_global_liquidity_dashboard_tab() -> None:
     )
     chart_frame = _liquidity_filter_range(regime, range_choice)
 
+    global_m2_cycle = build_global_m2_cycle_history(monthly)
+    spy_primary_cycle = pd.DataFrame()
+    try:
+        market_cycle_snapshot = load_market_cycle_snapshot_cached(
+            int(st.session_state.get("market_cycle_refresh_nonce", 0))
+        )
+        spy_primary_cycle = market_cycle_snapshot.history[["Date", "PrimaryMarketCycle"]].copy()
+    except Exception as exc:
+        st.caption(f"SPY Primary Market Cycle is temporarily unavailable: {exc}")
+
     st.markdown("### Regime Summary")
-    _render_liquidity_regime_summary(monthly, regime, latest)
+    _render_liquidity_regime_summary(monthly, regime, latest, global_m2_cycle)
 
     st.markdown("### Global M2")
-    _render_global_m2_level_growth(chart_frame, regime)
-    with st.expander("Global M2 Momentum vs 65M Liquidity Cycle", expanded=True):
-        _render_long_cycle_chart(chart_frame, regime)
+    _render_global_m2_level_growth(chart_frame, regime, global_m2_cycle)
+    if global_m2_cycle.empty:
+        st.info("No monthly Global M2 history is available for the cycle layer.")
+    else:
+        cycle_start = pd.to_datetime(chart_frame["date"], errors="coerce").min() if not chart_frame.empty else None
+        cycle_end = pd.to_datetime(chart_frame["date"], errors="coerce").max() if not chart_frame.empty else None
+        st.plotly_chart(
+            build_global_m2_cycle_fig(global_m2_cycle, cycle_start, cycle_end, spy_primary_cycle),
+            use_container_width=True,
+            config=LIQUIDITY_PLOTLY_CONFIG,
+        )
+        st.caption(
+            "Monthly Global M2 cycle: SMA50M structural extension; primary cycle is a standardized "
+            "12M ROC + RSI(14M) composite filtered through a 30-54M band-pass."
+        )
     _render_liquidity_impulse_percentile_chart(chart_frame, "Global M2", "m2")
     _render_liquidity_impulse_percentile_chart(chart_frame, "Global CB Assets", "cb")
     _render_liquidity_impulse_percentile_chart(chart_frame, "US Net Liquidity", "usnl")
@@ -2350,10 +2386,6 @@ def _liquidity_cycle_months_since_anchor(value: pd.Timestamp) -> float:
     return (date.year - anchor.year) * 12 + (date.month - anchor.month) + (date.day - 1) / 30.4375
 
 
-def _liquidity_cycle_peak_date(cycle_number: int) -> pd.Timestamp:
-    return pd.Timestamp("2022-10-01") + pd.DateOffset(months=32 + (65 * cycle_number), days=15)
-
-
 def _liquidity_cycle_confirmation(frame: pd.DataFrame) -> pd.Series:
     roc = pd.to_numeric(frame.get("m2_52w", np.nan), errors="coerce")
     roc_direction = roc.diff(13)
@@ -2456,7 +2488,11 @@ def _style_liquidity_plotly(fig: go.Figure, height: int, title: str) -> go.Figur
     return fig
 
 
-def _render_global_m2_level_growth(frame: pd.DataFrame, full_frame: pd.DataFrame) -> None:
+def _render_global_m2_level_growth(
+    frame: pd.DataFrame,
+    full_frame: pd.DataFrame,
+    global_m2_cycle: pd.DataFrame | None = None,
+) -> None:
     growth_choice = st.selectbox("Global M2 Growth", ["13W ROC", "26W ROC", "52W / YoY"], index=2, key="global_m2_growth_selector")
     growth_col = {"13W ROC": "m2_13w", "26W ROC": "m2_26w", "52W / YoY": "m2_52w"}[growth_choice]
     if frame.empty:
@@ -2469,19 +2505,18 @@ def _render_global_m2_level_growth(frame: pd.DataFrame, full_frame: pd.DataFrame
     if chart_df.empty:
         st.info("No data for Global M2 - Level and Growth.")
         return
-    bands = _liquidity_phase_bands(full_frame, frame)
+    if global_m2_cycle is not None and not global_m2_cycle.empty:
+        visible_start = pd.to_datetime(chart_df["date"], errors="coerce").min()
+        visible_end = pd.to_datetime(chart_df["date"], errors="coerce").max()
+        bands = global_m2_cycle_phase_bands(global_m2_cycle, visible_start, visible_end)
+    else:
+        bands = _liquidity_phase_bands(full_frame, frame)
     fig = go.Figure()
-    phase_colors = {
-        "RECOVERY_REACCELERATION": "#22c55e",
-        "ACCELERATING_EXPANSION": "#84cc16",
-        "DECELERATING_EXPANSION": "#facc15",
-        "CONTRACTION": "#ef4444",
-    }
     for _, band in bands.iterrows():
         fig.add_vrect(
             x0=band["start"],
             x1=band["end"],
-            fillcolor=phase_colors.get(str(band["Phase"]), "#64748b"),
+            fillcolor=band.get("Color", "#64748b"),
             opacity=0.16,
             line_width=0,
         )
@@ -2767,82 +2802,6 @@ def _render_us_net_liquidity_chart(frame: pd.DataFrame) -> None:
     st.plotly_chart(_style_liquidity_plotly(fig, 320, "US Net Liquidity - Funding Impulse"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
 
 
-def _render_long_cycle_chart(frame: pd.DataFrame, full_frame: pd.DataFrame) -> None:
-    if frame.empty:
-        st.info("No data for Global M2 Momentum vs 65M Liquidity Cycle.")
-        return
-    m2_roc = pd.to_numeric(full_frame.get("m2_52w", np.nan), errors="coerce")
-    normalized = (_liquidity_rolling_zscore(m2_roc, 156, 104).clip(-2, 2) * 50.0).reindex(frame.index)
-    dates = pd.to_datetime(frame["date"], errors="coerce")
-    min_date = dates.min()
-    max_date = dates.max()
-    current_peak = _liquidity_cycle_peak_date(0)
-    next_peak = _liquidity_cycle_peak_date(1)
-    cycle_end = max(max_date, next_peak) if pd.notna(max_date) else next_peak
-    cycle_dates = pd.date_range(min_date, cycle_end, freq="W-FRI") if pd.notna(min_date) else pd.DatetimeIndex([])
-    cycle = pd.Series([_liquidity_long_cycle_value(date) for date in cycle_dates], index=cycle_dates)
-    rows = []
-    for date, value in zip(frame["date"], normalized):
-        if pd.notna(date) and np.isfinite(value):
-            rows.append({"Date": date, "Series": "Normalized Global M2 ROC", "Value": float(value)})
-    for date, value in cycle.items():
-        if pd.notna(date) and np.isfinite(value):
-            rows.append({"Date": date, "Series": "65M Reference Cycle", "Value": float(value)})
-    chart_df = pd.DataFrame(rows)
-    if chart_df.empty:
-        st.info("No data for Global M2 Momentum vs 65M Liquidity Cycle.")
-        return
-    latest = _liquidity_latest_row(frame)
-    st.caption(f"Informational status: {latest.get('cycle_confirmation', 'n/a')}")
-    fig = go.Figure()
-    colors = {"Normalized Global M2 ROC": "#38bdf8", "65M Reference Cycle": "#facc15"}
-    for series in chart_df["Series"].drop_duplicates():
-        d = chart_df[chart_df["Series"].eq(series)]
-        fig.add_trace(
-            go.Scatter(
-                x=d["Date"],
-                y=d["Value"],
-                mode="lines",
-                name=series,
-                line={"color": colors.get(series, "#cbd5e1"), "width": 1.8},
-                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{series}: %{{y:.1f}}<extra></extra>",
-            )
-        )
-    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
-    trough = pd.Timestamp("2022-10-01")
-    for marker_date, label, color in [
-        (trough, "Cycle trough Oct 2022", "#ef4444"),
-        (current_peak, "Current cycle peak", "#22c55e"),
-        (next_peak, "Next cycle peak", "#22c55e"),
-    ]:
-        if pd.notna(min_date) and marker_date >= min_date and marker_date <= cycle_end:
-            marker_x = marker_date.strftime("%Y-%m-%d")
-            fig.add_shape(
-                type="line",
-                xref="x",
-                yref="paper",
-                x0=marker_x,
-                x1=marker_x,
-                y0=0,
-                y1=1,
-                line={"color": color, "dash": "dot", "width": 1},
-            )
-            fig.add_annotation(
-                x=marker_x,
-                y=1.03,
-                xref="x",
-                yref="paper",
-                text=label,
-                showarrow=False,
-                font={"color": color, "size": 10},
-                xanchor="left",
-            )
-    fig.update_layout(yaxis={"title": "-100 to +100", "range": [-100, 100]})
-    if pd.notna(min_date) and pd.notna(max_date):
-        fig.update_xaxes(range=[min_date.strftime("%Y-%m-%d"), max_date.strftime("%Y-%m-%d")])
-    st.plotly_chart(_style_liquidity_plotly(fig, 300, "Global M2 Momentum vs 65M Liquidity Cycle"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
-
-
 def _render_liquidity_impulse_percentile_chart(frame: pd.DataFrame, asset_label: str, prefix: str) -> None:
     title = f"{asset_label} Growth and Impulse Percentiles"
     if frame.empty:
@@ -2884,13 +2843,6 @@ def _render_liquidity_impulse_percentile_chart(frame: pd.DataFrame, asset_label:
         hovermode="x unified",
     )
     st.plotly_chart(_style_liquidity_plotly(fig, 320, title), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
-
-
-def _liquidity_rolling_zscore(series: pd.Series, window: int, min_periods: int) -> pd.Series:
-    values = pd.to_numeric(series, errors="coerce")
-    mean = values.rolling(window, min_periods=min_periods).mean()
-    std = values.rolling(window, min_periods=min_periods).std(ddof=0)
-    return (values - mean) / std.replace(0.0, np.nan)
 
 
 def _build_liquidity_asset_impact_table(latest: dict[str, Any]) -> pd.DataFrame:

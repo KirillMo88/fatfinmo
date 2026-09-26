@@ -27,7 +27,7 @@ from funding_conditions import EXPORT_FIELDS as FUNDING_EXPORT_FIELDS, MODEL_VER
 from positioning import CFTC_DASHBOARD_ASSETS, load_positioning_data, read_processed
 
 
-DEFAULT_START_DATE = "2010-01-01"
+DEFAULT_START_DATE = "1999-01-01"
 MODEL_VERSION_RECOMPUTED = "Recomputed_Current_Model"
 MARKET_REGIME_VERSION = "MR_Recomputed_Current_Model"
 GOLD_REGIME_VERSION = "GOLD_Recomputed_Current_Model"
@@ -163,7 +163,7 @@ def build_weekly_macro_research_workbook(
     data_quality = build_data_quality(dataset, metadata)
     validate_weekly_dataset(dataset)
     calculation_date = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d")
-    filename = f"global_macro_research_weekly_2010_{calculation_date}{export_filename_suffix(layers, model_usages, categories)}.xlsx"
+    filename = f"global_macro_research_weekly_1999_{calculation_date}{export_filename_suffix(layers, model_usages, categories)}.xlsx"
     return write_macro_research_workbook(dataset, metadata, data_quality, positioning_metadata, model_metadata), filename
 
 

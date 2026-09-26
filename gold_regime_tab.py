@@ -8,14 +8,21 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
-from gold_regime.macro2_view import render_gold_structural_macro2
+from gold_regime.macro2_view import render_gold_structural_macro2, render_structural_macro2_history
 from global_liquidity import read_global_liquidity
+from market_cycle_tab import (
+    add_combined_cycle_risk_background,
+    add_combined_cycle_risk_regime,
+    add_cycle_risk_regime_legend_traces,
+)
 
 
 GOLD_X_AXIS_DATE_FORMAT = "%b'%y"
 GOLD_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
+GOLD_ANALYTICS_START = pd.Timestamp("2016-01-01")
 
 
 @st.cache_data(show_spinner=True, ttl=21600)
@@ -98,15 +105,15 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
         horizontal=True,
         key="gold_charts_range",
     )
-    render_gold_history_chart(snapshot, selected_range)
-    render_gold_structural_macro2(snapshot.structural_macro2)
+    render_gold_history_chart(snapshot, selected_range, snapshot.structural_macro2)
+    render_gold_structural_macro2(snapshot.structural_macro2, include_history_chart=False, selected_range=selected_range)
     render_signal_explanation(current)
     render_macro_detail(current)
     render_global_monetary_liquidity_context(current)
     render_flow_detail(current, snapshot)
     render_structural_demand(current, snapshot)
     render_freshness(snapshot)
-    render_history_table(snapshot.history)
+    render_history_table(filter_gold_analytics_history(snapshot.history))
 
 
 def extract_gold_alpha(table_df: pd.DataFrame) -> float | None:
@@ -154,8 +161,9 @@ def render_metric(label: str, value: str, detail: str) -> None:
     )
 
 
-def render_gold_history_chart(snapshot: Any, selected_range: str) -> None:
+def render_gold_history_chart(snapshot: Any, selected_range: str, structural_macro2: Any = None) -> None:
     history = snapshot.history
+    analytics_history = filter_gold_analytics_history(history)
     st.markdown("### Gold Price + Gold Regime")
     if history.empty or "gold_price" not in history.columns:
         st.info("Gold price history is unavailable.")
@@ -169,6 +177,7 @@ def render_gold_history_chart(snapshot: Any, selected_range: str) -> None:
     if price_data.empty:
         st.info("Gold price history is unavailable.")
         return
+    analytics_data = filter_gold_history_range(analytics_history, selected_range)
     price_data["next_date"] = price_data["date"].shift(-1)
     price_data.loc[price_data["next_date"].isna(), "next_date"] = price_data.loc[price_data["next_date"].isna(), "date"] + pd.Timedelta(days=7)
     ymin = float(price_data["gold_price"].min())
@@ -177,10 +186,12 @@ def render_gold_history_chart(snapshot: Any, selected_range: str) -> None:
     price_data["y_min"] = ymin - pad
     price_data["y_max"] = ymax + pad
 
-    st.plotly_chart(build_gold_price_plotly(price_data, ymin - pad, ymax + pad), use_container_width=True, config=GOLD_PLOTLY_CONFIG)
+    gold_cycle_history = getattr(snapshot, "gold_cycle_history", pd.DataFrame())
+    if isinstance(gold_cycle_history, pd.DataFrame) and not gold_cycle_history.empty:
+        render_gold_cycle_chart(gold_cycle_history, selected_range)
     st.plotly_chart(
         build_gold_score_components_plotly(
-            d,
+            analytics_data,
             "structural_macro_score",
             [("dxy_score", "DXYBull", "#38bdf8"), ("real_yield_score", "RealYieldBull", "#facc15"), ("us2y_bull_score", "US2YBull", "#a78bfa")],
             "Gold Structural Macro",
@@ -190,9 +201,11 @@ def render_gold_history_chart(snapshot: Any, selected_range: str) -> None:
         use_container_width=True,
         config=GOLD_PLOTLY_CONFIG,
     )
+    if structural_macro2 is not None and not structural_macro2.history.empty:
+        render_structural_macro2_history(structural_macro2.history, selected_range)
     st.plotly_chart(
         build_gold_score_components_plotly(
-            d,
+            analytics_data,
             "forward_macro_risk",
             [("us2y_risk_score", "US2YRisk", "#facc15"), ("wti_risk_score", "WTIRisk", "#fb923c")],
             "Gold Forward Macro Risk",
@@ -203,7 +216,7 @@ def render_gold_history_chart(snapshot: Any, selected_range: str) -> None:
     )
     st.plotly_chart(
         build_gold_score_components_plotly(
-            d,
+            analytics_data,
             "tactical_flow_score",
             [("etf_flow_score", "ETFFlowScore", "#22d3ee"), ("cot_momentum_score", "COTMomentumScore", "#facc15")],
             "Gold Tactical Flow",
@@ -213,10 +226,10 @@ def render_gold_history_chart(snapshot: Any, selected_range: str) -> None:
         use_container_width=True,
         config=GOLD_PLOTLY_CONFIG,
     )
-    etf_fig = build_gold_etf_flows_plotly(d, positioning_chart_subtitle(snapshot, "ETF flows"))
+    etf_fig = build_gold_etf_flows_plotly(analytics_data, positioning_chart_subtitle(snapshot, "ETF flows"))
     if etf_fig is not None:
         st.plotly_chart(etf_fig, use_container_width=True, config=GOLD_PLOTLY_CONFIG)
-    cot_fig = build_gold_cot_plotly(d, positioning_chart_subtitle(snapshot, "COT"))
+    cot_fig = build_gold_cot_plotly(analytics_data, positioning_chart_subtitle(snapshot, "COT"))
     if cot_fig is not None:
         st.plotly_chart(cot_fig, use_container_width=True, config=GOLD_PLOTLY_CONFIG)
 
@@ -299,8 +312,11 @@ def build_gold_price_plotly(price_data: pd.DataFrame, ymin: float, ymax: float) 
         "DATA_INCOMPLETE": "#64748b",
     }
     fig = go.Figure()
-    for _, row in price_data.iterrows():
+    regime_data = price_data.loc[pd.to_datetime(price_data["date"], errors="coerce").ge(GOLD_ANALYTICS_START)]
+    for _, row in regime_data.iterrows():
         regime = str(row.get("gold_regime") or "DATA_INCOMPLETE")
+        if regime == "DATA_INCOMPLETE":
+            continue
         fig.add_vrect(
             x0=row["date"],
             x1=row["next_date"],
@@ -322,6 +338,129 @@ def build_gold_price_plotly(price_data: pd.DataFrame, ymin: float, ymax: float) 
     )
     fig.update_yaxes(title="GLD", range=[ymin, ymax])
     return style_gold_plotly(fig, 390, "GLD Weekly Price with Gold Regime Zones")
+
+
+def render_gold_cycle_chart(history: pd.DataFrame, selected_range: str) -> None:
+    st.plotly_chart(
+        build_gold_multi_layer_cycle_fig(history, selected_range),
+        use_container_width=True,
+        config=GOLD_PLOTLY_CONFIG,
+    )
+
+
+def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str) -> go.Figure:
+    frame = history.copy()
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+    frame = frame.dropna(subset=["Date", "GOLD_Close"]).sort_values("Date")
+    if frame.empty:
+        return style_gold_plotly(go.Figure(), 620, "Gold Multi-Layer Cycles")
+
+    risk_frame = frame.assign(
+        PrimaryMarketCycle=pd.to_numeric(frame["GoldShortCycle"], errors="coerce"),
+        LongMarketExtensionCycle=pd.to_numeric(frame["GoldLongCycle"], errors="coerce"),
+    )
+    risk_frame = add_combined_cycle_risk_regime(risk_frame)
+
+    end_date = frame["Date"].max()
+    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    start_date = end_date - pd.DateOffset(years=years) if years else frame["Date"].min()
+    visible = frame.loc[frame["Date"].between(start_date, end_date)].copy()
+    if visible.empty:
+        visible = frame.tail(1).copy()
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.45, 0.275, 0.275],
+        vertical_spacing=0.045,
+        subplot_titles=("GOLD Log", "Short Gold Cycle (60-80M)", "Long Gold Cycle (195-245M)"),
+    )
+    add_combined_cycle_risk_background(fig, risk_frame)
+    fig.add_trace(
+        go.Scatter(
+            x=visible["Date"],
+            y=pd.to_numeric(visible["GOLD_Close"], errors="coerce"),
+            mode="lines",
+            name="GOLD Log",
+            line={"color": "#f8fafc", "width": 1.9},
+            showlegend=False,
+            customdata=risk_frame.loc[visible.index, ["CombinedCycleRiskRegime", "PrimaryCycleState", "LongCycleState"]].astype(str),
+            hovertemplate=(
+                "Date: %{x|%Y-%m-%d}<br>GOLD: %{y:.2f}<br>"
+                "Cycle Risk Regime: %{customdata[0]}<br>"
+                "Short Cycle State: %{customdata[1]}<br>"
+                "Long Cycle State: %{customdata[2]}<extra></extra>"
+            ),
+        ),
+        row=1,
+        col=1,
+    )
+    _add_gold_cycle_trace(fig, visible, "GoldShortCycle", "Short Gold Cycle", "#38bdf8", 2, "GoldShort")
+    _add_gold_cycle_trace(fig, visible, "GoldLongCycle", "Long Gold Cycle", "#facc15", 3, "GoldLong")
+    for row in [2, 3]:
+        fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1}, row=row, col=1)
+    add_cycle_risk_regime_legend_traces(fig)
+    fig.update_yaxes(type="log", title_text="GOLD log", row=1, col=1)
+    fig.update_yaxes(title_text="Normalized", row=2, col=1)
+    fig.update_yaxes(title_text="Normalized", row=3, col=1)
+    fig.update_xaxes(
+        range=[start_date, end_date],
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikecolor="#94a3b8",
+        spikethickness=1,
+    )
+    return style_gold_plotly(
+        fig,
+        620,
+        "Gold Multi-Layer Cycles",
+        "GOLD | 60-80M Short Cycle | 195-245M Long Cycle | cycle input from 1960",
+    )
+
+
+def _add_gold_cycle_trace(
+    fig: go.Figure,
+    visible: pd.DataFrame,
+    cycle_col: str,
+    name: str,
+    color: str,
+    row: int,
+    prefix: str,
+) -> None:
+    fig.add_trace(
+        go.Scatter(
+            x=visible["Date"],
+            y=pd.to_numeric(visible[cycle_col], errors="coerce"),
+            mode="lines",
+            name=name,
+            line={"color": color, "width": 1.8},
+            showlegend=False,
+            hovertemplate="Date: %{x|%Y-%m-%d}<br>Normalized cycle: %{y:.2f}<extra></extra>",
+        ),
+        row=row,
+        col=1,
+    )
+    trough_col = f"{prefix}Trough"
+    if trough_col not in visible.columns:
+        return
+    markers = visible.loc[visible[trough_col].fillna(False).astype(bool)].copy()
+    if markers.empty:
+        return
+    fig.add_trace(
+        go.Scatter(
+            x=markers["Date"],
+            y=pd.to_numeric(markers[cycle_col], errors="coerce"),
+            mode="markers",
+            name=f"{name} trough",
+            marker={"color": color, "size": 7, "line": {"color": "#0f131a", "width": 1}},
+            hovertemplate="Trough: %{x|%Y-%m-%d}<br>Cycle: %{y:.2f}<extra></extra>",
+            showlegend=False,
+        ),
+        row=row,
+        col=1,
+    )
 
 
 def build_gold_score_plotly(data: pd.DataFrame, metric: str, title: str, color: str, higher_is_better: bool = False) -> go.Figure:
@@ -648,6 +787,14 @@ def filter_gold_history_range(history: pd.DataFrame, selected_range: str) -> pd.
     end_date = d["date"].max()
     start_date = end_date - pd.DateOffset(years=years)
     return d.loc[d["date"] >= start_date].copy()
+
+
+def filter_gold_analytics_history(history: pd.DataFrame) -> pd.DataFrame:
+    d = history.copy()
+    if d.empty or "date" not in d.columns:
+        return d
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    return d.loc[d["date"].ge(GOLD_ANALYTICS_START)].sort_values("date").reset_index(drop=True)
 
 
 def positioning_chart_subtitle(snapshot: Any, freshness_key: str) -> str:

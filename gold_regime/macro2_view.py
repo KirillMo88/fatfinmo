@@ -22,7 +22,11 @@ SCORE_COLORS = {
 }
 
 
-def render_gold_structural_macro2(snapshot: GoldStructuralMacro2Snapshot | None) -> None:
+def render_gold_structural_macro2(
+    snapshot: GoldStructuralMacro2Snapshot | None,
+    include_history_chart: bool = True,
+    selected_range: str = "MAX",
+) -> None:
     st.markdown("### Gold Structural Macro 2")
     st.caption("Macro conditions for future Gold returns across 3–12 month horizons")
     if snapshot is None or snapshot.history.empty:
@@ -36,8 +40,9 @@ def render_gold_structural_macro2(snapshot: GoldStructuralMacro2Snapshot | None)
     render_current_term_structure(current)
     render_macro2_diagnostics(current)
     render_macro2_narrative(current)
-    render_structural_macro2_history(history)
-    render_gold_macro2_price_chart(history)
+    if include_history_chart:
+        render_structural_macro2_history(history, selected_range)
+    render_gold_macro2_price_chart(history, selected_range)
     render_macro2_model_details(current)
 
 
@@ -205,15 +210,9 @@ def render_macro2_narrative(current: dict[str, Any]) -> None:
     st.markdown(f"<div style='color:#cbd5e1; line-height:1.45;'>{html.escape(text)}</div>", unsafe_allow_html=True)
 
 
-def render_structural_macro2_history(history: pd.DataFrame) -> None:
+def render_structural_macro2_history(history: pd.DataFrame, selected_range: str = "MAX") -> None:
     st.markdown("#### Gold Structural Macro 2 — Structural Components")
-    data = history.dropna(subset=["date"]).copy()
-    range_label = st.radio("Structural history", ["5Y", "10Y", "2018-Latest", "Full"], index=2, horizontal=True, key="gold_macro2_structural_range")
-    latest = pd.to_datetime(data["date"], errors="coerce").max()
-    if pd.notna(latest):
-        if range_label != "Full":
-            cutoff = {"5Y": latest - pd.DateOffset(years=5), "10Y": latest - pd.DateOffset(years=10), "2018-Latest": pd.Timestamp("2018-01-01")}[range_label]
-            data = data.loc[pd.to_datetime(data["date"], errors="coerce") >= cutoff]
+    data = filter_macro2_history_range(history, selected_range)
     fig = go.Figure()
     for column, name, color, width, dash in [
         ("StructuralMacro", "Gold Structural Macro 2", "#00ff66", 2.6, "solid"),
@@ -226,15 +225,29 @@ def render_structural_macro2_history(history: pd.DataFrame) -> None:
     for level, color in [(20, "#ef4444"), (40, "#f97316"), (60, "#facc15"), (80, "#22c55e")]:
         fig.add_hline(y=level, line={"color": color, "dash": "dash", "width": 1})
     fig.update_yaxes(range=[0, 100], title="Score")
-    fig.update_layout(height=300, margin={"l": 45, "r": 20, "t": 15, "b": 35}, template="plotly_dark", paper_bgcolor="#0b0e14", plot_bgcolor="#11161f")
+    fig.update_layout(height=300, margin={"l": 45, "r": 20, "t": 15, "b": 35}, template="plotly_dark", paper_bgcolor="#0b0e14", plot_bgcolor="#11161f", showlegend=False)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
 
 
-def render_gold_macro2_price_chart(history: pd.DataFrame) -> None:
+def filter_macro2_history_range(history: pd.DataFrame, selected_range: str) -> pd.DataFrame:
+    data = history.dropna(subset=["date"]).copy()
+    dates = pd.to_datetime(data["date"], errors="coerce")
+    data = data.loc[dates.notna()].copy()
+    dates = pd.to_datetime(data["date"], errors="coerce")
+    if data.empty:
+        return data
+    latest = dates.max()
+    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    range_start = latest - pd.DateOffset(years=years) if years else pd.Timestamp("2016-01-01")
+    cutoff = max(pd.Timestamp("2016-01-01"), pd.Timestamp(range_start))
+    return data.loc[dates >= cutoff].copy()
+
+
+def render_gold_macro2_price_chart(history: pd.DataFrame, selected_range: str = "MAX") -> None:
     st.markdown("#### Gold — Log Scale and Final Gold Macro Score")
     horizon = st.radio("Macro horizon", list(HORIZONS), horizontal=True, index=0, key="gold_macro2_horizon")
     score_column = f"GLD_MACRO_{horizon}"
-    data = history.dropna(subset=["date"]).copy()
+    data = filter_macro2_history_range(history, selected_range)
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.58, 0.42], subplot_titles=("Gold — Log Scale", f"Final Gold Macro Score — {horizon}"))
     if "gold_price" in data.columns:
         fig.add_trace(go.Scatter(x=data["date"], y=data["gold_price"], name="GLD", line={"color": "#f8fafc", "width": 1.8}, hovertemplate="%{x|%Y-%m-%d}<br>GLD: %{y:.2f}<extra></extra>"), row=1, col=1)

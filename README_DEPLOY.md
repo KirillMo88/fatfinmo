@@ -1,4 +1,41 @@
-# Deploy to Streamlit Community Cloud
+# Production deployment
+
+GitHub `main` is the canonical production source. Never copy edited files directly
+to the VPS. Every production update follows this order:
+
+1. Create a branch from the latest `origin/main`.
+2. Make the change and run the relevant tests.
+3. Commit and push the branch to GitHub.
+4. Merge the reviewed branch into GitHub `main`.
+5. Update the local `main` and deploy that exact commit with:
+
+```powershell
+git switch main
+git pull --ff-only origin main
+.\deploy\deploy-vps.ps1 -SshKey "C:\path\to\fatfinmo_vps_ed25519"
+```
+
+The deploy script stops before touching the VPS when:
+
+- the working tree has uncommitted changes;
+- local `HEAD` is not the exact commit published as `origin/main`;
+- the VPS configuration, persistent directory, or Compose configuration is missing.
+
+Each deployment is extracted into `/opt/fatfinmo/releases/github-main-<UTC>-<SHA>`.
+The release reuses `/opt/fatfinmo/.env` and `/opt/fatfinmo/persistent`, rebuilds only
+`screener` and `screener-jobs`, checks the public health endpoint, and records the
+successful release in `/opt/fatfinmo/current`.
+
+To roll back, run the previous release's Compose file against the same project:
+
+```bash
+docker compose -p fatfinmo \
+  -f /opt/fatfinmo/releases/<previous-release>/docker-compose.yml \
+  --env-file /opt/fatfinmo/.env \
+  up -d --no-deps --build screener screener-jobs
+```
+
+# Streamlit Community Cloud
 
 ## 1) Push this folder to GitHub repo `KirillMo88/fatfinmo`
 

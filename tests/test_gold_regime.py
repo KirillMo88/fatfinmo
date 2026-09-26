@@ -10,12 +10,32 @@ from gold_regime.etf_flows import aggregate_gold_etf_flows, load_gold_etf_flows
 from gold_regime.macro import calculate_gold_macro_history
 from gold_regime.macro2 import calculate_gold_structural_macro2_history, inclusive_trailing_percentile
 from gold_regime.regime import calculate_gold_tactical_flow, determine_flow_flags, determine_gold_regime
-from gold_regime.service import calculate_freshness, carry_forward_cot_history
+from gold_regime.service import calculate_freshness, carry_forward_cot_history, load_gold_mcp_weekly
 from gold_regime.utils import rolling_percentile_rank
 
 
 def weekly(values):
     return pd.Series(values, index=pd.date_range("2020-01-03", periods=len(values), freq="W-FRI"))
+
+
+def test_gold_mcp_history_starts_in_1960(monkeypatch):
+    import gold_regime.service as service
+
+    monkeypatch.setattr(
+        service,
+        "get_ohlcv_data",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            {
+                "date": ["1959-12-27", "1960-01-04", "2026-09-20"],
+                "close": [40.0, 42.0, 4284.13],
+            }
+        ),
+    )
+
+    history = load_gold_mcp_weekly()
+
+    assert history.index.min() == pd.Timestamp("1960-01-04")
+    assert history.iloc[-1] == 4284.13
 
 
 def test_macro2_percentile_is_point_in_time_and_inclusive():
