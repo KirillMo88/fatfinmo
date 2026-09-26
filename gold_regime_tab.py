@@ -188,7 +188,8 @@ def render_gold_history_chart(snapshot: Any, selected_range: str, structural_mac
 
     gold_cycle_history = getattr(snapshot, "gold_cycle_history", pd.DataFrame())
     if isinstance(gold_cycle_history, pd.DataFrame) and not gold_cycle_history.empty:
-        render_gold_cycle_chart(gold_cycle_history, selected_range)
+        # Keep the cycle chart aligned with the full GOLD history used for its calculation.
+        render_gold_cycle_chart(gold_cycle_history, "MAX")
     st.plotly_chart(
         build_gold_score_components_plotly(
             analytics_data,
