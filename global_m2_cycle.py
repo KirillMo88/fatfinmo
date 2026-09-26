@@ -28,6 +28,7 @@ GLOBAL_M2_CYCLE_COLUMNS = [
     "M2RSI14M",
     "PrimaryCycleComposite",
     "PrimaryMarketCycle",
+    "PrimaryCycleTrough",
     "PrimaryCycleDirection",
     "PrimaryCycleState",
     "PrimaryCyclePeak",
