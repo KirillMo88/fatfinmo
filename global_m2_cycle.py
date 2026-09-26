@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from ta.momentum import RSIIndicator
 
-from market_cycle import cycle_direction, fft_bandpass_cycle, standard_zscore
+from market_cycle import add_cycle_trough_metadata, cycle_direction, fft_bandpass_cycle, standard_zscore
 
 
 GLOBAL_M2_CYCLE_COLUMNS = [
@@ -24,7 +24,17 @@ GLOBAL_M2_CYCLE_COLUMNS = [
     "PrimaryMarketCycle",
     "PrimaryCycleDirection",
     "PrimaryCycleState",
+    "AverageLiquidityCycleLengthMonths",
+    "CurrentCycleMaturityPct",
 ]
+
+
+GLOBAL_M2_PRIMARY_STATE_COLORS = {
+    "ACCELERATING EXPANSION": "#22c55e",
+    "DECELERATING EXPANSION": "#facc15",
+    "ACCELERATING CONTRACTION": "#ef4444",
+    "RECOVERY / REACCELERATION": "#38bdf8",
+}
 
 
 def _empty_history() -> pd.DataFrame:
@@ -105,13 +115,90 @@ def build_global_m2_cycle_history(monthly: pd.DataFrame) -> pd.DataFrame:
             frame["PrimaryMarketCycle"], frame["PrimaryCycleDirection"], strict=False
         )
     ]
+    add_cycle_trough_metadata(
+        frame,
+        cycle_col="PrimaryMarketCycle",
+        prefix="PrimaryCycle",
+        min_spacing_months=24.0,
+        window_months=4,
+        full_cycle_months=1.0,
+    )
+    cycle_lengths = pd.to_numeric(
+        frame.loc[frame["PrimaryCycleTrough"].astype(bool), "PrimaryCycleTroughToTroughMonths"],
+        errors="coerce",
+    ).dropna()
+    average_cycle_length = float(cycle_lengths.mean()) if not cycle_lengths.empty else np.nan
+    frame["AverageLiquidityCycleLengthMonths"] = average_cycle_length
+    months_since_trough = pd.to_numeric(frame["PrimaryCycleMonthsSinceTrough"], errors="coerce")
+    frame["CurrentCycleMaturityPct"] = months_since_trough / average_cycle_length * 100.0
     return frame[GLOBAL_M2_CYCLE_COLUMNS]
+
+
+def global_m2_cycle_phase_bands(
+    full_history: pd.DataFrame,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Return contiguous primary-cycle state bands for reuse by other charts."""
+    columns = ["start", "end", "State", "Color"]
+    if full_history is None or full_history.empty:
+        return pd.DataFrame(columns=columns)
+    full = full_history.copy()
+    full["Date"] = pd.to_datetime(full["Date"], errors="coerce")
+    full = full.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+    if full.empty:
+        return pd.DataFrame(columns=columns)
+    start = pd.Timestamp(start) if start is not None else full["Date"].min()
+    end = pd.Timestamp(end) if end is not None else full["Date"].max()
+    states = full["PrimaryCycleState"].astype(str)
+    rows = []
+    state_start = 0
+    for idx in range(1, len(full) + 1):
+        if idx == len(full) or states.iloc[idx] != states.iloc[state_start]:
+            x0 = max(full.loc[state_start, "Date"], start)
+            x1 = min(
+                full.loc[idx, "Date"] if idx < len(full) else full.loc[idx - 1, "Date"] + pd.offsets.MonthEnd(1),
+                end,
+            )
+            state = states.iloc[state_start]
+            if x1 >= x0 and state in GLOBAL_M2_PRIMARY_STATE_COLORS:
+                rows.append({"start": x0, "end": x1, "State": state, "Color": GLOBAL_M2_PRIMARY_STATE_COLORS[state]})
+            state_start = idx
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _normalize_cycle_for_display(series: pd.Series) -> pd.Series:
+    values = pd.to_numeric(series, errors="coerce")
+    valid = values.dropna()
+    if len(valid) < 12:
+        return pd.Series(np.nan, index=series.index, dtype="float64")
+    scale = valid.std(ddof=1)
+    if not np.isfinite(scale) or scale == 0:
+        return pd.Series(np.nan, index=series.index, dtype="float64")
+    return (values - valid.mean()) / scale
+
+
+def _monthly_primary_cycle_frame(history: pd.DataFrame) -> pd.DataFrame:
+    if history is None or history.empty:
+        return pd.DataFrame(columns=["Date", "PrimaryMarketCycle"])
+    date_source = history["Date"] if "Date" in history.columns else history.get("date")
+    if date_source is None or "PrimaryMarketCycle" not in history.columns:
+        return pd.DataFrame(columns=["Date", "PrimaryMarketCycle"])
+    frame = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(date_source, errors="coerce"),
+            "PrimaryMarketCycle": pd.to_numeric(history["PrimaryMarketCycle"], errors="coerce"),
+        }
+    ).dropna(subset=["Date"])
+    frame["Date"] = frame["Date"].dt.to_period("M").dt.to_timestamp()
+    return frame.sort_values("Date").drop_duplicates("Date", keep="last").reset_index(drop=True)
 
 
 def build_global_m2_cycle_fig(
     full_history: pd.DataFrame,
     start: pd.Timestamp | None = None,
     end: pd.Timestamp | None = None,
+    spy_history: pd.DataFrame | None = None,
 ) -> go.Figure:
     """Render only the primary monthly Global M2 cycle layer."""
     fig = go.Figure()
@@ -129,38 +216,23 @@ def build_global_m2_cycle_fig(
     if visible.empty:
         visible = full.tail(1).copy()
 
-    states = full["PrimaryCycleState"].astype(str)
-    state_colors = {
-        "ACCELERATING EXPANSION": "#22c55e",
-        "DECELERATING EXPANSION": "#facc15",
-        "ACCELERATING CONTRACTION": "#ef4444",
-        "RECOVERY / REACCELERATION": "#38bdf8",
-    }
-    state_start = 0
-    for idx in range(1, len(full) + 1):
-        if idx == len(full) or states.iloc[idx] != states.iloc[state_start]:
-            x0 = max(full.loc[state_start, "Date"], pd.Timestamp(start))
-            x1 = min(
-                full.loc[idx, "Date"] if idx < len(full) else full.loc[idx - 1, "Date"] + pd.offsets.MonthEnd(1),
-                pd.Timestamp(end),
-            )
-            if x1 >= x0 and states.iloc[state_start] in state_colors:
-                fig.add_vrect(
-                    x0=x0,
-                    x1=x1,
-                    fillcolor=state_colors[states.iloc[state_start]],
-                    opacity=0.10,
-                    line_width=0,
-                )
-            state_start = idx
+    for band in global_m2_cycle_phase_bands(full, start, end).to_dict("records"):
+        fig.add_vrect(
+            x0=band["start"],
+            x1=band["end"],
+            fillcolor=band["Color"],
+            opacity=0.10,
+            line_width=0,
+        )
 
     dates = visible["Date"]
+    global_display = _normalize_cycle_for_display(full["PrimaryMarketCycle"]).reindex(visible.index)
     fig.add_trace(
         go.Scatter(
             x=dates,
-            y=pd.to_numeric(visible["PrimaryMarketCycle"], errors="coerce"),
+            y=global_display,
             mode="lines",
-            name="Primary Cycle",
+            name="Global M2 Primary Cycle",
             line={"color": "#38bdf8", "width": 2.0},
             customdata=visible[["PrimaryCycleState"]].to_numpy(),
             hovertemplate=(
@@ -169,6 +241,21 @@ def build_global_m2_cycle_fig(
             ),
         ),
     )
+    spy = _monthly_primary_cycle_frame(spy_history if spy_history is not None else pd.DataFrame())
+    if not spy.empty:
+        spy["DisplayCycle"] = _normalize_cycle_for_display(spy["PrimaryMarketCycle"])
+        spy = spy.loc[spy["Date"].between(pd.Timestamp(start), pd.Timestamp(end))]
+        if not spy.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=spy["Date"],
+                    y=spy["DisplayCycle"],
+                    mode="lines",
+                    name="SPY Primary Market Cycle",
+                    line={"color": "#f97316", "width": 1.7},
+                    hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY Primary Cycle: %{y:.2f}<extra></extra>",
+                )
+            )
     fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1})
     fig.update_yaxes(title_text="Normalized")
     fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikecolor="#94a3b8", spikethickness=1)
