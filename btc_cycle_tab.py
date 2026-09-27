@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from btc_cycle import (
+    BTC_ACTUAL_HALVINGS,
     BTC_CYCLE_HORIZONS,
     BTC_LIQUIDITY_CYCLE_MONTHS,
     BTC_RANGE_OPTIONS,
@@ -457,6 +458,7 @@ def _build_btc_price_halving_figure(
     latest_date = pd.Timestamp(observed["Date"].max())
     fig = go.Figure()
     _add_phase_bands(fig, visible, "Current_Halving_Phase", BTC_CYCLE_COLORS, range_end, opacity=0.12)
+    _add_halving_markers(fig, range_start, range_end)
     fig.add_trace(
         go.Scatter(
             x=observed["Date"],
@@ -561,13 +563,7 @@ def _build_btc_price_halving_figure(
             xanchor="right",
             font={"size": 9, "color": "#cbd5e1"},
         )
-    for event in pd.DatetimeIndex(["2012-11-28", "2016-07-09", "2020-05-11", "2024-04-20"]):
-        if event >= observed["Date"].min():
-            fig.add_vline(x=event, line={"color": "#38bdf8", "width": 1, "dash": "dot"})
-            fig.add_annotation(x=event, y=1, yref="paper", text=f"Halving {event.year}", showarrow=False, yanchor="bottom", font={"size": 9, "color": "#bae6fd"})
     if range_start <= BTC_PROJECTED_HALVING <= range_end:
-        fig.add_vline(x=BTC_PROJECTED_HALVING, line={"color": "#a78bfa", "width": 1.5, "dash": "dash"})
-        fig.add_annotation(x=BTC_PROJECTED_HALVING, y=0.96, yref="paper", text="Projected Halving · Apr 2028", showarrow=False, yanchor="top", font={"size": 10, "color": "#ddd6fe"})
         if show_next_cycle:
             model_dates = pd.to_datetime(next_cycle_forecast["Date"])
             log_price_at_halving = np.interp(
@@ -709,9 +705,14 @@ def _build_btc_gold_ratio_figure(
     ratio_history: pd.DataFrame,
     time_range: str = "MAX",
 ) -> go.Figure:
-    range_start, range_end, _ = btc_cycle_time_range(history, time_range)
+    range_start, range_end, include_forecast = btc_cycle_time_range(history, time_range)
     visible = ratio_history.loc[ratio_history["Date"].between(range_start, range_end)].copy()
     fig = go.Figure()
+    phases = history.loc[history["Date"].between(range_start, range_end)].copy()
+    if not include_forecast:
+        phases = phases.loc[~phases["Projected"].astype(bool)]
+    _add_phase_bands(fig, phases, "Current_Halving_Phase", BTC_CYCLE_COLORS, range_end, opacity=0.12)
+    _add_halving_markers(fig, range_start, range_end)
     if not visible.empty:
         fig.add_trace(
             go.Scatter(
@@ -836,6 +837,32 @@ def _add_phase_bands(
         start = pd.Timestamp(group["Date"].iloc[0])
         end = pd.Timestamp(data.loc[group.index[-1] + 1, "Date"]) if group.index[-1] + 1 < len(data) else end_date
         fig.add_vrect(x0=start, x1=min(end, end_date), fillcolor=color, opacity=opacity, line_width=0, layer="below")
+
+
+def _add_halving_markers(fig: go.Figure, range_start: pd.Timestamp, range_end: pd.Timestamp) -> None:
+    for event in BTC_ACTUAL_HALVINGS:
+        if range_start <= event <= range_end:
+            fig.add_vline(x=event, line={"color": "#38bdf8", "width": 1, "dash": "dot"})
+            fig.add_annotation(
+                x=event,
+                y=1,
+                yref="paper",
+                text=f"Halving {event.year}",
+                showarrow=False,
+                yanchor="bottom",
+                font={"size": 9, "color": "#bae6fd"},
+            )
+    if range_start <= BTC_PROJECTED_HALVING <= range_end:
+        fig.add_vline(x=BTC_PROJECTED_HALVING, line={"color": "#a78bfa", "width": 1.5, "dash": "dash"})
+        fig.add_annotation(
+            x=BTC_PROJECTED_HALVING,
+            y=0.96,
+            yref="paper",
+            text="Projected Halving · Apr 2028",
+            showarrow=False,
+            yanchor="top",
+            font={"size": 10, "color": "#ddd6fe"},
+        )
 
 
 def _add_latest_marker(fig: go.Figure, latest_date: pd.Timestamp) -> None:

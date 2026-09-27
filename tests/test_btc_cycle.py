@@ -147,6 +147,18 @@ def test_btc_gold_ratio_chart_obeys_shared_btc_time_range():
         assert pd.to_datetime(figure.data[0].x).min() >= start
         assert pd.to_datetime(figure.data[0].x).max() <= latest_observation
         assert figure.data[0].name == "BTC / Gold"
+        shapes = list(figure.layout.shapes or [])
+        phase_bands = [shape for shape in shapes if shape.type == "rect"]
+        assert phase_bands
+        assert all(shape.opacity == 0.12 for shape in phase_bands)
+
+    five_year_figure = _build_btc_gold_ratio_figure(history, ratio, "5Y")
+    halving_lines = [shape for shape in five_year_figure.layout.shapes if shape.type == "line"]
+    assert any(pd.Timestamp(shape.x0) == pd.Timestamp("2024-04-20") for shape in halving_lines)
+
+    next_cycle_figure = _build_btc_gold_ratio_figure(history, ratio, "Next Cycle")
+    projected_halving_lines = [shape for shape in next_cycle_figure.layout.shapes if shape.type == "line"]
+    assert any(pd.Timestamp(shape.x0) == BTC_PROJECTED_HALVING for shape in projected_halving_lines)
 
 
 def test_btc_etf_flow_chart_obeys_shared_btc_time_range():
