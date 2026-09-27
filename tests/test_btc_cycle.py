@@ -23,6 +23,7 @@ from btc_cycle import (
     point_in_time_percentile,
 )
 from btc_cycle_tab import (
+    _build_btc_etf_flow_intensity_figure,
     _build_btc_gold_ratio_figure,
     _build_btc_price_halving_figure,
     _build_macro_score_figure,
@@ -110,6 +111,30 @@ def test_btc_gold_ratio_chart_obeys_shared_btc_time_range():
         assert pd.to_datetime(figure.data[0].x).min() >= start
         assert pd.to_datetime(figure.data[0].x).max() <= latest_observation
         assert figure.data[0].name == "BTC / Gold"
+
+
+def test_btc_etf_flow_chart_obeys_shared_btc_time_range():
+    btc, canonical_cycle, macro = _cycle_inputs()
+    history = build_btc_cycle_history(btc, canonical_cycle, macro)
+    flow_history = pd.DataFrame(
+        {
+            "date": btc["date"],
+            "ETF_Flow_Intensity_4W": np.sin(np.arange(len(btc)) / 9.0),
+            "ETF_Flow_3Y_Pctl": np.linspace(0.0, 100.0, len(btc)),
+        }
+    )
+    latest_observation = history.loc[~history["Projected"], "Date"].max()
+
+    for choice in ("1Y", "5Y", "MAX", "Next Cycle"):
+        start, end, _ = btc_cycle_time_range(history, choice)
+        figure = _build_btc_etf_flow_intensity_figure(history, flow_history, choice)
+
+        assert figure.layout.xaxis.range == (start, end)
+        assert [trace.name for trace in figure.data] == ["4W Flow Intensity", "3Y Percentile"]
+        assert figure.data[1].yaxis == "y2"
+        assert figure.layout.yaxis2.range == (0, 100)
+        assert pd.to_datetime(figure.data[0].x).min() >= start
+        assert pd.to_datetime(figure.data[0].x).max() <= latest_observation
 
 
 def test_secondary_percentile_is_trailing_and_point_in_time():
