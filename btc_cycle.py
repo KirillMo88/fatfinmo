@@ -21,6 +21,11 @@ BTC_LIQUIDITY_CYCLE_MONTHS = 52.7
 BTC_SECONDARY_PERCENTILE_WINDOW = 156
 BTC_SECONDARY_PERCENTILE_MINIMUM = 104
 BTC_RANGE_OPTIONS = ("1Y", "3Y", "5Y", "10Y", "MAX", "Next Cycle")
+BTC_MODULAR_CYCLE_START = pd.Timestamp("2026-09-27")
+BTC_MODULAR_HISTORICAL_MODULES = (
+    (pd.Timestamp("2018-11-02"), pd.Timestamp("2022-11-25")),
+    (pd.Timestamp("2022-09-27"), pd.Timestamp("2026-06-26")),
+)
 
 HALVING_PHASES = (
     "EARLY_EXPANSION",
@@ -238,6 +243,152 @@ def _normalize_price_history(btc_weekly: pd.DataFrame) -> pd.DataFrame:
     return frame.dropna().sort_values("Date").drop_duplicates("Date", keep="last").reset_index(drop=True)
 
 
+def build_btc_modular_cycle_forecast(
+    btc_weekly: pd.DataFrame,
+    target_peak: float,
+    scenario: str = "Base",
+    start_date: pd.Timestamp | str = BTC_MODULAR_CYCLE_START,
+    points_per_week: int = 1,
+) -> pd.DataFrame:
+    """Build one canonical, amplitude-scaled BTC modular-cycle price path."""
+    prices = _normalize_price_history(btc_weekly)
+    if prices.empty:
+        raise ValueError("Canonical BTC weekly prices are unavailable")
+    target_peak = float(target_peak)
+    if not np.isfinite(target_peak) or target_peak <= 0:
+        raise ValueError("BTC modular-cycle target peak must be a positive finite price")
+    if not isinstance(points_per_week, int) or points_per_week < 1:
+        raise ValueError("points_per_week must be a positive integer")
+
+    start_date = pd.Timestamp(start_date).tz_localize(None).normalize()
+    start_index = (prices["Date"] - start_date).abs().idxmin()
+    start_price = float(prices.loc[start_index, "BTC_Price"])
+    if target_peak <= start_price:
+        raise ValueError("BTC modular-cycle target peak must be above the cycle start price")
+
+    normalized_progress = np.linspace(0.0, 1.0, 1001)
+    module_shapes = []
+    module_durations = []
+
+    for module_start, module_end in BTC_MODULAR_HISTORICAL_MODULES:
+        start_row = (prices["Date"] - module_start).abs().idxmin()
+        end_row = (prices["Date"] - module_end).abs().idxmin()
+        if abs((pd.Timestamp(prices.loc[start_row, "Date"]) - module_start).days) > 7:
+            raise ValueError(f"BTC price history does not cover modular-cycle start {module_start:%Y-%m-%d}")
+        if abs((pd.Timestamp(prices.loc[end_row, "Date"]) - module_end).days) > 7:
+            raise ValueError(f"BTC price history does not cover modular-cycle end {module_end:%Y-%m-%d}")
+        module_start_price = float(prices.loc[start_row, "BTC_Price"])
+        module_end_price = float(prices.loc[end_row, "BTC_Price"])
+        if module_start_price <= 0 or module_end_price <= 0:
+            raise ValueError("Historical modular-cycle prices must be positive")
+        observed_start = pd.Timestamp(prices.loc[start_row, "Date"])
+        observed_end = pd.Timestamp(prices.loc[end_row, "Date"])
+        module_durations.append((observed_end - observed_start).total_seconds() / (7 * 86400.0))
+
+        within_module = prices.loc[prices["Date"].between(module_start, module_end)].copy()
+        module_dates = pd.DatetimeIndex([module_start, *within_module["Date"].tolist(), module_end])
+        module_prices = np.concatenate(
+            ([module_start_price], within_module["BTC_Price"].to_numpy(dtype="float64"), [module_end_price])
+        )
+        progress = (module_dates - module_start).total_seconds().to_numpy() / (module_end - module_start).total_seconds()
+        order = np.argsort(progress, kind="stable")
+        progress, module_prices = progress[order], module_prices[order]
+        progress, unique_indices = np.unique(progress, return_index=True)
+        module_prices = module_prices[unique_indices]
+        log_shape = np.log(module_prices / module_start_price)
+        module_shapes.append(np.interp(normalized_progress, progress, log_shape))
+
+    duration_weeks = float(np.mean(module_durations))
+    end_date = start_date + pd.to_timedelta(duration_weeks * 7.0, unit="D")
+    raw_log_shape = np.mean(np.vstack(module_shapes), axis=0)
+    shape_peak_index = int(np.argmax(raw_log_shape))
+    max_raw_log_shape = float(raw_log_shape[shape_peak_index])
+    if not np.isfinite(max_raw_log_shape) or max_raw_log_shape <= 0:
+        raise ValueError("Average historical modular-cycle log shape has no positive peak")
+
+    interval_days = (end_date - start_date).total_seconds() / 86400.0
+    step_days = 7.0 / points_per_week
+    elapsed_days = np.arange(0.0, interval_days, step_days, dtype="float64")
+    elapsed_days = np.append(elapsed_days, interval_days)
+    dates = pd.DatetimeIndex(start_date + pd.to_timedelta(elapsed_days, unit="D"))
+    progress_pct = elapsed_days / interval_days * 100.0
+    scaled_shape = np.interp(progress_pct / 100.0, normalized_progress, raw_log_shape)
+    max_sampled_log_shape = float(np.max(scaled_shape))
+    if not np.isfinite(max_sampled_log_shape) or max_sampled_log_shape <= 0:
+        raise ValueError("Weekly average modular-cycle log shape has no positive peak")
+    amplitude_scale = float(np.log(target_peak / start_price) / max_sampled_log_shape)
+    multiples = np.exp(amplitude_scale * scaled_shape)
+    model_prices = start_price * multiples
+    peak_index = int(np.argmax(model_prices))
+    peak_date = pd.Timestamp(dates[peak_index])
+    peak_price = float(model_prices[peak_index])
+    if not np.isclose(peak_price, target_peak, rtol=0, atol=max(1e-7, target_peak * 1e-10)):
+        raise ArithmeticError("BTC modular-cycle peak does not match the selected target")
+
+    halving_positions = [halving_cycle_position(date) for date in dates]
+    distance_to_halving = [(BTC_PROJECTED_HALVING - date).total_seconds() / 86400.0 for date in dates]
+    distance_to_peak = [(peak_date - date).total_seconds() / 86400.0 for date in dates]
+    progress_since_halving = [
+        item["progress"] if date >= BTC_PROJECTED_HALVING else np.nan
+        for date, item in zip(dates, halving_positions, strict=False)
+    ]
+    module1_start, module1_end = BTC_MODULAR_HISTORICAL_MODULES[0]
+    module2_start, module2_end = BTC_MODULAR_HISTORICAL_MODULES[1]
+    result = pd.DataFrame(
+        {
+            "Date": dates,
+            "NextCycle_StartDate": start_date,
+            "NextCycle_StartPrice": start_price,
+            "NextCycle_EndDate": end_date,
+            "NextCycle_DurationWeeks": duration_weeks,
+            "NextCycle_ProgressPct": progress_pct,
+            "NextCycle_ModelMultiple": multiples,
+            "NextCycle_ModelPrice": model_prices,
+            "NextCycle_TargetPeak": target_peak,
+            "NextCycle_Scenario": scenario,
+            "NextCycle_PeakDate": peak_date,
+            "NextCycle_PeakPrice": peak_price,
+            "NextCycle_HistoricalModule1_Start": module1_start,
+            "NextCycle_HistoricalModule1_End": module1_end,
+            "NextCycle_HistoricalModule2_Start": module2_start,
+            "NextCycle_HistoricalModule2_End": module2_end,
+            "HalvingPhase": [item["phase"] for item in halving_positions],
+            "DistanceToProjectedHalvingDays": distance_to_halving,
+            "DistanceToModelCycleTopDays": distance_to_peak,
+            "ProgressSince2028HalvingPct": progress_since_halving,
+            "ProjectedFlag": "PROJECTED",
+            "HistoricalProjectedFlag": "PROJECTED",
+            "ProgressSince2028HalvingTooltip": [
+                f"{value:.1f}%" if np.isfinite(value) else "" for value in progress_since_halving
+            ],
+        }
+    )
+    validate_btc_modular_cycle_forecast(result, target_peak)
+    return result
+
+
+def validate_btc_modular_cycle_forecast(forecast: pd.DataFrame, target_peak: float | None = None) -> list[str]:
+    errors: list[str] = []
+    if forecast is None or forecast.empty:
+        return ["BTC modular-cycle forecast is empty"]
+    first = forecast.iloc[0]
+    if pd.Timestamp(first["NextCycle_StartDate"]) != BTC_MODULAR_CYCLE_START:
+        errors.append("BTC modular-cycle forecast has an unexpected start date")
+    if not np.isclose(float(forecast["NextCycle_ProgressPct"].iloc[0]), 0.0, atol=1e-12):
+        errors.append("BTC modular-cycle progress must begin at zero")
+    if not np.isclose(float(forecast["NextCycle_ProgressPct"].iloc[-1]), 100.0, atol=1e-12):
+        errors.append("BTC modular-cycle progress must end at 100")
+    if forecast["Date"].iloc[0] != first["NextCycle_StartDate"] or forecast["Date"].iloc[-1] != first["NextCycle_EndDate"]:
+        errors.append("BTC modular-cycle forecast dates do not match its model window")
+    actual_peak = float(pd.to_numeric(forecast["NextCycle_ModelPrice"], errors="coerce").max())
+    expected_peak = float(first["NextCycle_TargetPeak"] if target_peak is None else target_peak)
+    if not np.isclose(actual_peak, expected_peak, rtol=0, atol=max(1e-7, expected_peak * 1e-10)):
+        errors.append("BTC modular-cycle peak does not match the selected target")
+    if forecast["NextCycle_ModelMultiple"].lt(0).any() or not np.isfinite(forecast["NextCycle_ModelPrice"]).all():
+        errors.append("BTC modular-cycle model contains invalid values")
+    return errors
+
+
 def _asof_column(
     base_dates: pd.Series,
     source: pd.DataFrame,
@@ -414,7 +565,10 @@ def btc_cycle_validation(history: pd.DataFrame) -> list[str]:
     return errors
 
 
-def btc_cycle_export_xlsx(history: pd.DataFrame) -> bytes:
+def btc_cycle_export_xlsx(
+    history: pd.DataFrame,
+    next_cycle_forecast: pd.DataFrame | None = None,
+) -> bytes:
     output = io.BytesIO()
     export = history.copy()
     export.insert(0, "Date", pd.to_datetime(export.pop("Date"), errors="coerce"))
@@ -424,4 +578,35 @@ def btc_cycle_export_xlsx(history: pd.DataFrame) -> bytes:
         worksheet.freeze_panes = "B2"
         worksheet.auto_filter.ref = worksheet.dimensions
         worksheet.column_dimensions["A"].width = 14
+        if next_cycle_forecast is not None and not next_cycle_forecast.empty:
+            forecast_columns = [
+                "Date",
+                "NextCycle_ModelPrice",
+                "NextCycle_ModelMultiple",
+                "NextCycle_ProgressPct",
+                "NextCycle_TargetPeak",
+                "NextCycle_Scenario",
+                "NextCycle_PeakDate",
+                "NextCycle_EndDate",
+                "HalvingPhase",
+                "ProjectedFlag",
+                "NextCycle_StartDate",
+                "NextCycle_StartPrice",
+                "NextCycle_DurationWeeks",
+                "NextCycle_PeakPrice",
+                "NextCycle_HistoricalModule1_Start",
+                "NextCycle_HistoricalModule1_End",
+                "NextCycle_HistoricalModule2_Start",
+                "NextCycle_HistoricalModule2_End",
+                "DistanceToProjectedHalvingDays",
+                "DistanceToModelCycleTopDays",
+                "ProgressSince2028HalvingPct",
+            ]
+            model_export = next_cycle_forecast[forecast_columns].copy()
+            model_export["Date"] = pd.to_datetime(model_export["Date"], errors="coerce")
+            model_export.to_excel(writer, sheet_name="Next Cycle Forecast", index=False)
+            forecast_sheet = writer.sheets["Next Cycle Forecast"]
+            forecast_sheet.freeze_panes = "B2"
+            forecast_sheet.auto_filter.ref = forecast_sheet.dimensions
+            forecast_sheet.column_dimensions["A"].width = 14
     return output.getvalue()
