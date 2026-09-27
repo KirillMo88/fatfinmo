@@ -36,6 +36,7 @@ from finance_core import (
     is_krw_quoted_ticker,
 )
 from fund_flows import FundFlowCache, default_fund_flow_cache_path, get_fund_flow_metrics
+from btc_cycle import merge_btc_mcp_weekly_history
 from market_model import (
     YAHOO_MARKET_TICKERS,
     calculate_confirmations_history,
@@ -3042,12 +3043,13 @@ def render_btc_regime_tab(table_df: pd.DataFrame, market_snapshot: dict) -> None
 @st.cache_data(show_spinner=False, ttl=SLOW_REFRESH_SECONDS)
 def load_btc_weekly_price() -> pd.DataFrame:
     daily = download_completed_ohlcv("BTC-USD", period="max")
-    if daily.empty:
-        return pd.DataFrame(columns=["date", "Open", "High", "Low", "Close", "Volume"])
-    weekly = daily.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna(subset=["Close"])
-    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
-    weekly = weekly[weekly.index <= today]
-    return weekly.reset_index().rename(columns={"index": "date", "Date": "date"})
+    try:
+        from tradingview_mcp import get_ohlcv_data
+
+        tradingview_weekly = get_ohlcv_data("INDEX:BTCUSD", interval="1W", count=5000)
+    except Exception:
+        tradingview_weekly = pd.DataFrame()
+    return merge_btc_mcp_weekly_history(daily, tradingview_weekly)
 
 
 def _btc_alpha_row(table_df: pd.DataFrame) -> dict[str, Any]:

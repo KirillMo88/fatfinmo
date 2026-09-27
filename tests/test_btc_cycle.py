@@ -13,6 +13,7 @@ from btc_cycle import (
     build_btc_modular_cycle_forecast,
     build_btc_cycle_history,
     build_btc_gold_ratio_history,
+    merge_btc_mcp_weekly_history,
     btc_cycle_time_range,
     btc_cycle_export_xlsx,
     btc_cycle_validation,
@@ -93,6 +94,41 @@ def test_btc_gold_ratio_uses_latest_gold_close_without_lookahead():
 
     assert ratio["Gold_Price"].tolist() == [2000.0, 2050.0, 2100.0]
     np.testing.assert_allclose(ratio["BTC_GOLD_Ratio"], [21.0, 43000.0 / 2050.0, 44000.0 / 2100.0])
+
+
+def test_btc_mcp_history_extends_to_index_btcusd_start_without_overlapping_yahoo():
+    tradingview = pd.DataFrame(
+        {
+            "date": pd.DatetimeIndex(["2009-10-05", "2014-09-08", "2014-09-15"], dtype="datetime64[ns]"),
+            "open": [0.00076, 475.0, 399.0],
+            "high": [0.00120, 480.0, 410.0],
+            "low": [0.00076, 470.0, 375.0],
+            "close": [0.00115, 475.49, 375.35],
+            "volume": [0.0, 1000.0, 1200.0],
+        }
+    )
+    yahoo_dates = pd.DatetimeIndex(
+        ["2014-09-17", "2014-09-18", "2014-09-19", "2014-09-20"], dtype="datetime64[ns]"
+    )
+    yahoo = pd.DataFrame(
+        {
+            "Open": [457.0, 457.0, 424.0, 394.8],
+            "High": [468.0, 457.0, 428.0, 410.0],
+            "Low": [452.0, 413.0, 384.0, 390.0],
+            "Close": [457.33, 424.44, 394.80, 404.42],
+            "Volume": [100.0, 200.0, 300.0, 400.0],
+        },
+        index=yahoo_dates,
+    )
+
+    history = merge_btc_mcp_weekly_history(yahoo, tradingview, today="2014-09-21")
+
+    assert history.iloc[0]["date"] == pd.Timestamp("2009-10-11")
+    assert history.iloc[0]["Close"] == 0.00115
+    assert pd.Timestamp("2014-09-14") in set(history["date"])
+    assert pd.Timestamp("2014-09-21") not in set(history["date"])
+    assert pd.Timestamp("2014-09-26") not in set(history["date"])
+    assert history.loc[history["date"].eq("2014-09-19"), "Close"].iloc[0] == 394.80
 
 
 def test_btc_gold_ratio_chart_obeys_shared_btc_time_range():
