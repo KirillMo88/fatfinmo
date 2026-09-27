@@ -17,6 +17,7 @@ from btc_cycle import (
     LIQUIDITY_MODIFIERS,
     SECONDARY_WEIGHTS,
     build_btc_cycle_history,
+    build_btc_gold_ratio_history,
     btc_cycle_time_range,
     btc_cycle_export_xlsx,
     btc_cycle_validation,
@@ -80,19 +81,12 @@ def render_btc_cycle_tab(
 
     historical = history.loc[~history["Projected"].astype(bool)].copy()
     current = historical.iloc[-1]
-    time_range = st.radio(
-        "Time range",
-        BTC_RANGE_OPTIONS,
-        horizontal=True,
-        index=4,
-        key="btc_cycle_time_range",
-    )
     _render_score_cards(current)
     st.markdown("### BTC Macro Score Table")
     st.dataframe(_score_table(current), hide_index=True, use_container_width=True)
     _render_drivers(current)
-    halving_forecast = _render_btc_halving_price_forecast()
     next_cycle_scenario = _render_next_cycle_controls()
+    halving_forecast = _halving_forecast_from_session_state()
     scenario_targets = {
         "Conservative": "BTC_CycleTop_Conservative",
         "Base": "BTC_CycleTop_Base",
@@ -105,6 +99,13 @@ def render_btc_cycle_tab(
     )
     st.session_state["btc_next_cycle_forecast"] = next_cycle_forecast.copy()
 
+    time_range = st.radio(
+        "Time range",
+        BTC_RANGE_OPTIONS,
+        horizontal=True,
+        index=4,
+        key="btc_cycle_time_range",
+    )
     st.plotly_chart(
         _build_btc_price_halving_figure(history, time_range, next_cycle_forecast),
         use_container_width=True,
@@ -127,7 +128,16 @@ def render_btc_cycle_tab(
         use_container_width=True,
         config=BTC_CYCLE_PLOTLY_CONFIG,
     )
-    _render_term_structure(current)
+    gold_weekly = _load_btc_cycle_gold_weekly()
+    btc_gold_ratio = build_btc_gold_ratio_history(btc_weekly, gold_weekly)
+    st.plotly_chart(
+        _build_btc_gold_ratio_figure(history, btc_gold_ratio, time_range),
+        use_container_width=True,
+        config=BTC_CYCLE_PLOTLY_CONFIG,
+    )
+    if btc_gold_ratio.empty:
+        st.caption("BTC/Gold ratio is unavailable because aligned BTC and GOLD observations were not returned.")
+    _render_btc_halving_price_forecast()
     _render_halving_diagnostic(current)
     _render_liquidity_diagnostic(current)
     _render_secondary_diagnostic(current)
@@ -138,6 +148,28 @@ def render_btc_cycle_tab(
         file_name="btc_cycle.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="btc_cycle_xlsx_download",
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def _load_btc_cycle_gold_weekly() -> pd.Series:
+    from gold_regime.service import load_gold_mcp_weekly
+
+    return load_gold_mcp_weekly()
+
+
+def _halving_forecast_from_session_state() -> dict[str, Any]:
+    return build_btc_halving_price_forecast(
+        st.session_state.get("btc_bottom_price_2026", DEFAULT_BTC_BOTTOM_2026),
+        {
+            "Conservative": st.session_state.get(
+                "btc_halving_top_conservative", DEFAULT_HALVING_TO_TOP_MULTIPLIERS["Conservative"]
+            ),
+            "Base": st.session_state.get("btc_halving_top_base", DEFAULT_HALVING_TO_TOP_MULTIPLIERS["Base"]),
+            "Strong liquidity": st.session_state.get(
+                "btc_halving_top_strong_liquidity", DEFAULT_HALVING_TO_TOP_MULTIPLIERS["Strong liquidity"]
+            ),
+        },
     )
 
 
@@ -662,6 +694,34 @@ def _build_macro_score_figure(history: pd.DataFrame, horizon: str, time_range: s
     return _style_btc_cycle_fig(fig, "BTC Macro Score", 360)
 
 
+def _build_btc_gold_ratio_figure(
+    history: pd.DataFrame,
+    ratio_history: pd.DataFrame,
+    time_range: str = "MAX",
+) -> go.Figure:
+    range_start, range_end, _ = btc_cycle_time_range(history, time_range)
+    visible = ratio_history.loc[ratio_history["Date"].between(range_start, range_end)].copy()
+    fig = go.Figure()
+    if not visible.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=visible["Date"],
+                y=visible["BTC_GOLD_Ratio"],
+                mode="lines",
+                name="BTC / Gold",
+                line={"color": "#facc15", "width": 2.1},
+                customdata=visible[["BTC_Price", "Gold_Price"]].to_numpy(),
+                hovertemplate=(
+                    "Date: %{x|%Y-%m-%d}<br>BTC / Gold: %{y:,.2f} oz per BTC<br>"
+                    "BTC: $%{customdata[0]:,.0f}<br>Gold: $%{customdata[1]:,.2f}/oz<extra></extra>"
+                ),
+            )
+        )
+    fig.update_yaxes(title="Gold oz per BTC")
+    fig.update_xaxes(range=[range_start, range_end], tickformat="%Y")
+    return _style_btc_cycle_fig(fig, "BTC / Gold", 340)
+
+
 def _score_hover_template(horizon: str) -> str:
     return (
         "Date: %{x|%Y-%m-%d}<br>BTC Price: $%{customdata[0]:,.0f}<br>"
@@ -716,26 +776,6 @@ def _style_btc_cycle_fig(fig: go.Figure, title: str, height: int) -> go.Figure:
     fig.update_xaxes(showgrid=False, color="#cbd5e1", linecolor="#475569", ticks="outside")
     fig.update_yaxes(showgrid=True, gridcolor="#263241", color="#cbd5e1", linecolor="#475569", ticks="outside")
     return fig
-
-
-def _render_term_structure(current: pd.Series) -> None:
-    st.markdown("### Current Term Structure")
-    horizons = list(BTC_CYCLE_HORIZONS)
-    scores = [_number(current.get(f"BTC_MACRO_{horizon}")) for horizon in horizons]
-    finite = [value for value in scores if np.isfinite(value)]
-    if len(finite) < 2:
-        state = "Insufficient data"
-    elif all(left <= right for left, right in zip(scores, scores[1:])) and scores[-1] - scores[0] > 5:
-        state = "Improving with horizon"
-    elif all(left >= right for left, right in zip(scores, scores[1:])) and scores[0] - scores[-1] > 5:
-        state = "Deteriorating with horizon"
-    else:
-        state = "Flat / mixed"
-    fig = go.Figure(go.Scatter(x=horizons, y=scores, mode="lines+markers", line={"color": "#38bdf8", "width": 2}, marker={"color": "#facc15", "size": 8}))
-    fig.update_yaxes(range=[0, 95], title="Score")
-    fig.update_layout(height=250, margin={"l": 50, "r": 20, "t": 15, "b": 35}, paper_bgcolor="#0f131a", plot_bgcolor="#0f131a", font={"color": "#e5e7eb", "size": 11}, showlegend=False)
-    st.caption(f"Curve classification: {state}")
-    st.plotly_chart(fig, use_container_width=True, config=BTC_CYCLE_PLOTLY_CONFIG)
 
 
 def _render_halving_diagnostic(current: pd.Series) -> None:
