@@ -243,6 +243,75 @@ def _normalize_price_history(btc_weekly: pd.DataFrame) -> pd.DataFrame:
     return frame.dropna().sort_values("Date").drop_duplicates("Date", keep="last").reset_index(drop=True)
 
 
+def merge_btc_mcp_weekly_history(
+    yahoo_daily: pd.DataFrame | None,
+    tradingview_weekly: pd.DataFrame | None,
+    today: pd.Timestamp | str | None = None,
+) -> pd.DataFrame:
+    """Prepend completed TradingView INDEX:BTCUSD weeks before Yahoo's daily price history."""
+    columns = ["date", "Open", "High", "Low", "Close", "Volume"]
+    as_of = pd.Timestamp(today if today is not None else pd.Timestamp.now(tz="UTC").tz_localize(None))
+    if as_of.tzinfo is not None:
+        as_of = as_of.tz_convert("UTC").tz_localize(None)
+    as_of = as_of.normalize()
+    yahoo = pd.DataFrame(columns=columns[1:])
+    first_yahoo_date = pd.NaT
+    if yahoo_daily is not None and not yahoo_daily.empty and "Close" in yahoo_daily.columns:
+        yahoo = yahoo_daily.copy()
+        yahoo.index = pd.to_datetime(yahoo.index, errors="coerce", utc=True).tz_localize(None)
+        yahoo = yahoo.loc[~yahoo.index.isna()].sort_index()
+        for column in columns[1:]:
+            if column not in yahoo.columns:
+                yahoo[column] = np.nan
+            yahoo[column] = pd.to_numeric(yahoo[column], errors="coerce")
+        yahoo = yahoo.dropna(subset=["Close"])
+        first_yahoo_date = pd.Timestamp(yahoo.index.min()).normalize() if not yahoo.empty else pd.NaT
+    yahoo_weekly = (
+        yahoo.resample("W-FRI")
+        .agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"})
+        .dropna(subset=["Close"])
+        .reset_index(names="date")
+        if not yahoo.empty
+        else pd.DataFrame(columns=columns)
+    )
+    if not yahoo_weekly.empty:
+        yahoo_weekly = yahoo_weekly.loc[yahoo_weekly["date"] <= as_of]
+
+    tradingview = pd.DataFrame(columns=columns)
+    if tradingview_weekly is not None and not tradingview_weekly.empty:
+        date_column = next((name for name in ("date", "Date") if name in tradingview_weekly.columns), None)
+        if date_column and "close" in tradingview_weekly.columns:
+            source = tradingview_weekly.copy()
+            dates = pd.to_datetime(source[date_column], errors="coerce", utc=True).dt.tz_localize(None)
+            tradingview = pd.DataFrame({"date": dates + pd.Timedelta(6, unit="D")})
+            for source_name, target_name in (
+                ("open", "Open"),
+                ("high", "High"),
+                ("low", "Low"),
+                ("close", "Close"),
+                ("volume", "Volume"),
+            ):
+                tradingview[target_name] = pd.to_numeric(source.get(source_name), errors="coerce")
+            tradingview = tradingview.dropna(subset=["date", "Close"]).sort_values("date")
+
+            tradingview = tradingview.loc[tradingview["date"] < as_of]
+            if pd.notna(first_yahoo_date):
+                tradingview = tradingview.loc[tradingview["date"] < first_yahoo_date]
+
+    combined = pd.concat([tradingview, yahoo_weekly], ignore_index=True)
+    if combined.empty:
+        return pd.DataFrame(columns=columns)
+    combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
+    combined = combined.loc[combined["date"] <= as_of]
+    return (
+        combined[columns]
+        .dropna(subset=["date", "Close"])
+        .sort_values("date")
+        .drop_duplicates("date", keep="last")
+        .reset_index(drop=True)
+    )
+
+
 def build_btc_gold_ratio_history(
     btc_weekly: pd.DataFrame,
     gold_weekly: pd.Series | pd.DataFrame,
