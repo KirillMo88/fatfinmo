@@ -168,18 +168,21 @@ def render_summary(current: dict[str, Any], snapshot: Any) -> None:
             [
                 (
                     "Gold Tactical Flow Score",
-                    f"{fmt_score(current.get('tactical_flow_score'))} / {fmt_text(current.get('flow_state'))}",
-                    f"4W change {fmt_signed_number(history_metric_change(history, 'tactical_flow_score', as_of), 1)}",
+                    f"{fmt_score(current.get('tactical_flow_score'))} / {fmt_text(current.get('flow_state'))} "
+                    f"(4W change {fmt_signed_number(history_metric_change(history, 'tactical_flow_score', as_of), 1)})",
+                    "",
                 ),
                 (
                     "ETF 3Y Percentile",
-                    fmt_score(current.get("etf_flow_score")),
-                    f"4W change {fmt_signed_number(history_metric_change(history, 'etf_flow_score', as_of), 1)}",
+                    f"{fmt_score(current.get('etf_flow_score'))} "
+                    f"(4W change {fmt_signed_number(history_metric_change(history, 'etf_flow_score', as_of), 1)})",
+                    "",
                 ),
                 (
                     "COT 3Y Percentile",
-                    fmt_score(current.get("cot_momentum_score")),
-                    f"4W change {fmt_signed_number(history_metric_change(history, 'cot_momentum_score', as_of), 1)}",
+                    f"{fmt_score(current.get('cot_momentum_score'))} "
+                    f"(4W change {fmt_signed_number(history_metric_change(history, 'cot_momentum_score', as_of), 1)})",
+                    "",
                 ),
                 ("Last Updated", fmt_date(current.get("date")), "latest weekly observation"),
             ],
@@ -250,15 +253,16 @@ def gold_macro2_summary_metrics(snapshot: Any, as_of: Any) -> list[tuple[str, st
     metrics = [
         (
             "Structural Macro",
-            fmt_number(current.get("StructuralMacro"), 1),
-            f"4W change {fmt_signed_number(history_metric_change(history, 'StructuralMacro', macro2_as_of), 1)}",
+            f"{fmt_number(current.get('StructuralMacro'), 1)} "
+            f"(4W change {fmt_signed_number(history_metric_change(history, 'StructuralMacro', macro2_as_of), 1)})",
+            "",
         )
     ]
     metrics.extend(
         (
             f"{horizon} State",
             fmt_text(current.get(f"GLD_MACRO_{horizon}_State")),
-            f"Score {fmt_number(current.get(f'GLD_MACRO_{horizon}'), 1)}",
+            "",
         )
         for horizon in ("3M", "6M", "9M", "12M")
     )
@@ -279,7 +283,7 @@ def summary_metric_markup(label: str, value: str, detail: str) -> str:
     return f"""
 <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(7rem, 45%); align-items: baseline; column-gap: 0.5rem; padding: 0.35rem 0; line-height: 1.15;">
   <div style="min-width: 0; font-size: 0.72rem; color: #94a3b8; font-weight: 700;">{html.escape(label)}</div>
-  <div style="min-width: 0; text-align: right; overflow-wrap: normal; word-break: normal; hyphens: none; font-size: 1.0rem; color: #f8fafc; font-weight: 800;">{value_html}</div>
+  <div style="min-width: 0; text-align: left; overflow-wrap: normal; word-break: normal; hyphens: none; font-size: 1.0rem; color: #f8fafc; font-weight: 800;">{value_html}</div>
   {detail_html}
 </div>
 """

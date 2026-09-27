@@ -28,22 +28,23 @@ def weekly(values):
     return pd.Series(values, index=pd.date_range("2020-01-03", periods=len(values), freq="W-FRI"))
 
 
-def test_gold_summary_metric_values_are_aligned_to_the_right_of_labels():
+def test_gold_summary_metric_values_are_aligned_to_the_left_of_labels():
     markup = summary_metric_markup("ROC 3M", "4.8%", "")
 
     assert "grid-template-columns: minmax(0, 1fr) minmax(7rem, 45%)" in markup
-    assert "text-align: right" in markup
+    assert "text-align: left" in markup
     assert "max-width: 60%" not in markup
     assert "overflow-wrap: anywhere" not in markup
     assert markup.index("ROC 3M") < markup.index("4.8%")
     assert "grid-column: 1 / -1" not in markup
 
     detailed_markup = summary_metric_markup("Structural Macro", "6.7", "4W change -36.0")
-    assert "text-align: right" in detailed_markup
+    assert "text-align: left" in detailed_markup
     assert "4W change -36.0" in detailed_markup
 
-    state_markup = summary_metric_markup("3M State", "STRONGLY_UNFAVORABLE", "Score 18.0")
+    state_markup = summary_metric_markup("3M State", "STRONGLY_UNFAVORABLE", "")
     assert "STRONGLY_<wbr>UNFAVORABLE" in state_markup
+    assert "Score" not in state_markup
 
 
 def test_gold_liquidity_cycle_comparison_aligns_monthly_history_and_range():
@@ -118,14 +119,14 @@ def test_gold_macro_summary_reuses_structural_macro_2_horizon_states():
         as_of,
     )
 
-    assert metrics[0] == ("Structural Macro", "50.0", "4W change +8.0")
+    assert metrics[0] == ("Structural Macro", "50.0 (4W change +8.0)", "")
     assert [row[1] for row in metrics[1:]] == [
         "SUPPORTIVE",
         "NEUTRAL_MIXED",
         "UNFAVORABLE",
         "STRONGLY_UNFAVORABLE",
     ]
-    assert [row[2] for row in metrics[1:]] == ["Score 67.0", "Score 52.0", "Score 32.0", "Score 15.0"]
+    assert [row[2] for row in metrics[1:]] == ["", "", "", ""]
 
 
 def test_gold_summary_cycle_states_use_same_risk_classifier_as_cycle_chart():
