@@ -184,5 +184,7 @@ def test_seasonality_charts_show_model_calendar_and_all_three_views() -> None:
         "2026 Actual",
     ]
     assert list(annual_fig.layout.xaxis.ticktext) == ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    assert len(build_spx_monthly_seasonality_fig(result.monthly_statistics, "Median Monthly Performance", "Median Monthly Return").data) == 1
-    assert len(build_spx_monthly_seasonality_fig(result.monthly_statistics, "Average Monthly Performance", "Average Monthly Return").data) == 1
+    monthly_fig = build_spx_monthly_seasonality_fig(result.monthly_statistics)
+    assert [trace.name for trace in monthly_fig.data] == ["Median", "Average"]
+    assert monthly_fig.layout.barmode == "group"
+    assert monthly_fig.layout.title.text == "Median & Average Monthly Performance"

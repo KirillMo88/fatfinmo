@@ -3164,12 +3164,7 @@ def render_spx_seasonality(
         config=MARKET_CYCLE_PLOTLY_CONFIG,
     )
     st.plotly_chart(
-        build_spx_monthly_seasonality_fig(seasonality.monthly_statistics, "Median Monthly Performance", "Median Monthly Return"),
-        use_container_width=True,
-        config=MARKET_CYCLE_PLOTLY_CONFIG,
-    )
-    st.plotly_chart(
-        build_spx_monthly_seasonality_fig(seasonality.monthly_statistics, "Average Monthly Performance", "Average Monthly Return"),
+        build_spx_monthly_seasonality_fig(seasonality.monthly_statistics),
         use_container_width=True,
         config=MARKET_CYCLE_PLOTLY_CONFIG,
     )
@@ -3300,34 +3295,40 @@ def build_spx_annual_seasonality_fig(seasonality: SPXSeasonality) -> go.Figure:
     )
 
 
-def build_spx_monthly_seasonality_fig(statistics: pd.DataFrame, title: str, value_column: str) -> go.Figure:
-    colors = [
-        "#22c55e" if pd.notna(value) and value >= 0 else "#ef4444"
-        for value in statistics[value_column]
-    ]
-    fig = go.Figure(
-        go.Bar(
-            x=statistics["Month"],
-            y=pd.to_numeric(statistics[value_column], errors="coerce") * 100.0,
-            marker_color=colors,
-            customdata=list(
-                zip(
-                    statistics["Observation Count"],
-                    pd.to_numeric(statistics["P25 Monthly Return"], errors="coerce") * 100.0,
-                    pd.to_numeric(statistics["P75 Monthly Return"], errors="coerce") * 100.0,
-                )
-            ),
-            hovertemplate=(
-                "Month: %{x}<br>Return: %{y:.2f}%<br>Observations: %{customdata[0]:.0f}"
-                "<br>P25: %{customdata[1]:.2f}%<br>P75: %{customdata[2]:.2f}%<extra></extra>"
-            ),
-            name=title,
+def build_spx_monthly_seasonality_fig(statistics: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    for label, column, positive_color, negative_color in (
+        ("Median", "Median Monthly Return", "#22c55e", "#ef4444"),
+        ("Average", "Average Monthly Return", "#38bdf8", "#f97316"),
+    ):
+        values = pd.to_numeric(statistics[column], errors="coerce") * 100.0
+        fig.add_trace(
+            go.Bar(
+                x=statistics["Month"],
+                y=values,
+                marker_color=[
+                    positive_color if pd.notna(value) and value >= 0 else negative_color
+                    for value in values
+                ],
+                customdata=list(
+                    zip(
+                        statistics["Observation Count"],
+                        pd.to_numeric(statistics["P25 Monthly Return"], errors="coerce") * 100.0,
+                        pd.to_numeric(statistics["P75 Monthly Return"], errors="coerce") * 100.0,
+                    )
+                ),
+                hovertemplate=(
+                    f"{label}<br>Month: %{{x}}<br>Return: %{{y:.2f}}%<br>Observations: %{{customdata[0]:.0f}}"
+                    "<br>P25: %{customdata[1]:.2f}%<br>P75: %{customdata[2]:.2f}%<extra></extra>"
+                ),
+                name=label,
+            )
         )
-    )
     fig.add_hline(y=0, line_color="#64748b", line_dash="dash", line_width=1)
+    fig.update_layout(barmode="group", legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
     fig.update_xaxes(title_text="Month", categoryorder="array", categoryarray=MONTH_LABELS)
     fig.update_yaxes(title_text="Return (%)", ticksuffix="%")
-    return style_fig(fig, title, 300)
+    return style_fig(fig, "Median & Average Monthly Performance", 300)
 
 
 def maturity_pct(value: Any) -> str:
