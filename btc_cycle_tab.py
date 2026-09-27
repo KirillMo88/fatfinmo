@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from typing import Any
 
 import numpy as np
@@ -20,6 +21,13 @@ from btc_cycle import (
     btc_cycle_export_xlsx,
     btc_cycle_validation,
     liquidity_cycle_position,
+)
+from btc_halving_price_forecast import (
+    DEFAULT_BTC_BOTTOM_2026,
+    DEFAULT_HALVING_TO_TOP_MULTIPLIERS,
+    build_btc_halving_price_forecast,
+    historical_return_table,
+    historical_timing_table,
 )
 
 
@@ -82,6 +90,7 @@ def render_btc_cycle_tab(
     st.markdown("### BTC Macro Score Table")
     st.dataframe(_score_table(current), hide_index=True, use_container_width=True)
     _render_drivers(current)
+    _render_btc_halving_price_forecast()
 
     st.plotly_chart(
         _build_btc_price_halving_figure(history, time_range),
@@ -117,6 +126,165 @@ def render_btc_cycle_tab(
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="btc_cycle_xlsx_download",
     )
+
+
+def _render_btc_halving_price_forecast() -> dict[str, Any]:
+    tooltip = (
+        "BTC Halving Price Forecast estimates the next cycle top in two stages. First, the 2026 bottom is "
+        "projected to the 2028 halving using the historical average Bottom → Halving multiple. Second, three "
+        "Halving → Top scenarios are applied to estimate the next cycle top."
+    )
+    st.markdown(
+        '<h3 style="margin: 0.6rem 0 0.35rem; font-size: 1.15rem; font-weight: 700;">'
+        f'BTC Halving Price Forecast <span title="{html.escape(tooltip, quote=True)}" '
+        'aria-label="Forecast methodology" style="font-size: 0.8rem; color: #94a3b8; cursor: help;">ⓘ</span></h3>',
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Historical return multiples**")
+        _render_forecast_table(historical_return_table(), height=160)
+    with right:
+        st.markdown("**Historical cycle timing**")
+        _render_forecast_table(historical_timing_table(), height=160)
+
+    historical_average = build_btc_halving_price_forecast()["BTC_Avg_BottomToHalving"]
+    average_row = pd.DataFrame(
+        [{"Assumption": "Average Bottom → Halving", "Value": f"{historical_average:.2f}x"}]
+    )
+    _render_forecast_table(average_row, height=82)
+
+    st.markdown("**Halving → Top**")
+    conservative_col, base_col, liquidity_col = st.columns(3)
+    with conservative_col:
+        conservative = st.number_input(
+            "Conservative",
+            min_value=0.01,
+            max_value=25.0,
+            value=float(DEFAULT_HALVING_TO_TOP_MULTIPLIERS["Conservative"]),
+            step=0.05,
+            format="%.2f",
+            key="btc_halving_top_conservative",
+        )
+    with base_col:
+        base = st.number_input(
+            "Base",
+            min_value=0.01,
+            max_value=25.0,
+            value=float(DEFAULT_HALVING_TO_TOP_MULTIPLIERS["Base"]),
+            step=0.05,
+            format="%.2f",
+            key="btc_halving_top_base",
+        )
+    with liquidity_col:
+        strong_liquidity = st.number_input(
+            "Strong liquidity",
+            min_value=0.01,
+            max_value=25.0,
+            value=float(DEFAULT_HALVING_TO_TOP_MULTIPLIERS["Strong liquidity"]),
+            step=0.05,
+            format="%.2f",
+            key="btc_halving_top_strong_liquidity",
+        )
+
+    st.markdown("**Price Forecast**")
+    bottom_label, bottom_input = st.columns([3, 1])
+    with bottom_label:
+        st.markdown("Bottom price 2026")
+    with bottom_input:
+        bottom_price = st.number_input(
+            "Bottom price 2026",
+            min_value=1,
+            value=int(DEFAULT_BTC_BOTTOM_2026),
+            step=1000,
+            format="%d",
+            label_visibility="collapsed",
+            key="btc_bottom_price_2026",
+        )
+
+    forecast = build_btc_halving_price_forecast(
+        bottom_price,
+        {
+            "Conservative": conservative,
+            "Base": base,
+            "Strong liquidity": strong_liquidity,
+        },
+    )
+    st.session_state["btc_halving_price_forecast"] = forecast.copy()
+    forecast_rows = pd.DataFrame(
+        [
+            {"Price Forecast": "Price at halving", "USD": _format_usd(forecast["BTC_PriceAtHalving"])},
+            {"Price Forecast": "Cycle top price", "USD": ""},
+            {"Price Forecast": "    Conservative decay", "USD": _format_usd(forecast["BTC_CycleTop_Conservative"])},
+            {"Price Forecast": "    Base", "USD": _format_usd(forecast["BTC_CycleTop_Base"])},
+            {"Price Forecast": "    Strong liquidity", "USD": _format_usd(forecast["BTC_CycleTop_StrongLiquidity"])},
+            {"Price Forecast": "Average forecast", "USD": _format_usd(forecast["BTC_CycleTop_Average"])},
+        ]
+    )
+    _render_forecast_table(forecast_rows, height=275, highlight_metric="Average forecast")
+    st.caption(_halving_forecast_summary(forecast))
+    return forecast
+
+
+def _render_forecast_table(
+    frame: pd.DataFrame,
+    height: int,
+    highlight_metric: str | None = None,
+) -> None:
+    styler = frame.style.set_properties(
+        **{
+            "padding": "3px 7px",
+            "border-bottom": "1px solid #263241",
+            "white-space": "nowrap",
+            "font-size": "0.82rem",
+        }
+    ).set_table_styles(
+        [
+            {"selector": "th", "props": [("border-bottom", "1px solid #64748b"), ("font-weight", "700")]},
+            {"selector": "td", "props": [("border-right", "1px solid #263241")]},
+        ]
+    )
+    if highlight_metric is not None:
+        styler = styler.apply(
+            lambda row: [
+                "background-color: #16324a; color: #eff6ff; font-weight: 700"
+                if row.iloc[0] == highlight_metric
+                else ""
+                for _ in row
+            ],
+            axis=1,
+        )
+    st.dataframe(styler, hide_index=True, use_container_width=True, height=height)
+
+
+def _halving_forecast_summary(forecast: dict[str, Any]) -> str:
+    bottom_k = forecast["BTC_Bottom_2026"] / 1000.0
+    halving_k = forecast["BTC_PriceAtHalving"] / 1000.0
+    cycle_tops_k = [
+        forecast["BTC_CycleTop_Conservative"] / 1000.0,
+        forecast["BTC_CycleTop_Base"] / 1000.0,
+        forecast["BTC_CycleTop_StrongLiquidity"] / 1000.0,
+    ]
+    low_k, high_k = min(cycle_tops_k), max(cycle_tops_k)
+    base_k = forecast["BTC_CycleTop_Base"] / 1000.0
+    multipliers = [
+        forecast["BTC_HalvingToTop_Conservative"],
+        forecast["BTC_HalvingToTop_Base"],
+        forecast["BTC_HalvingToTop_StrongLiquidity"],
+    ]
+    return (
+        f"Based on an assumed 2026 bottom of ${bottom_k:,.1f}k and the historical average Bottom → Halving "
+        f"multiple of {forecast['BTC_Avg_BottomToHalving']:.2f}x, the model estimates a BTC price near "
+        f"${halving_k:,.0f}k at the 2028 halving. Applying Halving → Top scenarios of "
+        f"{min(multipliers):.2f}x–{max(multipliers):.2f}x "
+        f"gives a projected cycle-top range of approximately ${low_k:,.0f}k–${high_k:,.0f}k, with a base case "
+        f"near ${base_k:,.0f}k."
+    )
+
+
+def _format_usd(value: float) -> str:
+    return f"{value:,.0f}"
 
 
 def _render_score_cards(current: pd.Series) -> None:
