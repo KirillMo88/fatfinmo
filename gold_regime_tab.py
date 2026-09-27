@@ -270,15 +270,16 @@ def render_metric(label: str, value: str, detail: str) -> None:
 
 
 def summary_metric_markup(label: str, value: str, detail: str) -> str:
+    value_html = html.escape(value).replace("_", "_<wbr>")
     detail_html = (
         f'<div style="grid-column: 1 / -1; font-size: 0.72rem; color: #cbd5e1;">{html.escape(detail)}</div>'
         if detail
         else ""
     )
     return f"""
-<div style="display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; column-gap: 0.5rem; padding: 0.35rem 0; line-height: 1.15;">
+<div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(7rem, 45%); align-items: baseline; column-gap: 0.5rem; padding: 0.35rem 0; line-height: 1.15;">
   <div style="min-width: 0; font-size: 0.72rem; color: #94a3b8; font-weight: 700;">{html.escape(label)}</div>
-  <div style="min-width: 0; max-width: 60%; text-align: right; overflow-wrap: anywhere; font-size: 1.0rem; color: #f8fafc; font-weight: 800;">{html.escape(value)}</div>
+  <div style="min-width: 0; text-align: right; overflow-wrap: normal; word-break: normal; hyphens: none; font-size: 1.0rem; color: #f8fafc; font-weight: 800;">{value_html}</div>
   {detail_html}
 </div>
 """
