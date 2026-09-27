@@ -31,14 +31,19 @@ def weekly(values):
 def test_gold_summary_metric_values_are_aligned_to_the_right_of_labels():
     markup = summary_metric_markup("ROC 3M", "4.8%", "")
 
-    assert "grid-template-columns: minmax(0, 1fr) auto" in markup
+    assert "grid-template-columns: minmax(0, 1fr) minmax(7rem, 45%)" in markup
     assert "text-align: right" in markup
+    assert "max-width: 60%" not in markup
+    assert "overflow-wrap: anywhere" not in markup
     assert markup.index("ROC 3M") < markup.index("4.8%")
     assert "grid-column: 1 / -1" not in markup
 
     detailed_markup = summary_metric_markup("Structural Macro", "6.7", "4W change -36.0")
     assert "text-align: right" in detailed_markup
     assert "4W change -36.0" in detailed_markup
+
+    state_markup = summary_metric_markup("3M State", "STRONGLY_UNFAVORABLE", "Score 18.0")
+    assert "STRONGLY_<wbr>UNFAVORABLE" in state_markup
 
 
 def test_gold_liquidity_cycle_comparison_aligns_monthly_history_and_range():
