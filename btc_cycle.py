@@ -17,10 +17,10 @@ BTC_PROJECTED_HALVING = pd.Timestamp("2028-04-01")
 BTC_LIQUIDITY_TROUGH_ANCHORS = pd.DatetimeIndex(
     ["2010-06-18", "2015-03-06", "2019-03-08", "2022-10-28"]
 )
-BTC_LIQUIDITY_CYCLE_MONTHS = 49
+BTC_LIQUIDITY_CYCLE_MONTHS = 52.7
 BTC_SECONDARY_PERCENTILE_WINDOW = 156
 BTC_SECONDARY_PERCENTILE_MINIMUM = 104
-BTC_DEFAULT_PROJECTION_END = pd.Timestamp("2028-04-30")
+BTC_RANGE_OPTIONS = ("1Y", "3Y", "5Y", "10Y", "MAX", "Next Cycle")
 
 HALVING_PHASES = (
     "EARLY_EXPANSION",
@@ -108,6 +108,31 @@ def halving_cycle_position(at: pd.Timestamp | str) -> dict[str, Any]:
     }
 
 
+def add_fractional_months(value: pd.Timestamp | str, months: float) -> pd.Timestamp:
+    days = int(round(months * 365.2425 / 12.0))
+    return pd.Timestamp(value).normalize() + pd.Timedelta(days=days, unit="D")
+
+
+def next_accumulation_pre_halving_start(as_of_date: pd.Timestamp | str) -> pd.Timestamp:
+    """Return the start of the accumulation phase in the cycle after the next halving."""
+    next_halving = halving_cycle_position(as_of_date)["next_halving"]
+    following_halving = next_halving + pd.DateOffset(months=48)
+    accumulation_start_days = int(np.ceil((following_halving - next_halving).days * 0.70))
+    return (next_halving + pd.Timedelta(accumulation_start_days, unit="D")).normalize()
+
+
+def btc_cycle_time_range(history: pd.DataFrame, choice: str) -> tuple[pd.Timestamp, pd.Timestamp, bool]:
+    observed = history.loc[~history["Projected"].astype(bool), "Date"]
+    first_date = pd.Timestamp(observed.min()).normalize()
+    latest_date = pd.Timestamp(observed.max()).normalize()
+    if choice == "Next Cycle":
+        return latest_date - pd.DateOffset(months=12), next_accumulation_pre_halving_start(latest_date), True
+    if choice == "MAX":
+        return first_date, latest_date, False
+    years = int(choice.removesuffix("Y"))
+    return max(first_date, latest_date - pd.DateOffset(years=years)), latest_date, False
+
+
 def liquidity_cycle_position(
     target_date: pd.Timestamp | str,
     as_of_date: pd.Timestamp | str,
@@ -120,9 +145,11 @@ def liquidity_cycle_position(
         return {"anchor": pd.NaT, "progress": np.nan, "phase": "DATA_INCOMPLETE", "next_trough": pd.NaT}
 
     anchor = pd.Timestamp(known[-1])
-    while anchor + pd.DateOffset(months=BTC_LIQUIDITY_CYCLE_MONTHS) <= target:
-        anchor += pd.DateOffset(months=BTC_LIQUIDITY_CYCLE_MONTHS)
-    next_trough = anchor + pd.DateOffset(months=BTC_LIQUIDITY_CYCLE_MONTHS)
+    cycle_days = int(round(BTC_LIQUIDITY_CYCLE_MONTHS * 365.2425 / 12.0))
+    elapsed_days = max(0, (target - anchor).days)
+    elapsed_cycles = elapsed_days // cycle_days
+    anchor += pd.Timedelta(elapsed_cycles * cycle_days, unit="D")
+    next_trough = anchor + pd.Timedelta(cycle_days, unit="D")
     progress = float((target - anchor).total_seconds() / (next_trough - anchor).total_seconds() * 100.0)
     progress = min(max(progress, 0.0), 100.0)
     if progress < 25.0:
@@ -134,6 +161,52 @@ def liquidity_cycle_position(
     else:
         phase = "ACCELERATING_CONTRACTION"
     return {"anchor": anchor, "progress": progress, "phase": phase, "next_trough": next_trough}
+
+
+def _project_global_m2_cycle(
+    source: pd.DataFrame,
+    dates: pd.Series,
+    next_trough: pd.Timestamp,
+) -> pd.Series:
+    values = pd.to_numeric(source["PrimaryMarketCycle"], errors="coerce").dropna()
+    dates = pd.to_datetime(dates, errors="coerce")
+    if values.empty or dates.empty:
+        return pd.Series(np.nan, index=dates.index, dtype="float64")
+
+    source_dates = pd.to_datetime(source.loc[values.index, "Date"], errors="coerce")
+    last_date = pd.Timestamp(source_dates.iloc[-1]).normalize()
+    last_value = float(values.iloc[-1])
+    recent = pd.DataFrame({"Date": source_dates, "Value": values}).tail(7)
+    amplitude = float(recent["Value"].abs().quantile(0.90))
+    if not np.isfinite(amplitude) or amplitude < 0.25:
+        amplitude = max(float(values.abs().quantile(0.90)), 1.0)
+
+    period_days = BTC_LIQUIDITY_CYCLE_MONTHS * 365.2425 / 12.0
+    trough = pd.Timestamp(next_trough).normalize()
+    interval_days = max((trough - last_date).total_seconds() / 86400.0, 1.0)
+    if len(recent) >= 2:
+        slope = (float(recent["Value"].iloc[-1]) - float(recent["Value"].iloc[0])) / max(
+            (pd.Timestamp(recent["Date"].iloc[-1]) - pd.Timestamp(recent["Date"].iloc[0])).total_seconds() / 86400.0,
+            1.0,
+        )
+    else:
+        slope = 0.0
+    slope = float(np.clip(slope, -2 * np.pi * amplitude / period_days, 2 * np.pi * amplitude / period_days))
+
+    result = pd.Series(np.nan, index=dates.index, dtype="float64")
+    forecast_mask = dates.gt(last_date)
+    for index, target in dates.loc[forecast_mask].items():
+        target = pd.Timestamp(target).normalize()
+        if target <= trough:
+            t = float(np.clip((target - last_date).total_seconds() / 86400.0 / interval_days, 0.0, 1.0))
+            t2, t3 = t * t, t * t * t
+            h00, h10 = 2 * t3 - 3 * t2 + 1, t3 - 2 * t2 + t
+            h01, h11 = -2 * t3 + 3 * t2, t3 - t2
+            result.loc[index] = h00 * last_value + h10 * interval_days * slope + h01 * -amplitude
+        else:
+            phase = 2 * np.pi * ((target - trough).total_seconds() / 86400.0) / period_days
+            result.loc[index] = -amplitude * np.cos(phase)
+    return result
 
 
 def point_in_time_percentile(series: pd.Series) -> pd.Series:
@@ -210,16 +283,17 @@ def build_btc_cycle_history(
     btc_weekly: pd.DataFrame,
     global_m2_cycle: pd.DataFrame,
     macro_weekly: pd.DataFrame,
-    projection_end: pd.Timestamp = BTC_DEFAULT_PROJECTION_END,
+    projection_end: pd.Timestamp | None = None,
+    global_liquidity_score: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Build weekly historical and phase-only projected BTC macro-cycle rows."""
+    """Build weekly history plus phase and Global M2 cycle projections."""
     observed = _normalize_price_history(btc_weekly)
     if observed.empty:
         return pd.DataFrame()
     last_observed = pd.Timestamp(observed["Date"].max()).normalize()
-    projection_end = pd.Timestamp(projection_end).normalize()
+    projection_end = pd.Timestamp(projection_end).normalize() if projection_end is not None else next_accumulation_pre_halving_start(last_observed)
 
-    future_dates = pd.date_range(last_observed + pd.Timedelta(days=1), projection_end, freq="W-FRI")
+    future_dates = pd.date_range(last_observed + pd.Timedelta(1, unit="D"), projection_end, freq="W-FRI")
     projected = pd.DataFrame({"Date": future_dates, "BTC_Price": np.nan})
     frame = pd.concat([observed, projected], ignore_index=True).sort_values("Date").reset_index(drop=True)
     frame["Projected"] = frame["Date"].gt(last_observed)
@@ -227,6 +301,27 @@ def build_btc_cycle_history(
     frame["US2Y"] = _asof_column(frame["Date"], macro_weekly, "Date", "BTC_US2Y", "US2Y")
     frame["RealYield"] = _asof_column(frame["Date"], macro_weekly, "Date", "BTC_RealYield", "RealYield")
     frame["GlobalM2PrimaryCycle"] = _asof_column(frame["Date"], global_m2_cycle, "Date", "PrimaryMarketCycle", "GlobalM2PrimaryCycle")
+    frame["GlobalLiquidityScore"] = _asof_column(
+        frame["Date"], global_liquidity_score, "date", "global_liquidity_score", "GlobalLiquidityScore"
+    )
+    frame["GlobalM2CycleProjected"] = False
+    if global_m2_cycle is not None and not global_m2_cycle.empty:
+        cycle_source = global_m2_cycle.copy()
+        date_column = "Date" if "Date" in cycle_source.columns else "date"
+        cycle_source["Date"] = pd.to_datetime(cycle_source[date_column], errors="coerce")
+        cycle_source["PrimaryMarketCycle"] = pd.to_numeric(cycle_source["PrimaryMarketCycle"], errors="coerce")
+        cycle_source = cycle_source[["Date", "PrimaryMarketCycle"]].dropna().sort_values("Date")
+        if not cycle_source.empty:
+            cycle_last_date = pd.Timestamp(cycle_source["Date"].iloc[-1]).normalize()
+            if cycle_last_date < last_observed:
+                latest_cycle_value = frame.loc[frame["Date"].eq(last_observed), "GlobalM2PrimaryCycle"].iloc[0]
+                cycle_source.loc[len(cycle_source)] = [last_observed, latest_cycle_value]
+            next_trough = liquidity_cycle_position(last_observed, last_observed)["next_trough"]
+            cycle_forecast_dates = frame["Date"].where(frame["Projected"])
+            cycle_forecast = _project_global_m2_cycle(cycle_source, cycle_forecast_dates, next_trough)
+            forecast_mask = cycle_forecast.notna()
+            frame.loc[forecast_mask, "GlobalM2PrimaryCycle"] = cycle_forecast.loc[forecast_mask]
+            frame.loc[forecast_mask, "GlobalM2CycleProjected"] = True
     _secondary_components(frame)
 
     halving_positions = [halving_cycle_position(value) for value in frame["Date"]]

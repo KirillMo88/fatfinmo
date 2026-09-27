@@ -9,13 +9,14 @@ import streamlit as st
 
 from btc_cycle import (
     BTC_CYCLE_HORIZONS,
-    BTC_DEFAULT_PROJECTION_END,
     BTC_LIQUIDITY_CYCLE_MONTHS,
+    BTC_RANGE_OPTIONS,
     BTC_PROJECTED_HALVING,
     HALVING_BASES,
     LIQUIDITY_MODIFIERS,
     SECONDARY_WEIGHTS,
     build_btc_cycle_history,
+    btc_cycle_time_range,
     btc_cycle_export_xlsx,
     btc_cycle_validation,
     liquidity_cycle_position,
@@ -50,10 +51,16 @@ def render_btc_cycle_tab(
     btc_weekly: pd.DataFrame,
     global_m2_cycle: pd.DataFrame,
     macro_weekly: pd.DataFrame,
+    global_liquidity_score: pd.DataFrame | None = None,
 ) -> None:
     st.subheader("BTC Cycle")
     st.caption("Halving cycle, Global M2 liquidity cycle, and macro conditions for BTC")
-    history = build_btc_cycle_history(btc_weekly, global_m2_cycle, macro_weekly)
+    history = build_btc_cycle_history(
+        btc_weekly,
+        global_m2_cycle,
+        macro_weekly,
+        global_liquidity_score=global_liquidity_score,
+    )
     if history.empty:
         st.warning("BTC Cycle inputs are unavailable.")
         return
@@ -64,18 +71,25 @@ def render_btc_cycle_tab(
 
     historical = history.loc[~history["Projected"].astype(bool)].copy()
     current = historical.iloc[-1]
+    time_range = st.radio(
+        "Time range",
+        BTC_RANGE_OPTIONS,
+        horizontal=True,
+        index=4,
+        key="btc_cycle_time_range",
+    )
     _render_score_cards(current)
     st.markdown("### BTC Macro Score Table")
     st.dataframe(_score_table(current), hide_index=True, use_container_width=True)
     _render_drivers(current)
 
     st.plotly_chart(
-        _build_btc_price_halving_figure(history),
+        _build_btc_price_halving_figure(history, time_range),
         use_container_width=True,
         config=BTC_CYCLE_PLOTLY_CONFIG,
     )
     st.plotly_chart(
-        _build_structural_cycles_figure(history),
+        _build_structural_cycles_figure(history, time_range),
         use_container_width=True,
         config=BTC_CYCLE_PLOTLY_CONFIG,
     )
@@ -87,7 +101,7 @@ def render_btc_cycle_tab(
         key="btc_cycle_macro_horizon",
     )
     st.plotly_chart(
-        _build_macro_score_figure(history, horizon),
+        _build_macro_score_figure(history, horizon, time_range),
         use_container_width=True,
         config=BTC_CYCLE_PLOTLY_CONFIG,
     )
@@ -181,12 +195,15 @@ def _driver_list(drivers: list[tuple[str, float, str]]) -> None:
         st.markdown(f"**{name}** · {detail} · {contribution:+.1f}")
 
 
-def _build_btc_price_halving_figure(history: pd.DataFrame) -> go.Figure:
-    observed = history.loc[~history["Projected"].astype(bool)].dropna(subset=["BTC_Price"]).copy()
+def _build_btc_price_halving_figure(history: pd.DataFrame, time_range: str = "MAX") -> go.Figure:
+    range_start, range_end, include_forecast = btc_cycle_time_range(history, time_range)
+    visible = history.loc[history["Date"].between(range_start, range_end)].copy()
+    if not include_forecast:
+        visible = visible.loc[~visible["Projected"].astype(bool)]
+    observed = visible.loc[~visible["Projected"].astype(bool)].dropna(subset=["BTC_Price"]).copy()
     latest_date = pd.Timestamp(observed["Date"].max())
-    projection_end = BTC_DEFAULT_PROJECTION_END
     fig = go.Figure()
-    _add_phase_bands(fig, history, "Current_Halving_Phase", BTC_CYCLE_COLORS, projection_end, opacity=0.12)
+    _add_phase_bands(fig, visible, "Current_Halving_Phase", BTC_CYCLE_COLORS, range_end, opacity=0.12)
     fig.add_trace(
         go.Scatter(
             x=observed["Date"],
@@ -198,52 +215,99 @@ def _build_btc_price_halving_figure(history: pd.DataFrame) -> go.Figure:
             hovertemplate="Date: %{x|%Y-%m-%d}<br>BTC: $%{y:,.0f}<br>Halving phase: %{customdata[0]}<br>Progress: %{customdata[1]:.1f}%<extra></extra>",
         )
     )
+    liquidity = observed.dropna(subset=["GlobalLiquidityScore"])
+    if not liquidity.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=liquidity["Date"],
+                y=liquidity["GlobalLiquidityScore"],
+                mode="lines",
+                name="Global Liquidity Score",
+                yaxis="y2",
+                line={"color": "#38bdf8", "width": 1.8},
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>Global Liquidity Score: %{y:.1f}<extra></extra>",
+            )
+        )
     for event in pd.DatetimeIndex(["2012-11-28", "2016-07-09", "2020-05-11", "2024-04-20"]):
         if event >= observed["Date"].min():
             fig.add_vline(x=event, line={"color": "#38bdf8", "width": 1, "dash": "dot"})
             fig.add_annotation(x=event, y=1, yref="paper", text=f"Halving {event.year}", showarrow=False, yanchor="bottom", font={"size": 9, "color": "#bae6fd"})
-    fig.add_vline(x=BTC_PROJECTED_HALVING, line={"color": "#a78bfa", "width": 1.5, "dash": "dash"})
-    fig.add_annotation(x=BTC_PROJECTED_HALVING, y=0.96, yref="paper", text="Projected Halving · Apr 2028", showarrow=False, yanchor="top", font={"size": 10, "color": "#ddd6fe"})
+    if range_start <= BTC_PROJECTED_HALVING <= range_end:
+        fig.add_vline(x=BTC_PROJECTED_HALVING, line={"color": "#a78bfa", "width": 1.5, "dash": "dash"})
+        fig.add_annotation(x=BTC_PROJECTED_HALVING, y=0.96, yref="paper", text="Projected Halving · Apr 2028", showarrow=False, yanchor="top", font={"size": 10, "color": "#ddd6fe"})
     _add_latest_marker(fig, latest_date)
     fig.update_yaxes(type="log", title="BTC USD")
-    fig.update_xaxes(range=[observed["Date"].min(), projection_end], tickformat="%Y")
+    if len(fig.data) > 1:
+        fig.update_layout(
+            yaxis2={
+                "title": "Global Liquidity Score",
+                "overlaying": "y",
+                "side": "right",
+                "range": [0, 100],
+                "showgrid": False,
+                "color": "#38bdf8",
+            },
+            margin={"l": 58, "r": 80, "t": 55, "b": 45},
+        )
+    fig.update_xaxes(range=[range_start, range_end], tickformat="%Y")
     return _style_btc_cycle_fig(fig, "BTC — Log Price & Halving Cycle", 440)
 
 
-def _build_structural_cycles_figure(history: pd.DataFrame) -> go.Figure:
-    observed = history.loc[~history["Projected"].astype(bool)].copy()
+def _build_structural_cycles_figure(history: pd.DataFrame, time_range: str = "MAX") -> go.Figure:
+    range_start, range_end, include_forecast = btc_cycle_time_range(history, time_range)
+    visible = history.loc[history["Date"].between(range_start, range_end)].copy()
+    if not include_forecast:
+        visible = visible.loc[~visible["Projected"].astype(bool)]
+    observed = visible.loc[~visible["Projected"].astype(bool)].copy()
     latest_date = pd.Timestamp(observed["Date"].max())
-    projection_end = BTC_DEFAULT_PROJECTION_END
     fig = go.Figure()
-    _add_phase_bands(fig, history, "Current_Halving_Phase", BTC_CYCLE_COLORS, projection_end, opacity=0.08)
-    projected = history.loc[history["Projected"].astype(bool)]
-    _add_phase_bands(fig, projected, "Current_Liquidity_Phase", LIQUIDITY_PHASE_COLORS, projection_end, opacity=0.22)
-    line = observed.dropna(subset=["GlobalM2PrimaryCycle"])
-    fig.add_trace(
-        go.Scatter(
-            x=line["Date"],
-            y=line["GlobalM2PrimaryCycle"],
-            mode="lines",
-            name="Global M2 Primary Liquidity Cycle",
-            line={"color": "#38bdf8", "width": 2.2},
-            hovertemplate="Date: %{x|%Y-%m}<br>Global M2 Primary Liquidity Cycle: %{y:.2f}<extra></extra>",
+    _add_phase_bands(fig, visible, "Current_Halving_Phase", BTC_CYCLE_COLORS, range_end, opacity=0.08)
+    projected_phases = visible.loc[visible["Projected"].astype(bool)]
+    if include_forecast:
+        _add_phase_bands(fig, projected_phases, "Current_Liquidity_Phase", LIQUIDITY_PHASE_COLORS, range_end, opacity=0.22)
+    line = visible.dropna(subset=["GlobalM2PrimaryCycle"])
+    actual_line = line.loc[~line["GlobalM2CycleProjected"].astype(bool)]
+    projected_line = line.loc[line["GlobalM2CycleProjected"].astype(bool)] if include_forecast else line.iloc[0:0]
+    if not actual_line.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=actual_line["Date"],
+                y=actual_line["GlobalM2PrimaryCycle"],
+                mode="lines",
+                name="Global M2 Primary Liquidity Cycle",
+                line={"color": "#38bdf8", "width": 2.2},
+                hovertemplate="Date: %{x|%Y-%m}<br>Global M2 Primary Liquidity Cycle: %{y:.2f}<extra></extra>",
+            )
         )
-    )
+    if not projected_line.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=projected_line["Date"],
+                y=projected_line["GlobalM2PrimaryCycle"],
+                mode="lines",
+                name="Projected Global M2 Cycle",
+                line={"color": "#38bdf8", "width": 2.2, "dash": "dash"},
+                hovertemplate="Date: %{x|%Y-%m}<br>Projected Global M2 Primary Liquidity Cycle: %{y:.2f}<extra></extra>",
+            )
+        )
     trough = liquidity_cycle_position(latest_date, latest_date)["next_trough"]
-    if pd.notna(trough) and latest_date < trough <= projection_end:
+    if include_forecast and pd.notna(trough) and latest_date < trough <= range_end:
         fig.add_vline(x=trough, line={"color": "#facc15", "width": 1.5, "dash": "dash"})
         fig.add_annotation(x=trough, y=0.98, yref="paper", text="Projected Liquidity Trough", showarrow=False, yanchor="top", font={"size": 10, "color": "#fde68a"})
     _add_latest_marker(fig, latest_date)
-    fig.add_annotation(x=latest_date + (projection_end - latest_date) / 2, y=0.05, yref="paper", text="PROJECTED PHASES", showarrow=False, font={"size": 10, "color": "#cbd5e1"})
+    if include_forecast:
+        fig.add_annotation(x=latest_date + (range_end - latest_date) / 2, y=0.05, yref="paper", text="PROJECTED CYCLE", showarrow=False, font={"size": 10, "color": "#cbd5e1"})
     fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1})
     fig.update_yaxes(title="Normalized Global M2 cycle")
-    fig.update_xaxes(range=[observed["Date"].min(), projection_end], tickformat="%Y")
+    fig.update_xaxes(range=[range_start, range_end], tickformat="%Y")
     return _style_btc_cycle_fig(fig, "BTC Structural Cycles — Halving vs Global M2 Liquidity", 390)
 
 
-def _build_macro_score_figure(history: pd.DataFrame, horizon: str) -> go.Figure:
-    historical = history.loc[~history["Projected"].astype(bool)].copy()
-    projected = history.loc[history["Projected"].astype(bool)].copy()
+def _build_macro_score_figure(history: pd.DataFrame, horizon: str, time_range: str = "MAX") -> go.Figure:
+    range_start, range_end, include_forecast = btc_cycle_time_range(history, time_range)
+    visible = history.loc[history["Date"].between(range_start, range_end)].copy()
+    historical = visible.loc[~visible["Projected"].astype(bool)].copy()
+    projected = visible.loc[visible["Projected"].astype(bool)].copy() if include_forecast else visible.iloc[0:0]
     score_column = f"BTC_MACRO_{horizon}"
     tooltip_columns = [
         "BTC_Price",
@@ -284,7 +348,7 @@ def _build_macro_score_figure(history: pd.DataFrame, horizon: str) -> go.Figure:
         )
     _add_latest_marker(fig, pd.Timestamp(historical["Date"].max()))
     fig.update_yaxes(range=[0, 100], title="Score")
-    fig.update_xaxes(range=[historical["Date"].min(), BTC_DEFAULT_PROJECTION_END], tickformat="%Y")
+    fig.update_xaxes(range=[range_start, range_end], tickformat="%Y")
     return _style_btc_cycle_fig(fig, "BTC Macro Score", 360)
 
 
