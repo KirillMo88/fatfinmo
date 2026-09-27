@@ -5,13 +5,17 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from btc_cycle import (
+    BTC_LIQUIDITY_CYCLE_MONTHS,
     BTC_PROJECTED_HALVING,
+    BTC_RANGE_OPTIONS,
     build_btc_cycle_history,
+    btc_cycle_time_range,
     btc_cycle_export_xlsx,
     btc_cycle_validation,
     halving_cycle_position,
     halving_phase,
     liquidity_cycle_position,
+    next_accumulation_pre_halving_start,
     point_in_time_percentile,
 )
 from btc_cycle_tab import _build_btc_price_halving_figure, _build_macro_score_figure, _build_structural_cycles_figure
@@ -45,8 +49,21 @@ def test_liquidity_phase_uses_only_troughs_known_at_signal_date():
 
     assert before_2019_anchor["anchor"] == pd.Timestamp("2015-03-06")
     assert after_2019_anchor["anchor"] == pd.Timestamp("2019-03-08")
-    assert forecast_before_2019_anchor["anchor"] == pd.Timestamp("2019-04-06")
+    assert forecast_before_2019_anchor["anchor"] == pd.Timestamp("2019-07-27")
     assert forecast_before_2019_anchor["anchor"] != pd.Timestamp("2019-03-08")
+
+
+def test_btc_next_cycle_range_runs_until_next_accumulation_pre_halving_phase():
+    btc, canonical_cycle, macro = _cycle_inputs()
+    history = build_btc_cycle_history(btc, canonical_cycle, macro)
+    latest = history.loc[~history["Projected"], "Date"].max()
+    start, end, include_forecast = btc_cycle_time_range(history, "Next Cycle")
+
+    assert BTC_RANGE_OPTIONS == ("1Y", "3Y", "5Y", "10Y", "MAX", "Next Cycle")
+    assert start == latest - pd.DateOffset(months=12)
+    assert end == next_accumulation_pre_halving_start(latest)
+    assert halving_cycle_position(end)["phase"] == "ACCUMULATION_PRE_HALVING"
+    assert include_forecast is True
 
 
 def test_secondary_percentile_is_trailing_and_point_in_time():
@@ -101,7 +118,21 @@ def test_btc_cycle_reconciles_scores_and_has_phase_only_projection():
         assert projected[f"SecondaryMacroModifier_{horizon}"].eq(0.0).all()
     assert projected["BTC_Price"].isna().all()
     assert projected["Historical_Projected_Flag"].eq("PROJECTED").all()
-    assert projected["Date"].max() <= pd.Timestamp("2028-04-30")
+    assert projected["Date"].max() <= next_accumulation_pre_halving_start(current["Date"])
+    assert BTC_LIQUIDITY_CYCLE_MONTHS == 52.7
+    assert projected["GlobalM2CycleProjected"].any()
+    assert projected.loc[projected["GlobalM2CycleProjected"], "Date"].min() > canonical_cycle["Date"].max()
+    projected_cycle = projected.loc[projected["GlobalM2CycleProjected"]]
+    next_trough = liquidity_cycle_position(current["Date"], current["Date"])["next_trough"]
+    closest_trough = projected_cycle.loc[(projected_cycle["Date"] - next_trough).abs().idxmin()]
+    assert abs((closest_trough["Date"] - next_trough).days) <= 4
+    trough_window = projected_cycle.loc[
+        projected_cycle["Date"].between(
+            next_trough - pd.Timedelta(45, unit="D"),
+            next_trough + pd.Timedelta(45, unit="D"),
+        )
+    ]
+    assert closest_trough["GlobalM2PrimaryCycle"] <= trough_window["GlobalM2PrimaryCycle"].min() + 0.02
 
 
 def test_btc_cycle_xlsx_contains_full_history_and_projected_rows():
@@ -120,16 +151,50 @@ def test_btc_cycle_xlsx_contains_full_history_and_projected_rows():
 
 def test_btc_cycle_charts_separate_observed_price_from_projected_scores():
     btc, canonical_cycle, macro = _cycle_inputs()
-    history = build_btc_cycle_history(btc, canonical_cycle, macro)
+    liquidity_score = pd.DataFrame(
+        {
+            "date": btc["date"],
+            "global_liquidity_score": np.linspace(20.0, 80.0, len(btc)),
+        }
+    )
+    history = build_btc_cycle_history(btc, canonical_cycle, macro, global_liquidity_score=liquidity_score)
     latest_observation = history.loc[~history["Projected"], "Date"].max()
 
-    price_fig = _build_btc_price_halving_figure(history)
-    liquidity_fig = _build_structural_cycles_figure(history)
-    score_fig = _build_macro_score_figure(history, "3M")
+    price_fig = _build_btc_price_halving_figure(history, "Next Cycle")
+    liquidity_fig = _build_structural_cycles_figure(history, "Next Cycle")
+    score_fig = _build_macro_score_figure(history, "3M", "Next Cycle")
 
     assert pd.to_datetime(price_fig.data[0].x).max() == latest_observation
-    assert price_fig.layout.xaxis.range[1] == pd.Timestamp("2028-04-30")
-    assert [trace.name for trace in liquidity_fig.data] == ["Global M2 Primary Liquidity Cycle"]
+    assert price_fig.layout.xaxis.range[1] == next_accumulation_pre_halving_start(latest_observation)
+    assert price_fig.data[1].name == "Global Liquidity Score"
+    assert price_fig.data[1].yaxis == "y2"
+    assert price_fig.layout.yaxis2.side == "right"
+    assert [trace.name for trace in liquidity_fig.data] == [
+        "Global M2 Primary Liquidity Cycle",
+        "Projected Global M2 Cycle",
+    ]
     assert len(score_fig.data) == 2
     assert score_fig.data[1].line.dash == "dash"
-    assert pd.to_datetime(score_fig.data[1].x).max() <= pd.Timestamp("2028-04-30")
+    assert pd.to_datetime(score_fig.data[1].x).max() <= next_accumulation_pre_halving_start(latest_observation)
+
+
+def test_standard_btc_ranges_exclude_forecasts_and_end_at_latest_observation():
+    btc, canonical_cycle, macro = _cycle_inputs()
+    liquidity_score = pd.DataFrame(
+        {
+            "date": btc["date"],
+            "global_liquidity_score": np.linspace(20.0, 80.0, len(btc)),
+        }
+    )
+    history = build_btc_cycle_history(btc, canonical_cycle, macro, global_liquidity_score=liquidity_score)
+    latest = history.loc[~history["Projected"], "Date"].max()
+
+    price_fig = _build_btc_price_halving_figure(history, "5Y")
+    cycle_fig = _build_structural_cycles_figure(history, "5Y")
+    score_fig = _build_macro_score_figure(history, "3M", "5Y")
+
+    assert price_fig.layout.xaxis.range[1] == latest
+    assert any(trace.name == "Global Liquidity Score" for trace in price_fig.data)
+    assert [trace.name for trace in cycle_fig.data] == ["Global M2 Primary Liquidity Cycle"]
+    assert len(score_fig.data) == 1
+    assert pd.to_datetime(score_fig.data[0].x).max() == latest

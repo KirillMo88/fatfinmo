@@ -7233,12 +7233,20 @@ def main():
     elif active_view == "BTC Cycle":
         btc_weekly = load_btc_weekly_price()
         try:
-            _, btc_monthly_m2, _ = read_global_liquidity()
+            _, btc_monthly_m2, btc_weekly_liquidity = read_global_liquidity()
+            btc_monthly_m2 = _liquidity_prepare_dates(btc_monthly_m2)
+            btc_weekly_liquidity = _liquidity_prepare_dates(btc_weekly_liquidity)
             btc_m2_cycle = build_global_m2_cycle_history(btc_monthly_m2)
+            btc_global_liquidity = _build_global_liquidity_regime_frame(
+                btc_monthly_m2,
+                btc_weekly_liquidity,
+            )
+            btc_global_liquidity = btc_global_liquidity[["date", "global_liquidity_score"]]
         except Exception:
             btc_m2_cycle = pd.DataFrame()
+            btc_global_liquidity = pd.DataFrame()
         btc_macro_history = load_market_transition_history("btc-cycle-shared-macro")
-        render_btc_cycle_tab(btc_weekly, btc_m2_cycle, btc_macro_history)
+        render_btc_cycle_tab(btc_weekly, btc_m2_cycle, btc_macro_history, btc_global_liquidity)
     elif active_view == "Crypto Derivatives":
         render_crypto_derivatives_tab()
     elif active_view == "Alpha Engine":
