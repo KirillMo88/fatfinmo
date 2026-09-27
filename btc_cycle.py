@@ -243,6 +243,40 @@ def _normalize_price_history(btc_weekly: pd.DataFrame) -> pd.DataFrame:
     return frame.dropna().sort_values("Date").drop_duplicates("Date", keep="last").reset_index(drop=True)
 
 
+def build_btc_gold_ratio_history(
+    btc_weekly: pd.DataFrame,
+    gold_weekly: pd.Series | pd.DataFrame,
+) -> pd.DataFrame:
+    """Align BTC observations to the latest available GOLD close and calculate ounces per BTC."""
+    btc = _normalize_price_history(btc_weekly)
+    if btc.empty or gold_weekly is None or len(gold_weekly) == 0:
+        return pd.DataFrame(columns=["Date", "BTC_Price", "Gold_Price", "BTC_GOLD_Ratio"])
+
+    if isinstance(gold_weekly, pd.Series):
+        gold = pd.DataFrame({"Date": gold_weekly.index, "Gold_Price": gold_weekly.to_numpy()})
+    else:
+        date_column = next((column for column in ("Date", "date") if column in gold_weekly.columns), None)
+        price_column = next((column for column in ("gold_price", "Gold_Price", "Close", "close") if column in gold_weekly.columns), None)
+        if price_column is None:
+            return pd.DataFrame(columns=["Date", "BTC_Price", "Gold_Price", "BTC_GOLD_Ratio"])
+        dates = gold_weekly[date_column] if date_column is not None else gold_weekly.index
+        gold = pd.DataFrame({"Date": dates, "Gold_Price": gold_weekly[price_column].to_numpy()})
+
+    dates = pd.to_datetime(gold["Date"], errors="coerce", utc=True).dt.tz_localize(None)
+    gold["Date"] = dates
+    gold["Gold_Price"] = pd.to_numeric(gold["Gold_Price"], errors="coerce")
+    gold = gold.replace([np.inf, -np.inf], np.nan).dropna()
+    gold = gold.loc[gold["Gold_Price"] > 0].sort_values("Date").drop_duplicates("Date", keep="last")
+    btc = btc.loc[btc["BTC_Price"] > 0].sort_values("Date")
+    if gold.empty or btc.empty:
+        return pd.DataFrame(columns=["Date", "BTC_Price", "Gold_Price", "BTC_GOLD_Ratio"])
+
+    aligned = pd.merge_asof(btc, gold, on="Date", direction="backward")
+    aligned = aligned.dropna(subset=["Gold_Price"])
+    aligned["BTC_GOLD_Ratio"] = aligned["BTC_Price"] / aligned["Gold_Price"]
+    return aligned.reset_index(drop=True)
+
+
 def build_btc_modular_cycle_forecast(
     btc_weekly: pd.DataFrame,
     target_peak: float,

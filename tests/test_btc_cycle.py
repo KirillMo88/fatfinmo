@@ -12,6 +12,7 @@ from btc_cycle import (
     BTC_MODULAR_HISTORICAL_MODULES,
     build_btc_modular_cycle_forecast,
     build_btc_cycle_history,
+    build_btc_gold_ratio_history,
     btc_cycle_time_range,
     btc_cycle_export_xlsx,
     btc_cycle_validation,
@@ -21,7 +22,12 @@ from btc_cycle import (
     next_accumulation_pre_halving_start,
     point_in_time_percentile,
 )
-from btc_cycle_tab import _build_btc_price_halving_figure, _build_macro_score_figure, _build_structural_cycles_figure
+from btc_cycle_tab import (
+    _build_btc_gold_ratio_figure,
+    _build_btc_price_halving_figure,
+    _build_macro_score_figure,
+    _build_structural_cycles_figure,
+)
 
 
 def test_halving_phases_follow_specified_progress_bands():
@@ -67,6 +73,43 @@ def test_btc_next_cycle_range_runs_until_next_accumulation_pre_halving_phase():
     assert end == next_accumulation_pre_halving_start(latest)
     assert halving_cycle_position(end)["phase"] == "ACCUMULATION_PRE_HALVING"
     assert include_forecast is True
+
+
+def test_btc_gold_ratio_uses_latest_gold_close_without_lookahead():
+    btc = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-12", "2024-01-19", "2024-01-26"]),
+            "Close": [42000.0, 43000.0, 44000.0],
+        }
+    )
+    gold = pd.Series(
+        [2000.0, 2050.0, 2100.0],
+        index=pd.to_datetime(["2024-01-10", "2024-01-17", "2024-01-24"]),
+        name="gold_price",
+    )
+
+    ratio = build_btc_gold_ratio_history(btc, gold)
+
+    assert ratio["Gold_Price"].tolist() == [2000.0, 2050.0, 2100.0]
+    np.testing.assert_allclose(ratio["BTC_GOLD_Ratio"], [21.0, 43000.0 / 2050.0, 44000.0 / 2100.0])
+
+
+def test_btc_gold_ratio_chart_obeys_shared_btc_time_range():
+    btc, canonical_cycle, macro = _cycle_inputs()
+    history = build_btc_cycle_history(btc, canonical_cycle, macro)
+    gold_dates = pd.to_datetime(btc["date"])
+    gold = pd.Series(np.linspace(1200.0, 2800.0, len(gold_dates)), index=gold_dates, name="gold_price")
+    ratio = build_btc_gold_ratio_history(btc, gold)
+    latest_observation = history.loc[~history["Projected"], "Date"].max()
+
+    for choice in ("1Y", "5Y", "Next Cycle"):
+        start, end, _ = btc_cycle_time_range(history, choice)
+        figure = _build_btc_gold_ratio_figure(history, ratio, choice)
+
+        assert figure.layout.xaxis.range == (start, end)
+        assert pd.to_datetime(figure.data[0].x).min() >= start
+        assert pd.to_datetime(figure.data[0].x).max() <= latest_observation
+        assert figure.data[0].name == "BTC / Gold"
 
 
 def test_secondary_percentile_is_trailing_and_point_in_time():
