@@ -20,6 +20,7 @@ from btc_cycle import (
     btc_cycle_time_range,
     btc_cycle_export_xlsx,
     btc_cycle_validation,
+    build_btc_modular_cycle_forecast,
     liquidity_cycle_position,
 )
 from btc_halving_price_forecast import (
@@ -90,10 +91,22 @@ def render_btc_cycle_tab(
     st.markdown("### BTC Macro Score Table")
     st.dataframe(_score_table(current), hide_index=True, use_container_width=True)
     _render_drivers(current)
-    _render_btc_halving_price_forecast()
+    halving_forecast = _render_btc_halving_price_forecast()
+    next_cycle_scenario = _render_next_cycle_controls()
+    scenario_targets = {
+        "Conservative": "BTC_CycleTop_Conservative",
+        "Base": "BTC_CycleTop_Base",
+        "Strong Liquidity": "BTC_CycleTop_StrongLiquidity",
+    }
+    next_cycle_forecast = build_btc_modular_cycle_forecast(
+        btc_weekly,
+        target_peak=halving_forecast[scenario_targets[next_cycle_scenario]],
+        scenario=next_cycle_scenario,
+    )
+    st.session_state["btc_next_cycle_forecast"] = next_cycle_forecast.copy()
 
     st.plotly_chart(
-        _build_btc_price_halving_figure(history, time_range),
+        _build_btc_price_halving_figure(history, time_range, next_cycle_forecast),
         use_container_width=True,
         config=BTC_CYCLE_PLOTLY_CONFIG,
     )
@@ -121,7 +134,7 @@ def render_btc_cycle_tab(
     _render_model_details(current)
     st.download_button(
         "Download BTC Cycle.xlsx",
-        data=btc_cycle_export_xlsx(history),
+        data=btc_cycle_export_xlsx(history, next_cycle_forecast),
         file_name="btc_cycle.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="btc_cycle_xlsx_download",
@@ -225,6 +238,29 @@ def _render_btc_halving_price_forecast() -> dict[str, Any]:
     _render_forecast_table(forecast_rows, height=275, highlight_metric="Average forecast")
     st.caption(_halving_forecast_summary(forecast))
     return forecast
+
+
+def _render_next_cycle_controls() -> str:
+    tooltip = (
+        "The Next Cycle model is based on the average log-price shape of two historical BTC modular cycles: "
+        "02 Nov 2018–25 Nov 2022 and 27 Sep 2022–26 Jun 2026. The historical shape is normalized and rescaled "
+        "so that the projected cycle peak equals the selected BTC Halving Price Forecast scenario target."
+    )
+    title, selector = st.columns([3, 1])
+    with title:
+        st.markdown(
+            '<h3 style="margin: 0.6rem 0 0.35rem; font-size: 1.15rem; font-weight: 700;">'
+            f'Next Cycle <span title="{html.escape(tooltip, quote=True)}" aria-label="Next Cycle methodology" '
+            'style="font-size: 0.8rem; color: #94a3b8; cursor: help;">ⓘ</span></h3>',
+            unsafe_allow_html=True,
+        )
+    with selector:
+        return st.selectbox(
+            "Forecast scenario",
+            ["Conservative", "Base", "Strong Liquidity"],
+            index=1,
+            key="btc_next_cycle_scenario",
+        )
 
 
 def _render_forecast_table(
@@ -363,8 +399,15 @@ def _driver_list(drivers: list[tuple[str, float, str]]) -> None:
         st.markdown(f"**{name}** · {detail} · {contribution:+.1f}")
 
 
-def _build_btc_price_halving_figure(history: pd.DataFrame, time_range: str = "MAX") -> go.Figure:
+def _build_btc_price_halving_figure(
+    history: pd.DataFrame,
+    time_range: str = "MAX",
+    next_cycle_forecast: pd.DataFrame | None = None,
+) -> go.Figure:
     range_start, range_end, include_forecast = btc_cycle_time_range(history, time_range)
+    show_next_cycle = include_forecast and next_cycle_forecast is not None and not next_cycle_forecast.empty
+    if show_next_cycle:
+        range_end = pd.Timestamp(next_cycle_forecast["NextCycle_EndDate"].iloc[0])
     visible = history.loc[history["Date"].between(range_start, range_end)].copy()
     if not include_forecast:
         visible = visible.loc[~visible["Projected"].astype(bool)]
@@ -377,7 +420,7 @@ def _build_btc_price_halving_figure(history: pd.DataFrame, time_range: str = "MA
             x=observed["Date"],
             y=observed["BTC_Price"],
             mode="lines",
-            name="BTC",
+            name="BTC Actual",
             line={"color": "#f7931a", "width": 2.0},
             customdata=observed[["Current_Halving_Phase", "Current_Halving_Progress"]].to_numpy(),
             hovertemplate="Date: %{x|%Y-%m-%d}<br>BTC: $%{y:,.0f}<br>Halving phase: %{customdata[0]}<br>Progress: %{customdata[1]:.1f}%<extra></extra>",
@@ -396,6 +439,86 @@ def _build_btc_price_halving_figure(history: pd.DataFrame, time_range: str = "MA
                 hovertemplate="Date: %{x|%Y-%m-%d}<br>Global Liquidity Score: %{y:.1f}<extra></extra>",
             )
         )
+    if show_next_cycle:
+        model = next_cycle_forecast.copy()
+        scenario = str(model["NextCycle_Scenario"].iloc[0])
+        peak_date = pd.Timestamp(model["NextCycle_PeakDate"].iloc[0])
+        peak_price = float(model["NextCycle_PeakPrice"].iloc[0])
+        end_date = pd.Timestamp(model["NextCycle_EndDate"].iloc[0])
+        fig.add_vrect(
+            x0=latest_date,
+            x1=end_date,
+            fillcolor="#94a3b8",
+            opacity=0.045,
+            line_width=0,
+            layer="below",
+        )
+        model_tooltip_columns = [
+            "NextCycle_ProgressPct",
+            "HalvingPhase",
+            "DistanceToProjectedHalvingDays",
+            "DistanceToModelCycleTopDays",
+            "HistoricalProjectedFlag",
+            "ProgressSince2028HalvingTooltip",
+        ]
+        fig.add_trace(
+            go.Scatter(
+                x=model["Date"],
+                y=model["NextCycle_ModelPrice"],
+                mode="lines",
+                name=f"Next Cycle Model — {scenario}",
+                opacity=0.88,
+                line={"color": "#38bdf8", "width": 2.2, "dash": "dash"},
+                customdata=model[model_tooltip_columns].to_numpy(),
+                hovertemplate=(
+                    "Date: %{x|%Y-%m-%d}<br>Model BTC Price: $%{y:,.0f}<br>"
+                    "Model Cycle Progress: %{customdata[0]:.1f}%<br>Halving Cycle Phase: %{customdata[1]}<br>"
+                    "Distance to Projected Halving: %{customdata[2]:.0f} days<br>"
+                    "Distance to Model Cycle Top: %{customdata[3]:.0f} days<br>"
+                    "Historical / Projected: %{customdata[4]}<br>"
+                    "Progress since 2028 Halving: %{customdata[5]}<extra></extra>"
+                ),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[peak_date],
+                y=[peak_price],
+                mode="markers",
+                name="Model Cycle Top",
+                marker={"color": "#facc15", "size": 9, "line": {"color": "#0f131a", "width": 1}},
+                hovertemplate="Model Cycle Top: %{x|%d %b %Y}<br>Price: $%{y:,.0f}<extra></extra>",
+            )
+        )
+        fig.add_annotation(
+            x=peak_date,
+            y=peak_price,
+            text=f"Model Cycle Top<br>{peak_date:%d %b %Y} · ${peak_price:,.0f}",
+            showarrow=True,
+            arrowhead=2,
+            ax=0,
+            ay=-38,
+            font={"size": 9, "color": "#fde68a"},
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[end_date],
+                y=[float(model["NextCycle_ModelPrice"].iloc[-1])],
+                mode="markers",
+                name="Next Modular Cycle End",
+                marker={"color": "#cbd5e1", "size": 7, "symbol": "diamond"},
+                hovertemplate="Next Modular Cycle End: %{x|%d %b %Y}<br>Model price: $%{y:,.0f}<extra></extra>",
+            )
+        )
+        fig.add_annotation(
+            x=end_date,
+            y=0.99,
+            yref="paper",
+            text="PROJECTED",
+            showarrow=False,
+            xanchor="right",
+            font={"size": 9, "color": "#cbd5e1"},
+        )
     for event in pd.DatetimeIndex(["2012-11-28", "2016-07-09", "2020-05-11", "2024-04-20"]):
         if event >= observed["Date"].min():
             fig.add_vline(x=event, line={"color": "#38bdf8", "width": 1, "dash": "dot"})
@@ -403,6 +526,25 @@ def _build_btc_price_halving_figure(history: pd.DataFrame, time_range: str = "MA
     if range_start <= BTC_PROJECTED_HALVING <= range_end:
         fig.add_vline(x=BTC_PROJECTED_HALVING, line={"color": "#a78bfa", "width": 1.5, "dash": "dash"})
         fig.add_annotation(x=BTC_PROJECTED_HALVING, y=0.96, yref="paper", text="Projected Halving · Apr 2028", showarrow=False, yanchor="top", font={"size": 10, "color": "#ddd6fe"})
+        if show_next_cycle:
+            model_dates = pd.to_datetime(next_cycle_forecast["Date"])
+            log_price_at_halving = np.interp(
+                BTC_PROJECTED_HALVING.value,
+                model_dates.astype("int64").to_numpy(),
+                np.log(pd.to_numeric(next_cycle_forecast["NextCycle_ModelPrice"], errors="coerce").to_numpy()),
+            )
+            model_price_at_halving = float(np.exp(log_price_at_halving))
+            fig.add_trace(
+                go.Scatter(
+                    x=[BTC_PROJECTED_HALVING],
+                    y=[model_price_at_halving],
+                    mode="markers",
+                    name="Model Price at Halving",
+                    showlegend=False,
+                    marker={"color": "#c4b5fd", "size": 7, "symbol": "diamond"},
+                    hovertemplate="Projected Halving · Apr 2028<br>Model BTC Price: $%{y:,.0f}<extra></extra>",
+                )
+            )
     _add_latest_marker(fig, latest_date)
     fig.update_yaxes(type="log", title="BTC USD")
     if len(fig.data) > 1:

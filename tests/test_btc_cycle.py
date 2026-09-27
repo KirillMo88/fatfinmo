@@ -8,6 +8,9 @@ from btc_cycle import (
     BTC_LIQUIDITY_CYCLE_MONTHS,
     BTC_PROJECTED_HALVING,
     BTC_RANGE_OPTIONS,
+    BTC_MODULAR_CYCLE_START,
+    BTC_MODULAR_HISTORICAL_MODULES,
+    build_btc_modular_cycle_forecast,
     build_btc_cycle_history,
     btc_cycle_time_range,
     btc_cycle_export_xlsx,
@@ -147,6 +150,102 @@ def test_btc_cycle_xlsx_contains_full_history_and_projected_rows():
     assert "BTC_MACRO_3M" in headers
     assert "Historical_Projected_Flag" in headers
     assert sheet.max_row == len(history) + 1
+
+
+def test_modular_cycle_forecast_uses_two_historical_modules_and_canonical_start_price():
+    btc, _, _ = _cycle_inputs()
+    target = 262_469.205
+
+    forecast = build_btc_modular_cycle_forecast(btc, target, "Base")
+    source_dates = pd.to_datetime(btc["date"])
+    nearest_start = (source_dates - BTC_MODULAR_CYCLE_START).abs().idxmin()
+    expected_duration = np.mean(
+        [
+            (
+                source_dates.iloc[(source_dates - end).abs().argmin()]
+                - source_dates.iloc[(source_dates - start).abs().argmin()]
+            ).days
+            / 7
+            for start, end in BTC_MODULAR_HISTORICAL_MODULES
+        ]
+    )
+
+    assert forecast["Date"].iloc[0] == BTC_MODULAR_CYCLE_START
+    assert np.isclose(forecast["NextCycle_StartPrice"].iloc[0], btc.loc[nearest_start, "Close"])
+    assert np.isclose(forecast["NextCycle_DurationWeeks"].iloc[0], expected_duration)
+    assert np.isclose(expected_duration, 203.5)
+    assert forecast["Date"].iloc[-1] == forecast["NextCycle_EndDate"].iloc[0]
+    assert np.isclose(forecast["NextCycle_ProgressPct"].iloc[0], 0.0)
+    assert np.isclose(forecast["NextCycle_ProgressPct"].iloc[-1], 100.0)
+    assert np.isclose(forecast["NextCycle_ModelPrice"].max(), target, rtol=0, atol=1e-7)
+    assert forecast["NextCycle_PeakDate"].nunique() == 1
+    assert forecast["NextCycle_HistoricalModule1_Start"].iloc[0] == pd.Timestamp("2018-11-02")
+    assert forecast["NextCycle_HistoricalModule1_End"].iloc[0] == pd.Timestamp("2022-11-25")
+    assert forecast["NextCycle_HistoricalModule2_Start"].iloc[0] == pd.Timestamp("2022-09-27")
+    assert forecast["NextCycle_HistoricalModule2_End"].iloc[0] == pd.Timestamp("2026-06-26")
+    assert forecast["ProjectedFlag"].all()
+
+
+def test_modular_cycle_target_change_rescales_amplitude_without_changing_timing():
+    btc, _, _ = _cycle_inputs()
+    base = build_btc_modular_cycle_forecast(btc, 262_469.205, "Base")
+    strong = build_btc_modular_cycle_forecast(btc, 310_000, "Strong Liquidity")
+
+    assert base["Date"].equals(strong["Date"])
+    assert np.allclose(base["NextCycle_ProgressPct"], strong["NextCycle_ProgressPct"])
+    assert base["NextCycle_PeakDate"].iloc[0] == strong["NextCycle_PeakDate"].iloc[0]
+    base_shape = np.log(base["NextCycle_ModelPrice"] / base["NextCycle_StartPrice"]) / np.log(
+        base["NextCycle_TargetPeak"] / base["NextCycle_StartPrice"]
+    )
+    strong_shape = np.log(strong["NextCycle_ModelPrice"] / strong["NextCycle_StartPrice"]) / np.log(
+        strong["NextCycle_TargetPeak"] / strong["NextCycle_StartPrice"]
+    )
+    assert np.allclose(base_shape, strong_shape)
+
+
+def test_next_cycle_chart_overlays_dashed_model_and_extends_only_price_chart():
+    btc, canonical_cycle, macro = _cycle_inputs()
+    history = build_btc_cycle_history(btc, canonical_cycle, macro)
+    target = 262_469.205
+    forecast = build_btc_modular_cycle_forecast(btc, target, "Base")
+    latest = history.loc[~history["Projected"], "Date"].max()
+
+    next_cycle_fig = _build_btc_price_halving_figure(history, "Next Cycle", forecast)
+    standard_fig = _build_btc_price_halving_figure(history, "5Y", forecast)
+
+    assert next_cycle_fig.layout.xaxis.range[1] == forecast["NextCycle_EndDate"].iloc[0]
+    assert pd.to_datetime(next_cycle_fig.data[0].x).max() == latest
+    model_trace = next(trace for trace in next_cycle_fig.data if trace.name == "Next Cycle Model — Base")
+    assert model_trace.line.dash == "dash"
+    assert pd.to_datetime(model_trace.x).min() == BTC_MODULAR_CYCLE_START
+    assert pd.to_datetime(model_trace.x).max() == forecast["NextCycle_EndDate"].iloc[0]
+    assert np.isclose(max(model_trace.y), target, rtol=0, atol=1e-7)
+    assert standard_fig.layout.xaxis.range[1] == latest
+    assert not any("Next Cycle Model" in str(trace.name) for trace in standard_fig.data)
+
+
+def test_btc_cycle_export_adds_weekly_next_cycle_forecast_sheet():
+    btc, canonical_cycle, macro = _cycle_inputs()
+    history = build_btc_cycle_history(btc, canonical_cycle, macro)
+    forecast = build_btc_modular_cycle_forecast(btc, 262_469.205, "Base")
+    workbook = load_workbook(BytesIO(btc_cycle_export_xlsx(history, forecast)), read_only=True)
+
+    assert workbook.sheetnames == ["BTC Cycle", "Next Cycle Forecast"]
+    sheet = workbook["Next Cycle Forecast"]
+    headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
+    assert {
+        "Date",
+        "NextCycle_ModelPrice",
+        "NextCycle_ModelMultiple",
+        "NextCycle_ProgressPct",
+        "NextCycle_TargetPeak",
+        "NextCycle_Scenario",
+        "NextCycle_PeakDate",
+        "NextCycle_EndDate",
+        "HalvingPhase",
+        "ProjectedFlag",
+    }.issubset(headers)
+    assert sheet.max_row == len(forecast) + 1
 
 
 def test_btc_cycle_charts_separate_observed_price_from_projected_scores():
