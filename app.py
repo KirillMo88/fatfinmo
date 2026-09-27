@@ -7246,7 +7246,14 @@ def main():
             btc_m2_cycle = pd.DataFrame()
             btc_global_liquidity = pd.DataFrame()
         btc_macro_history = load_market_transition_history("btc-cycle-shared-macro")
-        render_btc_cycle_tab(btc_weekly, btc_m2_cycle, btc_macro_history, btc_global_liquidity)
+        btc_etf_flow_history = _btc_etf_flow_history()
+        render_btc_cycle_tab(
+            btc_weekly,
+            btc_m2_cycle,
+            btc_macro_history,
+            btc_global_liquidity,
+            btc_etf_flow_history,
+        )
     elif active_view == "Crypto Derivatives":
         render_crypto_derivatives_tab()
     elif active_view == "Alpha Engine":

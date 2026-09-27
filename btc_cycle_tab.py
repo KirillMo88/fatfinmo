@@ -62,6 +62,7 @@ def render_btc_cycle_tab(
     global_m2_cycle: pd.DataFrame,
     macro_weekly: pd.DataFrame,
     global_liquidity_score: pd.DataFrame | None = None,
+    btc_etf_flow_history: pd.DataFrame | None = None,
 ) -> None:
     st.subheader("BTC Cycle")
     st.caption("Halving cycle, Global M2 liquidity cycle, and macro conditions for BTC")
@@ -137,6 +138,15 @@ def render_btc_cycle_tab(
     )
     if btc_gold_ratio.empty:
         st.caption("BTC/Gold ratio is unavailable because aligned BTC and GOLD observations were not returned.")
+    etf_flow_figure = _build_btc_etf_flow_intensity_figure(history, btc_etf_flow_history, time_range)
+    if etf_flow_figure.data:
+        st.plotly_chart(
+            etf_flow_figure,
+            use_container_width=True,
+            config=BTC_CYCLE_PLOTLY_CONFIG,
+        )
+    else:
+        st.info("No BTC ETF flow history for the selected time range.")
     _render_btc_halving_price_forecast()
     _render_halving_diagnostic(current)
     _render_liquidity_diagnostic(current)
@@ -720,6 +730,77 @@ def _build_btc_gold_ratio_figure(
     fig.update_yaxes(title="Gold oz per BTC")
     fig.update_xaxes(range=[range_start, range_end], tickformat="%Y")
     return _style_btc_cycle_fig(fig, "BTC / Gold", 340)
+
+
+def _build_btc_etf_flow_intensity_figure(
+    history: pd.DataFrame,
+    flow_history: pd.DataFrame | None,
+    time_range: str = "MAX",
+) -> go.Figure:
+    range_start, range_end, _ = btc_cycle_time_range(history, time_range)
+    required = {"date", "ETF_Flow_Intensity_4W", "ETF_Flow_3Y_Pctl"}
+    data = pd.DataFrame(columns=sorted(required))
+    if flow_history is not None and not flow_history.empty and required.issubset(flow_history.columns):
+        data = flow_history.loc[:, ["date", "ETF_Flow_Intensity_4W", "ETF_Flow_3Y_Pctl"]].copy()
+        data["date"] = pd.to_datetime(data["date"], errors="coerce", utc=True).dt.tz_localize(None)
+        for column in ("ETF_Flow_Intensity_4W", "ETF_Flow_3Y_Pctl"):
+            data[column] = pd.to_numeric(data[column], errors="coerce")
+        data = data.dropna(subset=["date"]).loc[lambda frame: frame["date"].between(range_start, range_end)]
+        data = data.sort_values("date")
+
+    fig = go.Figure()
+    if not data.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=data["date"],
+                y=data["ETF_Flow_Intensity_4W"],
+                mode="lines",
+                name="4W Flow Intensity",
+                line={"color": "#22d3ee", "width": 1.8},
+                hovertemplate="Week: %{x|%Y-%m-%d}<br>4W Flow Intensity: %{y:.2f}<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=data["date"],
+                y=data["ETF_Flow_3Y_Pctl"],
+                mode="lines",
+                name="3Y Percentile",
+                yaxis="y2",
+                line={"color": "#facc15", "width": 1.8, "dash": "dash"},
+                hovertemplate="Week: %{x|%Y-%m-%d}<br>3Y Percentile: %{y:.0f}<extra></extra>",
+            )
+        )
+        fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1})
+
+    fig.update_xaxes(range=[range_start, range_end], tickformat="%Y")
+    fig.update_yaxes(title="4W Flow Intensity, normalized")
+    fig = _style_btc_cycle_fig(fig, "BTC ETF Fund Flows - 4W Flow Intensity and Trailing 3Y Percentile", 320)
+    fig.update_layout(
+        yaxis2={
+            "title": "Trailing 3Y Percentile",
+            "overlaying": "y",
+            "side": "right",
+            "range": [0, 100],
+            "showgrid": False,
+            "color": "#cbd5e1",
+            "linecolor": "#475569",
+        },
+        margin={"l": 58, "r": 82, "t": 62, "b": 45},
+    )
+    if not data.empty:
+        latest_date = pd.Timestamp(data["date"].max())
+        fig.add_annotation(
+            text=f"Last Updated: {latest_date:%Y-%m-%d} - CURRENT",
+            xref="paper",
+            yref="paper",
+            x=0,
+            y=1.12,
+            showarrow=False,
+            font={"color": "#cbd5e1", "size": 10},
+            xanchor="left",
+        )
+    return fig
 
 
 def _score_hover_template(horizon: str) -> str:
