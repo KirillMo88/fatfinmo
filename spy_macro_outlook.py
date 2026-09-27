@@ -510,17 +510,29 @@ def build_model_details(outlook: SPYMacroOutlook, horizon: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_spy_macro_workbook(market_cycle_history: pd.DataFrame, outlook: SPYMacroOutlook) -> bytes:
+def build_spy_macro_workbook(
+    market_cycle_history: pd.DataFrame,
+    outlook: SPYMacroOutlook | None,
+    seasonality_weekly: pd.DataFrame | None = None,
+    seasonality_monthly: pd.DataFrame | None = None,
+) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         market_cycle_history.to_excel(writer, index=False, sheet_name="Market Cycle")
-        outlook.history.to_excel(writer, index=False, sheet_name="SPY Macro")
-        outlook.data_quality.to_excel(writer, index=False, sheet_name="SPY Macro Quality")
         sheet_frames = {
             "Market Cycle": market_cycle_history,
-            "SPY Macro": outlook.history,
-            "SPY Macro Quality": outlook.data_quality,
         }
+        if outlook is not None:
+            outlook.history.to_excel(writer, index=False, sheet_name="SPY Macro")
+            outlook.data_quality.to_excel(writer, index=False, sheet_name="SPY Macro Quality")
+            sheet_frames["SPY Macro"] = outlook.history
+            sheet_frames["SPY Macro Quality"] = outlook.data_quality
+        if seasonality_weekly is not None:
+            seasonality_weekly.to_excel(writer, index=False, sheet_name="SPX Seasonality Weekly")
+            sheet_frames["SPX Seasonality Weekly"] = seasonality_weekly
+        if seasonality_monthly is not None:
+            seasonality_monthly.to_excel(writer, index=False, sheet_name="SPX Seasonality Monthly")
+            sheet_frames["SPX Seasonality Monthly"] = seasonality_monthly
         for sheet_name, sheet_frame in sheet_frames.items():
             worksheet = writer.sheets[sheet_name]
             worksheet.freeze_panes(1, 0)
