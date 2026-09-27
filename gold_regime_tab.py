@@ -266,16 +266,22 @@ def gold_macro2_summary_metrics(snapshot: Any, as_of: Any) -> list[tuple[str, st
 
 
 def render_metric(label: str, value: str, detail: str) -> None:
-    st.markdown(
-        f"""
-<div style="padding: 0.75rem 0; line-height: 1.15;">
-  <div style="font-size: 0.72rem; color: #94a3b8; font-weight: 700;">{html.escape(label)}</div>
-  <div style="font-size: 1.0rem; color: #f8fafc; font-weight: 800;">{html.escape(value)}</div>
-  <div style="font-size: 0.72rem; color: #cbd5e1;">{html.escape(detail)}</div>
-</div>
-""",
-        unsafe_allow_html=True,
+    st.markdown(summary_metric_markup(label, value, detail), unsafe_allow_html=True)
+
+
+def summary_metric_markup(label: str, value: str, detail: str) -> str:
+    detail_html = (
+        f'<div style="grid-column: 1 / -1; font-size: 0.72rem; color: #cbd5e1;">{html.escape(detail)}</div>'
+        if detail
+        else ""
     )
+    return f"""
+<div style="display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; column-gap: 0.5rem; padding: 0.35rem 0; line-height: 1.15;">
+  <div style="min-width: 0; font-size: 0.72rem; color: #94a3b8; font-weight: 700;">{html.escape(label)}</div>
+  <div style="min-width: 0; max-width: 60%; text-align: right; overflow-wrap: anywhere; font-size: 1.0rem; color: #f8fafc; font-weight: 800;">{html.escape(value)}</div>
+  {detail_html}
+</div>
+"""
 
 
 def render_gold_history_chart(snapshot: Any, selected_range: str, structural_macro2: Any = None) -> None:

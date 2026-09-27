@@ -20,11 +20,25 @@ from gold_regime_tab import (
     history_metric_change,
     latest_gold_cycle_summary,
     prepare_gold_liquidity_cycle_comparison,
+    summary_metric_markup,
 )
 
 
 def weekly(values):
     return pd.Series(values, index=pd.date_range("2020-01-03", periods=len(values), freq="W-FRI"))
+
+
+def test_gold_summary_metric_values_are_aligned_to_the_right_of_labels():
+    markup = summary_metric_markup("ROC 3M", "4.8%", "")
+
+    assert "grid-template-columns: minmax(0, 1fr) auto" in markup
+    assert "text-align: right" in markup
+    assert markup.index("ROC 3M") < markup.index("4.8%")
+    assert "grid-column: 1 / -1" not in markup
+
+    detailed_markup = summary_metric_markup("Structural Macro", "6.7", "4W change -36.0")
+    assert "text-align: right" in detailed_markup
+    assert "4W change -36.0" in detailed_markup
 
 
 def test_gold_liquidity_cycle_comparison_aligns_monthly_history_and_range():
