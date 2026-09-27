@@ -11,6 +11,13 @@ from plotly.subplots import make_subplots
 
 from current_risk import classify_component_state, current_risk_new_event
 from market_cycle import MarketCycleSnapshot, build_market_cycle_snapshot
+from spx_seasonality import (
+    MONTH_LABELS,
+    SPXSeasonality,
+    calculate_spx_seasonality,
+    monthly_closes_from_daily,
+    weekly_closes_from_daily,
+)
 from spy_macro_outlook import (
     SPY_MACRO_HORIZONS,
     SPY_MACRO_RANGE_OPTIONS,
@@ -188,6 +195,25 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
         st.plotly_chart(apply_common_x_range(build_momentum_cycle_fig(momentum_history), range_start, range_end), use_container_width=True, config=MARKET_CYCLE_PLOTLY_CONFIG)
     with medium_col_2:
         st.plotly_chart(apply_common_x_range(build_sma200w_extension_fig(momentum_history), range_start, range_end), use_container_width=True, config=MARKET_CYCLE_PLOTLY_CONFIG)
+
+    latest_spx_observation = snapshot.daily.index.max() if not snapshot.daily.empty else history["Date"].max()
+    try:
+        seasonality_weekly = weekly_closes_from_daily(snapshot.daily)
+        if seasonality_weekly.empty:
+            seasonality_weekly = history[["Date", "SPX_Close"]]
+        seasonality_monthly = monthly_closes_from_daily(snapshot.daily)
+        if seasonality_monthly.empty:
+            seasonality_monthly = snapshot.monthly[["Date", "SPX_Close"]]
+        spx_seasonality = calculate_spx_seasonality(
+            seasonality_weekly,
+            seasonality_monthly,
+            latest_spx_observation,
+        )
+    except Exception as exc:
+        spx_seasonality = None
+        st.warning(f"SPX Seasonality is temporarily unavailable: {exc}")
+    if spx_seasonality is not None:
+        render_spx_seasonality(spx_seasonality, history, spy_macro_outlook)
 
     if spy_macro_outlook is not None:
         render_spy_macro_outlook(spy_macro_outlook, history)
@@ -3115,7 +3141,193 @@ def render_spy_macro_outlook(outlook: SPYMacroOutlook, market_cycle_history: pd.
             details[numeric_column] = pd.to_numeric(details[numeric_column], errors="coerce")
         st.dataframe(details.style.format({"Raw Value": "{:.3f}", "Level Percentile": "{:.1f}", "Direction Percentile": "{:.1f}", "Factor Score": "{:.1f}", "Weight": "{:.2f}", "Contribution": "{:.1f}"}, na_rep="N/A"), use_container_width=True, hide_index=True)
         st.dataframe(outlook.data_quality, use_container_width=True, hide_index=True)
-    st.download_button("Export Market Cycle Workbook", data=build_spy_macro_workbook(market_cycle_history, outlook), file_name="market_cycle_with_spy_macro.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def render_spx_seasonality(
+    seasonality: SPXSeasonality,
+    market_cycle_history: pd.DataFrame,
+    spy_macro_outlook: SPYMacroOutlook | None = None,
+) -> None:
+    metadata = seasonality.metadata
+    st.markdown("### SPX Seasonality")
+    if metadata.get("Status") != "OK":
+        st.info("SPX seasonality requires weekly observations from 2010 onward.")
+        return
+
+    start_year = metadata["Historical Start Year"]
+    end_year = metadata["Historical End Year"]
+    current_year = metadata["Current Year"]
+    st.caption(f"Historical model: {start_year}–{end_year} · Current year: {current_year}")
+    st.plotly_chart(
+        build_spx_annual_seasonality_fig(seasonality),
+        use_container_width=True,
+        config=MARKET_CYCLE_PLOTLY_CONFIG,
+    )
+    st.plotly_chart(
+        build_spx_monthly_seasonality_fig(seasonality.monthly_statistics, "Median Monthly Performance", "Median Monthly Return"),
+        use_container_width=True,
+        config=MARKET_CYCLE_PLOTLY_CONFIG,
+    )
+    st.plotly_chart(
+        build_spx_monthly_seasonality_fig(seasonality.monthly_statistics, "Average Monthly Performance", "Average Monthly Return"),
+        use_container_width=True,
+        config=MARKET_CYCLE_PLOTLY_CONFIG,
+    )
+    st.caption(
+        "SPX Annual Seasonality is calculated from completed calendar years only. The Mean and Median seasonal cycles "
+        "compound the cross-sectional mean and median weekly returns respectively. Monthly seasonality uses calendar "
+        "month-end close-to-close SPX returns. The current partial calendar year is excluded from historical statistics."
+    )
+    st.caption(
+        f"Historical sample: {start_year}–{end_year} · Number of completed years: {metadata['Number of Historical Years']} · "
+        f"Current year: {current_year} · Latest observation: {pd.Timestamp(metadata['Latest Observation']).date()}"
+    )
+    workbook = build_spy_macro_workbook(
+        market_cycle_history,
+        spy_macro_outlook,
+        seasonality_weekly=seasonality.weekly_model,
+        seasonality_monthly=seasonality.monthly_statistics,
+    )
+    st.download_button(
+        "Export Market Cycle Workbook",
+        data=workbook,
+        file_name="market_cycle_with_spy_macro.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+def build_spx_annual_seasonality_fig(seasonality: SPXSeasonality) -> go.Figure:
+    weekly = seasonality.weekly_model
+    actual = seasonality.current_year_actual
+    fig = go.Figure()
+    positions = weekly["Model Position"]
+    custom = list(
+        zip(
+            weekly["Approx Month"].astype(str),
+            weekly["Mean Cycle"],
+            weekly["Median Cycle"],
+            weekly["P25 Level"],
+            weekly["P75 Level"],
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=positions,
+            y=weekly["P25 Level"],
+            mode="lines",
+            name="P25",
+            line={"color": "rgba(56,189,248,0)", "width": 0},
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=positions,
+            y=weekly["P75 Level"],
+            mode="lines",
+            name="25–75% Historical Range",
+            line={"color": "rgba(56,189,248,0.15)", "width": 0},
+            fill="tonexty",
+            fillcolor="rgba(56,189,248,0.14)",
+            customdata=custom,
+            hovertemplate=(
+                "Model week: %{x:.0f} (%{customdata[0]})<br>Mean Cycle: %{customdata[1]:.2f}"
+                "<br>Median Cycle: %{customdata[2]:.2f}<br>P25: %{customdata[3]:.2f}"
+                "<br>P75: %{customdata[4]:.2f}<extra></extra>"
+            ),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=positions,
+            y=weekly["Mean Cycle"],
+            mode="lines",
+            name="Mean Seasonal Cycle",
+            line={"color": "#38bdf8", "width": 2.0},
+            customdata=custom,
+            hovertemplate=(
+                "Model week: %{x:.0f} (%{customdata[0]})<br>Mean Cycle: %{customdata[1]:.2f}"
+                "<br>Median Cycle: %{customdata[2]:.2f}<br>P25: %{customdata[3]:.2f}"
+                "<br>P75: %{customdata[4]:.2f}<extra></extra>"
+            ),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=positions,
+            y=weekly["Median Cycle"],
+            mode="lines",
+            name="Median Seasonal Cycle",
+            line={"color": "#facc15", "width": 2.0},
+            customdata=custom,
+            hovertemplate=(
+                "Model week: %{x:.0f} (%{customdata[0]})<br>Mean Cycle: %{customdata[1]:.2f}"
+                "<br>Median Cycle: %{customdata[2]:.2f}<br>P25: %{customdata[3]:.2f}"
+                "<br>P75: %{customdata[4]:.2f}<extra></extra>"
+            ),
+        )
+    )
+    if not actual.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=actual["Model Week"],
+                y=actual["Actual Level"],
+                mode="lines",
+                name=f"{seasonality.metadata['Current Year']} Actual",
+                line={"color": "#f8fafc", "width": 2.0},
+                customdata=actual["Date"].dt.strftime("%Y-%m-%d"),
+                hovertemplate="Date: %{customdata}<br>Model week: %{x:.1f}<br>Actual: %{y:.2f}<extra></extra>",
+            )
+        )
+
+    tick_values = []
+    for month in range(1, 13):
+        midpoint = pd.Timestamp(year=2001, month=month, day=15)
+        tick_values.append(1.0 + (midpoint.dayofyear - 1.0) / 365.0 * 51.0)
+    fig.update_xaxes(
+        title_text="Calendar month",
+        tickmode="array",
+        tickvals=tick_values,
+        ticktext=MONTH_LABELS,
+        range=[1, 52],
+    )
+    fig.update_yaxes(title_text="Normalized SPX (start of year = 100)")
+    return style_fig(
+        fig,
+        f"SPX Annual Seasonality<br><sup>Historical model: {seasonality.metadata['Historical Start Year']}–{seasonality.metadata['Historical End Year']} | Current year: {seasonality.metadata['Current Year']}</sup>",
+        430,
+    )
+
+
+def build_spx_monthly_seasonality_fig(statistics: pd.DataFrame, title: str, value_column: str) -> go.Figure:
+    colors = [
+        "#22c55e" if pd.notna(value) and value >= 0 else "#ef4444"
+        for value in statistics[value_column]
+    ]
+    fig = go.Figure(
+        go.Bar(
+            x=statistics["Month"],
+            y=pd.to_numeric(statistics[value_column], errors="coerce") * 100.0,
+            marker_color=colors,
+            customdata=list(
+                zip(
+                    statistics["Observation Count"],
+                    pd.to_numeric(statistics["P25 Monthly Return"], errors="coerce") * 100.0,
+                    pd.to_numeric(statistics["P75 Monthly Return"], errors="coerce") * 100.0,
+                )
+            ),
+            hovertemplate=(
+                "Month: %{x}<br>Return: %{y:.2f}%<br>Observations: %{customdata[0]:.0f}"
+                "<br>P25: %{customdata[1]:.2f}%<br>P75: %{customdata[2]:.2f}%<extra></extra>"
+            ),
+            name=title,
+        )
+    )
+    fig.add_hline(y=0, line_color="#64748b", line_dash="dash", line_width=1)
+    fig.update_xaxes(title_text="Month", categoryorder="array", categoryarray=MONTH_LABELS)
+    fig.update_yaxes(title_text="Return (%)", ticksuffix="%")
+    return style_fig(fig, title, 300)
 
 
 def maturity_pct(value: Any) -> str:
