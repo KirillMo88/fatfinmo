@@ -107,7 +107,7 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
         st.warning("Gold Regime data is unavailable.")
         return
 
-    render_summary(current)
+    render_summary(current, snapshot)
     selected_range = st.radio(
         "Time range",
         ["1Y", "3Y", "5Y", "10Y", "MAX"],
@@ -138,26 +138,131 @@ def extract_gold_alpha(table_df: pd.DataFrame) -> float | None:
     return float(value) if np.isfinite(value) else None
 
 
-def render_summary(current: dict[str, Any]) -> None:
-    metrics = [
-        ("Final Gold State", fmt_text(current.get("gold_regime")), "rule-based"),
-        ("Gold Price", fmt_number(current.get("gold_price"), decimals=2), "GLD weekly close"),
-        ("Gold Alpha", f"{fmt_score(current.get('gold_alpha'))} / {fmt_text(current.get('gold_alpha_state'))}", "PRICE"),
-        ("Structural Macro", f"{fmt_score(current.get('structural_macro_score'))} / {fmt_text(current.get('structural_macro_state'))}", "DXY 35% + real yield 55% + US2Y 10%"),
-        ("Forward Macro Risk", f"{fmt_score(current.get('forward_macro_risk'))} / {fmt_text(current.get('forward_macro_risk_state'))}", "US2Y 60% + WTI 40%"),
-        ("Tactical Flow", f"{fmt_score(current.get('tactical_flow_score'))} / {fmt_text(current.get('flow_state'))}", "Gold ETF flows 85% + COT 15%"),
-        ("ETF Flow Score", fmt_score(current.get("etf_flow_score")), "4W flow intensity, 3Y PIT percentile"),
-        ("COT Momentum Score", fmt_score(current.get("cot_momentum_score")), "4W change in MM net % OI"),
-        ("Long Liquidity Cycle", fmt_text(current.get("long_liquidity_cycle")), "context only"),
-        ("Structural Demand Status", fmt_text(current.get("structural_demand_status")), "manual / quarterly context"),
-        ("Active Divergence Flags", fmt_text(current.get("ACTIVE_DIVERGENCE_FLAGS")), "informational only"),
-        ("Last Updated", fmt_date(current.get("date")), "latest weekly observation"),
+def render_summary(current: dict[str, Any], snapshot: Any) -> None:
+    as_of = pd.to_datetime(current.get("date"), errors="coerce")
+    history = getattr(snapshot, "history", pd.DataFrame())
+    cycles = getattr(snapshot, "gold_cycle_history", pd.DataFrame())
+    macro2_metrics = gold_macro2_summary_metrics(snapshot, as_of)
+    cycle = latest_gold_cycle_summary(cycles, as_of)
+    rocs = gold_price_rocs(history, as_of)
+
+    groups = [
+        (
+            "Cycle Phase",
+            [
+                ("Cycle Risk Regime", fmt_text(cycle.get("CombinedCycleRiskRegime")), ""),
+                ("Short Cycle State", fmt_text(cycle.get("PrimaryCycleState")), ""),
+                ("Long Cycle State", fmt_text(cycle.get("LongCycleState")), ""),
+            ],
+        ),
+        (
+            "Performance",
+            [(f"ROC {months}M", fmt_percent(rocs.get(months)), "") for months in (3, 6, 9, 12, 36)],
+        ),
+        (
+            "Gold Macro State",
+            macro2_metrics,
+        ),
+        (
+            "Positioning",
+            [
+                (
+                    "Gold Tactical Flow Score",
+                    f"{fmt_score(current.get('tactical_flow_score'))} / {fmt_text(current.get('flow_state'))}",
+                    f"4W change {fmt_signed_number(history_metric_change(history, 'tactical_flow_score', as_of), 1)}",
+                ),
+                (
+                    "ETF 3Y Percentile",
+                    fmt_score(current.get("etf_flow_score")),
+                    f"4W change {fmt_signed_number(history_metric_change(history, 'etf_flow_score', as_of), 1)}",
+                ),
+                (
+                    "COT 3Y Percentile",
+                    fmt_score(current.get("cot_momentum_score")),
+                    f"4W change {fmt_signed_number(history_metric_change(history, 'cot_momentum_score', as_of), 1)}",
+                ),
+                ("Last Updated", fmt_date(current.get("date")), "latest weekly observation"),
+            ],
+        ),
     ]
-    for start in range(0, len(metrics), 4):
-        cols = st.columns(4)
-        for col, (label, value, detail) in zip(cols, metrics[start : start + 4]):
-            with col:
+
+    cols = st.columns([1.0, 0.9, 1.35, 1.45])
+    for col, (heading, metrics) in zip(cols, groups):
+        with col:
+            st.markdown(f"**{html.escape(heading)}**")
+            for label, value, detail in metrics:
                 render_metric(label, value, detail)
+
+
+def latest_gold_cycle_summary(cycle_history: pd.DataFrame, as_of: Any) -> dict[str, Any]:
+    required = {"Date", "GoldShortCycle", "GoldLongCycle"}
+    if cycle_history is None or cycle_history.empty or not required.issubset(cycle_history.columns):
+        return {}
+    frame = cycle_history.copy()
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+    frame = frame.dropna(subset=["Date"]).loc[lambda data: data["Date"] <= pd.Timestamp(as_of)]
+    if frame.empty:
+        return {}
+    risk_frame = frame.assign(
+        PrimaryMarketCycle=pd.to_numeric(frame["GoldShortCycle"], errors="coerce"),
+        LongMarketExtensionCycle=pd.to_numeric(frame["GoldLongCycle"], errors="coerce"),
+    )
+    row = add_combined_cycle_risk_regime(risk_frame).iloc[-1]
+    return row.to_dict()
+
+
+def gold_price_rocs(history: pd.DataFrame, as_of: Any) -> dict[int, float]:
+    if history is None or history.empty or not {"date", "gold_price"}.issubset(history.columns):
+        return {}
+    frame = history[["date", "gold_price"]].copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["gold_price"] = pd.to_numeric(frame["gold_price"], errors="coerce")
+    prices = frame.dropna().loc[lambda data: data["date"] <= pd.Timestamp(as_of)].drop_duplicates("date", keep="last").set_index("date")["gold_price"].sort_index()
+    if prices.empty:
+        return {}
+    latest = float(prices.iloc[-1])
+    output = {}
+    for months in (3, 6, 9, 12, 36):
+        baseline = prices.loc[: pd.Timestamp(as_of) - pd.DateOffset(months=months)]
+        output[months] = latest / float(baseline.iloc[-1]) - 1.0 if not baseline.empty and baseline.iloc[-1] else np.nan
+    return output
+
+
+def history_metric_change(history: pd.DataFrame, metric: str, as_of: Any, weeks: int = 4) -> float:
+    if history is None or history.empty or not {"date", metric}.issubset(history.columns):
+        return np.nan
+    frame = history[["date", metric]].copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame[metric] = pd.to_numeric(frame[metric], errors="coerce")
+    values = frame.dropna().loc[lambda data: data["date"] <= pd.Timestamp(as_of)].drop_duplicates("date", keep="last").set_index("date")[metric].sort_index()
+    if len(values) <= weeks:
+        return np.nan
+    return float(values.iloc[-1] - values.iloc[-1 - weeks])
+
+
+def gold_macro2_summary_metrics(snapshot: Any, as_of: Any) -> list[tuple[str, str, str]]:
+    model = getattr(snapshot, "structural_macro2", None)
+    current = getattr(model, "current", {}) or {}
+    history = getattr(model, "history", pd.DataFrame())
+    macro2_as_of = pd.to_datetime(current.get("date"), errors="coerce")
+    if pd.isna(macro2_as_of):
+        macro2_as_of = pd.Timestamp(as_of)
+    metrics = [
+        (
+            "Structural Macro",
+            fmt_number(current.get("StructuralMacro"), 1),
+            f"4W change {fmt_signed_number(history_metric_change(history, 'StructuralMacro', macro2_as_of), 1)}",
+        )
+    ]
+    metrics.extend(
+        (
+            f"{horizon} State",
+            fmt_text(current.get(f"GLD_MACRO_{horizon}_State")),
+            f"Score {fmt_number(current.get(f'GLD_MACRO_{horizon}'), 1)}",
+        )
+        for horizon in ("3M", "6M", "9M", "12M")
+    )
+    return metrics
 
 
 def render_metric(label: str, value: str, detail: str) -> None:

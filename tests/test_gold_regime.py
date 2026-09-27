@@ -1,4 +1,5 @@
 from datetime import date
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -12,7 +13,14 @@ from gold_regime.macro2 import calculate_gold_structural_macro2_history, inclusi
 from gold_regime.regime import calculate_gold_tactical_flow, determine_flow_flags, determine_gold_regime
 from gold_regime.service import calculate_freshness, carry_forward_cot_history, load_gold_mcp_weekly
 from gold_regime.utils import rolling_percentile_rank
-from gold_regime_tab import build_gold_liquidity_cycle_comparison_fig, prepare_gold_liquidity_cycle_comparison
+from gold_regime_tab import (
+    build_gold_liquidity_cycle_comparison_fig,
+    gold_price_rocs,
+    gold_macro2_summary_metrics,
+    history_metric_change,
+    latest_gold_cycle_summary,
+    prepare_gold_liquidity_cycle_comparison,
+)
 
 
 def weekly(values):
@@ -44,6 +52,85 @@ def test_gold_liquidity_cycle_comparison_aligns_monthly_history_and_range():
     ]
     assert min(pd.to_datetime(figure.data[0].x)) >= pd.Timestamp("2021-06-01")
     assert figure.layout.xaxis.range[1] == pd.Timestamp("2022-06-01")
+
+
+def test_gold_summary_performance_and_four_week_changes_ignore_future_rows():
+    dates = pd.date_range("2023-01-06", periods=100, freq="W-FRI")
+    history = pd.DataFrame(
+        {
+            "date": dates.append(pd.DatetimeIndex([dates[-1] + pd.Timedelta(days=7)])),
+            "gold_price": list(np.arange(100.0, 200.0)) + [10000.0],
+            "structural_macro_score": list(np.arange(100.0)) + [10000.0],
+        }
+    )
+    as_of = dates[-1]
+
+    rocs = gold_price_rocs(history, as_of)
+    change = history_metric_change(history, "structural_macro_score", as_of)
+
+    assert set(rocs) == {3, 6, 9, 12, 36}
+    assert all(np.isfinite(rocs[months]) for months in (3, 6, 9, 12))
+    assert np.isnan(rocs[36])
+    assert change == 4.0
+
+
+def test_gold_macro_summary_reuses_structural_macro_2_horizon_states():
+    as_of = pd.Timestamp("2026-09-25")
+    history = pd.DataFrame(
+        {
+            "date": pd.date_range(end=as_of, periods=6, freq="W-FRI"),
+            "StructuralMacro": [40.0, 42.0, 44.0, 46.0, 48.0, 50.0],
+        }
+    )
+    current = {
+        "StructuralMacro": 50.0,
+        "GLD_MACRO_3M": 67.0,
+        "GLD_MACRO_3M_State": "SUPPORTIVE",
+        "GLD_MACRO_6M": 52.0,
+        "GLD_MACRO_6M_State": "NEUTRAL_MIXED",
+        "GLD_MACRO_9M": 32.0,
+        "GLD_MACRO_9M_State": "UNFAVORABLE",
+        "GLD_MACRO_12M": 15.0,
+        "GLD_MACRO_12M_State": "STRONGLY_UNFAVORABLE",
+    }
+
+    metrics = gold_macro2_summary_metrics(
+        SimpleNamespace(structural_macro2=SimpleNamespace(current=current, history=history)),
+        as_of,
+    )
+
+    assert metrics[0] == ("Structural Macro", "50.0", "4W change +8.0")
+    assert [row[1] for row in metrics[1:]] == [
+        "SUPPORTIVE",
+        "NEUTRAL_MIXED",
+        "UNFAVORABLE",
+        "STRONGLY_UNFAVORABLE",
+    ]
+    assert [row[2] for row in metrics[1:]] == ["Score 67.0", "Score 52.0", "Score 32.0", "Score 15.0"]
+
+
+def test_gold_summary_cycle_states_use_same_risk_classifier_as_cycle_chart():
+    dates = pd.date_range("2000-01-31", periods=320, freq="ME")
+    cycles = pd.DataFrame(
+        {
+            "Date": dates,
+            "GoldShortCycle": np.sin(np.arange(len(dates)) * 2 * np.pi / 70),
+            "GoldLongCycle": np.sin(np.arange(len(dates)) * 2 * np.pi / 220),
+        }
+    )
+
+    summary = latest_gold_cycle_summary(cycles, dates[-1])
+
+    assert summary["Date"] == dates[-1]
+    assert summary["PrimaryCycleState"] in {"EXPANSION", "LATE / PEAK", "CONTRACTION", "RECOVERY"}
+    assert summary["LongCycleState"] in {"EXPANSION", "LATE / PEAK", "CONTRACTION", "RECOVERY"}
+    assert summary["CombinedCycleRiskRegime"] in {
+        "RISK ON",
+        "SHORT-CYCLE CORRECTION RISK",
+        "HIGH CORRECTION RISK",
+        "MAXIMUM DRAWDOWN RISK",
+        "HIGH VOLATILITY / BOTTOMING",
+    }
 
 
 def test_gold_mcp_history_starts_in_1960(monkeypatch):
