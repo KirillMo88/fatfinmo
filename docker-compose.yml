@@ -33,6 +33,7 @@ services:
       - ./persistent/snapshots:/app/persistent/snapshots
       - ./persistent/job_status:/app/persistent/job_status
       - ./persistent/tradingview_mcp:/app/persistent/tradingview_mcp
+      - ./persistent/elliott_waves:/app/persistent/elliott_waves
 
   screener-jobs:
     build: .
@@ -49,6 +50,9 @@ services:
       SCREENER_MARKET_PERFORMANCE_INTERVAL_SECONDS: ${SCREENER_MARKET_PERFORMANCE_INTERVAL_SECONDS:-600}
       SCREENER_WEEKLY_POSITIONING_UTC: ${SCREENER_WEEKLY_POSITIONING_UTC:-12:30}
       SCREENER_WEEKLY_POSITIONING_WEEKDAY: ${SCREENER_WEEKLY_POSITIONING_WEEKDAY:-5}
+      TRADINGVIEW_MCP_ENABLED: ${TRADINGVIEW_MCP_ENABLED:-1}
+      TRADINGVIEW_MCP_REDIRECT_URI: ${TRADINGVIEW_MCP_REDIRECT_URI:-}
+      TRADINGVIEW_MCP_STORAGE_DIR: /app/persistent/tradingview_mcp
     volumes:
       - ./persistent/custom_universe_lists.json:/app/custom_universe_lists.json
       - ./persistent/finance_cache:/app/persistent/finance_cache
@@ -64,6 +68,7 @@ services:
       - ./persistent/snapshots:/app/persistent/snapshots
       - ./persistent/job_status:/app/persistent/job_status
       - ./persistent/tradingview_mcp:/app/persistent/tradingview_mcp
+      - ./persistent/elliott_waves:/app/persistent/elliott_waves
 
   tester:
     build: .
