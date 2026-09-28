@@ -23,6 +23,7 @@ from macro_surprises import MacroSurprisesSnapshot, build_macro_surprises_snapsh
 
 BUSINESS_CYCLE_TTL_SECONDS = 21600
 BUSINESS_CYCLE_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
+RETURN_HORIZONS = ("3M", "6M", "12M")
 
 REGIME_COLORS = {
     "GOLDILOCKS": "#22c55e",
@@ -555,7 +556,7 @@ def render_returns_section(snapshot: BusinessCycleSnapshot) -> None:
     with c2:
         asset = st.selectbox("Asset", ["ALL", "SPY", "QQQ", "GLD", "BTC"], index=0, key="business_cycle_return_asset")
     with c3:
-        horizon = st.selectbox("Horizon", ["ALL", "3M", "6M", "12M"], index=0, key="business_cycle_return_horizon")
+        horizon = st.selectbox("Horizon", ["ALL", *RETURN_HORIZONS], index=0, key="business_cycle_return_horizon")
     with c4:
         metric = st.selectbox("Metric", ["Average Return", "Median Return", "Hit Rate"], index=0, key="business_cycle_return_metric")
 
@@ -563,16 +564,20 @@ def render_returns_section(snapshot: BusinessCycleSnapshot) -> None:
     regime = snapshot.regime_returns.copy()
     selected = regime if classifier == "Economy Regime" else phase
     filtered = filter_return_stats(selected, asset, horizon)
+
+    viz_asset = "SPY" if asset == "ALL" else asset
+    st.plotly_chart(build_return_heatmap(selected, viz_asset, metric), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
+
     st.dataframe(style_return_stats(filtered), use_container_width=True, hide_index=True, height=table_height(filtered))
 
-    viz_col, table_col = st.columns([1, 1.45])
-    with viz_col:
-        viz_asset = "SPY" if asset == "ALL" else asset
-        st.plotly_chart(build_return_heatmap(selected, viz_asset, metric), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
-    with table_col:
-        st.caption("Descriptive historical statistics only. Forward returns are not used to optimize model parameters.")
-        st.dataframe(style_return_stats(filter_return_stats(phase, asset, horizon)), use_container_width=True, hide_index=True, height=table_height(filter_return_stats(phase, asset, horizon)))
-        st.dataframe(style_return_stats(filter_return_stats(regime, asset, horizon)), use_container_width=True, hide_index=True, height=table_height(filter_return_stats(regime, asset, horizon)))
+    st.caption("Descriptive historical statistics only. Forward returns are not used to optimize model parameters.")
+    phase_col, regime_col = st.columns(2)
+    with phase_col:
+        phase_filtered = filter_return_stats(phase, asset, horizon)
+        st.dataframe(style_return_stats(phase_filtered), use_container_width=True, hide_index=True, height=table_height(phase_filtered))
+    with regime_col:
+        regime_filtered = filter_return_stats(regime, asset, horizon)
+        st.dataframe(style_return_stats(regime_filtered), use_container_width=True, hide_index=True, height=table_height(regime_filtered))
 
     st.markdown("#### Asset Composition")
     active_regime = economy_regime_label(snapshot.current.get("EconomyRegime"))
@@ -651,6 +656,7 @@ def build_return_heatmap(frame: pd.DataFrame, asset: str, metric: str) -> go.Fig
     if d.empty:
         return style_business_fig(fig, f"{asset} Forward Return Heatmap", 320)
     pivot = d.pivot_table(index="State", columns="Horizon", values=metric_col, aggfunc="mean")
+    pivot = pivot.reindex(columns=list(RETURN_HORIZONS))
     pivot = pivot.reindex(BUSINESS_PHASES if frame["Classifier"].astype(str).str.contains("Business").any() else ECONOMY_REGIMES)
     fig.add_trace(
         go.Heatmap(
