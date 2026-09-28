@@ -21,17 +21,22 @@ MULTPL_METRICS = (
     MultipleMetric("sp500_ps", "S&P 500 Price / Sales", "https://www.multpl.com/s-p-500-price-to-sales/table/by-quarter", "x"),
     MultipleMetric("sp500_pe", "S&P 500 P/E", "https://www.multpl.com/s-p-500-pe-ratio/table/by-month", "x"),
     MultipleMetric("shiller_pe", "Shiller P/E", "https://www.multpl.com/shiller-pe/table/by-month", "x"),
-    MultipleMetric("real_earnings_growth", "Real Earnings Growth", "https://www.multpl.com/s-p-500-real-earnings-growth/table/by-quarter", "%"),
+    MultipleMetric("earnings", "S&P 500 Earnings", "https://www.multpl.com/s-p-500-earnings/table/by-month", "$"),
     MultipleMetric("earnings_yield", "Earnings Yield", "https://www.multpl.com/s-p-500-earnings-yield/table/by-month", "%"),
-    MultipleMetric("dividend_yield", "Dividend Yield", "https://www.multpl.com/s-p-500-dividend-yield/table/by-month", "%"),
     MultipleMetric("gdp_growth", "US GDP Growth Rate", "https://www.multpl.com/us-gdp-growth-rate/table/by-quarter", "%"),
     MultipleMetric("real_gdp_growth", "US Real GDP Growth Rate", "https://www.multpl.com/us-real-gdp-growth-rate/table/by-quarter", "%"),
     MultipleMetric("inflation", "US Inflation Rate", "https://www.multpl.com/inflation/table/by-year", "%"),
 )
 
+EARNINGS_GROWTH_URL = "https://www.multpl.com/s-p-500-earnings/table/by-month"
+DERIVED_MULTPL_METRICS = (
+    MultipleMetric("earnings_growth_12m", "Earnings Growth", EARNINGS_GROWTH_URL, "%"),
+)
+MULTPL_DISPLAY_METRICS = MULTPL_METRICS + DERIVED_MULTPL_METRICS
+
 MULTPL_METRIC_GROUPS = (
     ("sp500_ps", "sp500_pe", "shiller_pe"),
-    ("real_earnings_growth", "earnings_yield", "dividend_yield"),
+    ("earnings", "earnings_growth_12m", "earnings_yield"),
     ("gdp_growth", "real_gdp_growth", "inflation"),
 )
 
@@ -66,6 +71,21 @@ def _parse_numeric_value(value: str) -> float:
     return float(match.group(0).replace(",", "")) if match else float("nan")
 
 
+def calculate_earnings_growth_12m(earnings: pd.DataFrame) -> pd.DataFrame:
+    if earnings.empty:
+        return pd.DataFrame(columns=["Date", "Value", "Estimate"])
+
+    frame = earnings.copy()
+    frame["Month"] = pd.to_datetime(frame["Date"], errors="coerce").dt.to_period("M")
+    prior = frame.set_index("Month")[["Value", "Estimate"]].copy()
+    prior.index = prior.index + 12
+    frame["PriorValue"] = frame["Month"].map(prior["Value"])
+    frame["PriorEstimate"] = frame["Month"].map(prior["Estimate"]).eq(True)
+    frame["Value"] = (pd.to_numeric(frame["Value"], errors="coerce") / pd.to_numeric(frame["PriorValue"], errors="coerce") - 1.0) * 100.0
+    frame["Estimate"] = frame["Estimate"].fillna(False).astype(bool) | frame["PriorEstimate"]
+    return frame.dropna(subset=["Date", "Value"])[["Date", "Value", "Estimate"]].reset_index(drop=True)
+
+
 def fetch_multpl_metric(metric: MultipleMetric, timeout: float = 15.0) -> pd.DataFrame:
     request = Request(
         metric.url,
@@ -88,7 +108,10 @@ def load_multpl_metrics() -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
                 metrics[metric.key] = future.result()
             except Exception as exc:
                 errors[metric.key] = str(exc)
-    return {key: metrics[key] for key in by_key if key in metrics}, errors
+    if "earnings" in metrics:
+        metrics["earnings_growth_12m"] = calculate_earnings_growth_12m(metrics["earnings"])
+    result_keys = (*by_key, *(metric.key for metric in DERIVED_MULTPL_METRICS))
+    return {key: metrics[key] for key in result_keys if key in metrics}, errors
 
 
 def multiples_range_bounds(

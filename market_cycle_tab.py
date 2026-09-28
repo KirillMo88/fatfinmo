@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 from current_risk import classify_component_state, current_risk_new_event
 from market_cycle import MarketCycleSnapshot, build_market_cycle_snapshot
 from market_cycle_multiples import (
-    MULTPL_METRICS,
+    MULTPL_DISPLAY_METRICS,
     MULTPL_METRIC_GROUPS,
     MultipleMetric,
     load_multpl_metrics,
@@ -324,7 +324,7 @@ def render_market_cycle_multiples(refresh_nonce: int = 0) -> None:
         st.warning("Some Multpl series could not be loaded: " + ", ".join(failed_titles))
 
     range_start, range_end = multiples_range_bounds(metric_frames, selection)
-    metric_by_key = {metric.key: metric for metric in MULTPL_METRICS}
+    metric_by_key = {metric.key: metric for metric in MULTPL_DISPLAY_METRICS}
     for group in MULTPL_METRIC_GROUPS:
         columns = st.columns(3)
         for column, key in zip(columns, group):
@@ -350,6 +350,12 @@ def build_multiple_metric_fig(
     range_end: pd.Timestamp | None,
 ) -> go.Figure:
     fig = go.Figure()
+    if metric.unit == "$":
+        axis_title, axis_suffix, hover_value = "Earnings per share ($)", "", "$%{y:.2f}"
+    elif metric.unit == "x":
+        axis_title, axis_suffix, hover_value = "Ratio (x)", "x", "%{y:.2f}x"
+    else:
+        axis_title, axis_suffix, hover_value = "Value (%)", "%", "%{y:.2f}%"
     if not data.empty:
         frame = data.copy()
         if range_start is not None:
@@ -364,10 +370,10 @@ def build_multiple_metric_fig(
                 name=metric.title,
                 line={"color": "#38bdf8", "width": 2},
                 customdata=frame["Estimate"].map({True: "Estimate", False: "Reported"}),
-                hovertemplate=f"%{{x|%b %Y}}<br>%{{y:.2f}}{metric.unit}<br>%{{customdata}}<extra></extra>",
+                hovertemplate=f"%{{x|%b %Y}}<br>{hover_value}<br>%{{customdata}}<extra></extra>",
             )
         )
-    fig.update_yaxes(title_text="Value" if metric.unit == "x" else "Value (%)", ticksuffix=metric.unit)
+    fig.update_yaxes(title_text=axis_title, ticksuffix=axis_suffix)
     if range_start is not None and range_end is not None:
         fig.update_xaxes(range=[range_start, range_end])
     return style_fig(fig, metric.title, 340)

@@ -3,21 +3,29 @@ from __future__ import annotations
 import pandas as pd
 
 from market_cycle_multiples import (
+    DERIVED_MULTPL_METRICS,
     MULTPL_METRICS,
     MULTPL_METRIC_GROUPS,
+    calculate_earnings_growth_12m,
+    load_multpl_metrics,
     multiples_range_bounds,
     parse_multpl_table,
 )
 from market_cycle_tab import build_multiple_metric_fig
 
 
-def test_multpl_catalog_contains_requested_nine_indicators_in_three_rows() -> None:
+def test_multpl_catalog_contains_requested_source_indicators_and_three_display_rows() -> None:
     keys = {metric.key for metric in MULTPL_METRICS}
+    display_keys = keys | {metric.key for metric in DERIVED_MULTPL_METRICS}
 
-    assert len(keys) == 9
+    assert len(keys) == 8
+    assert "real_earnings_growth" not in keys
+    assert "dividend_yield" not in keys
+    assert "earnings" in keys
     assert len(MULTPL_METRIC_GROUPS) == 3
     assert all(len(group) == 3 for group in MULTPL_METRIC_GROUPS)
-    assert {key for group in MULTPL_METRIC_GROUPS for key in group} == keys
+    assert {key for group in MULTPL_METRIC_GROUPS for key in group} == display_keys
+    assert MULTPL_METRIC_GROUPS[1] == ("earnings", "earnings_growth_12m", "earnings_yield")
 
 
 def test_parse_multpl_table_keeps_estimate_flag_and_parses_percent_values() -> None:
@@ -74,3 +82,41 @@ def test_multiple_chart_shows_reported_and_estimated_series_with_range() -> None
     assert fig.data[0].customdata.tolist() == ["Reported"]
     assert fig.layout.yaxis.ticksuffix == "x"
     assert list(fig.layout.xaxis.range) == [pd.Timestamp("2021-01-01"), pd.Timestamp("2025-12-31")]
+
+
+def test_earnings_growth_is_12_month_roc_matched_by_calendar_month() -> None:
+    dates = pd.date_range("2020-01-31", periods=27, freq="ME").delete(5)
+    values = [100.0 + i for i in range(27) if i != 5]
+    earnings = pd.DataFrame({"Date": dates, "Value": values, "Estimate": False})
+    earnings.loc[earnings["Date"].eq(pd.Timestamp("2021-01-31")), "Value"] = 110.0
+    earnings.loc[earnings["Date"].eq(pd.Timestamp("2022-01-31")), "Value"] = 121.0
+    earnings.loc[earnings["Date"].eq(pd.Timestamp("2022-01-31")), "Estimate"] = True
+
+    growth = calculate_earnings_growth_12m(earnings)
+
+    jan_2022 = growth.loc[growth["Date"].eq(pd.Timestamp("2022-01-31"))].iloc[0]
+    assert abs(jan_2022["Value"] - 10.0) < 1e-10
+    assert bool(jan_2022["Estimate"])
+    assert not growth["Date"].eq(pd.Timestamp("2021-06-30")).any()
+
+
+def test_multpl_loader_includes_derived_earnings_growth(monkeypatch) -> None:
+    earnings = pd.DataFrame(
+        {
+            "Date": pd.date_range("2020-01-31", periods=13, freq="ME"),
+            "Value": [100.0] * 12 + [110.0],
+            "Estimate": [False] * 13,
+        }
+    )
+
+    def fake_fetch(metric):
+        if metric.key == "earnings":
+            return earnings
+        return pd.DataFrame({"Date": pd.to_datetime(["2020-01-31"]), "Value": [1.0], "Estimate": [False]})
+
+    monkeypatch.setattr("market_cycle_multiples.fetch_multpl_metric", fake_fetch)
+    data, errors = load_multpl_metrics()
+
+    assert not errors
+    assert "earnings_growth_12m" in data
+    assert abs(data["earnings_growth_12m"].iloc[-1]["Value"] - 10.0) < 1e-10
