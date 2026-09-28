@@ -2180,6 +2180,8 @@ def render_global_liquidity_dashboard_tab() -> None:
         "All M2 and central-bank balance-sheet series are already normalized to bn USD. Missing major data is not treated as zero. "
         "Percentiles are trailing 3Y point-in-time windows. The 65M long cycle is structural context and is not included in the score.",
     )
+    allocation_cycle_image = Path(__file__).resolve().parent / "assets" / "asset-allocation-cycle.png"
+    st.image(str(allocation_cycle_image), use_container_width=True)
 
 
 def _build_global_liquidity_regime_frame(monthly: pd.DataFrame, weekly: pd.DataFrame) -> pd.DataFrame:
