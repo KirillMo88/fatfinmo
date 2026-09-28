@@ -23,6 +23,8 @@ SHEET_NAMES = [
     "Ratios",
     "Targets",
     "Channels",
+    "StructuralEdges",
+    "UnresolvedIntervals",
     "Events",
 ]
 
@@ -59,7 +61,7 @@ def build_xlsx_export(
 ) -> bytes:
     tables: dict[str, list[dict[str, Any]]] = {name: [] for name in SHEET_NAMES}
     tables["Readme"] = [
-        {"Field": "Purpose", "Value": "Elliott Wave Engine V2 snapshot export"},
+        {"Field": "Purpose", "Value": "Elliott Wave Map V3 snapshot export"},
         {"Field": "Manifest ID", "Value": manifest.get("manifest_id")},
         {"Field": "Published at", "Value": manifest.get("published_at")},
         {"Field": "Important", "Value": "FibFit is diagnostic, not a probability. Targets have no target date."},
@@ -80,11 +82,15 @@ def build_xlsx_export(
                     "session_calendar", "source_timezone", "adjustment_mode", "base_timeframe", "as_of",
                     "created_at", "data_cutoff", "availability_mode", "engine_version", "rule_profile",
                     "parameter_hash", "data_version", "history_start", "history_end", "bar_count",
+                    "analysis_window", "requested_analysis_start", "analysis_start", "analysis_warmup_start",
+                    "analysis_warmup_bars", "analysis_bar_count", "main_root_scenario_id",
+                    "active_major_node_id", "active_intermediate_node_id", "active_minor_node_id",
                 ]},
                 "chart_timeframe": settings.get("chart_timeframe"),
-                "date_range": settings.get("date_range"),
+                "analysis_window_view": settings.get("analysis_window"),
                 "price_scale": settings.get("price_scale"),
-                "visible_degree": settings.get("visible_degree"),
+                "visible_degrees": settings.get("visible_degrees"),
+                "label_mode": settings.get("label_mode"),
                 "quality_flags": snapshot.get("quality_flags"),
                 "provenance_note": snapshot.get("provenance_note"),
             }
@@ -105,9 +111,9 @@ def build_xlsx_export(
         for stream in snapshot.get("pivot_streams", []):
             for pivot in stream.get("pivots", []):
                 tables["Pivots"].append({"asset_id": asset_id, "snapshot_id": snapshot["snapshot_id"], "stream_k": stream.get("k"), "branch": stream.get("branch"), **pivot})
-        for scenario in snapshot.get("scenarios", []):
+        for scenario in snapshot.get("root_scenarios", snapshot.get("scenarios", [])):
             tables["Scenarios"].append({"asset_id": asset_id, "snapshot_id": snapshot["snapshot_id"], **scenario})
-        for node in snapshot.get("nodes", []):
+        for node in snapshot.get("wave_nodes", snapshot.get("nodes", [])):
             compact = {key: value for key, value in node.items() if key not in {"rule_checks", "ratios", "targets", "channels"}}
             tables["WaveNodes"].append({"asset_id": asset_id, "snapshot_id": snapshot["snapshot_id"], **compact})
             for check in node.get("rule_checks", []):
@@ -118,6 +124,10 @@ def build_xlsx_export(
                 tables["Targets"].append({"asset_id": asset_id, "snapshot_id": snapshot["snapshot_id"], "node_id": node.get("node_id"), **target})
             for channel in node.get("channels", []):
                 tables["Channels"].append({"asset_id": asset_id, "snapshot_id": snapshot["snapshot_id"], "node_id": node.get("node_id"), **channel})
+        for edge in snapshot.get("structural_edges", []):
+            tables["StructuralEdges"].append({"asset_id": asset_id, "snapshot_id": snapshot["snapshot_id"], **edge})
+        for interval in snapshot.get("unresolved_intervals", []):
+            tables["UnresolvedIntervals"].append({"asset_id": asset_id, "snapshot_id": snapshot["snapshot_id"], **interval})
         for event in snapshot.get("events", []):
             tables["Events"].append({"asset_id": asset_id, "snapshot_id": snapshot["snapshot_id"], **event})
 
@@ -147,6 +157,8 @@ def _records(frame: pd.DataFrame) -> list[dict[str, Any]]:
 def _excel_safe(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     for column in out.columns:
+        if isinstance(out[column].dtype, pd.DatetimeTZDtype):
+            out[column] = out[column].dt.tz_convert(None)
         if out[column].map(lambda value: isinstance(value, (dict, list, tuple))).any():
             out[column] = out[column].map(
                 lambda value: json.dumps(value, ensure_ascii=False, default=_json_default)

@@ -8,6 +8,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .config import DEFAULT_ANALYSIS_WINDOW
+
 
 STORAGE_DIR = Path("persistent") / "elliott_waves"
 SNAPSHOT_DIR = STORAGE_DIR / "snapshots"
@@ -23,6 +25,7 @@ def write_snapshot(
 ) -> None:
     asset_id = str(snapshot["canonical_asset_id"])
     snapshot_id = str(snapshot["snapshot_id"])
+    analysis_window = str(snapshot.get("analysis_window") or DEFAULT_ANALYSIS_WINDOW)
     directory = SNAPSHOT_DIR / asset_id
     directory.mkdir(parents=True, exist_ok=True)
     snapshot_path = directory / f"{snapshot_id}.json"
@@ -43,22 +46,31 @@ def write_snapshot(
         chart_path = directory / f"{snapshot_id}_chart_{timeframe}.parquet"
         if not chart_path.exists():
             _atomic_parquet(chart_path, frame)
-    _atomic_json(
-        directory / "latest.json",
-        {
-            "canonical_asset_id": asset_id,
-            "snapshot_id": snapshot_id,
-            "created_at": snapshot.get("created_at"),
-            "as_of": snapshot.get("as_of"),
-        },
-    )
+    pointer = {
+        "canonical_asset_id": asset_id,
+        "snapshot_id": snapshot_id,
+        "analysis_window": analysis_window,
+        "analysis_start": snapshot.get("analysis_start"),
+        "created_at": snapshot.get("created_at"),
+        "as_of": snapshot.get("as_of"),
+    }
+    _atomic_json(directory / f"latest_{analysis_window}.json", pointer)
+    if analysis_window == DEFAULT_ANALYSIS_WINDOW:
+        _atomic_json(directory / "latest.json", pointer)
     _append_journal(snapshot)
 
 
-def read_snapshot(asset_id: str, snapshot_id: str | None = None) -> dict[str, Any] | None:
+def read_snapshot(
+    asset_id: str,
+    snapshot_id: str | None = None,
+    *,
+    analysis_window: str = DEFAULT_ANALYSIS_WINDOW,
+) -> dict[str, Any] | None:
     directory = SNAPSHOT_DIR / asset_id
     if snapshot_id is None:
-        pointer = _read_json(directory / "latest.json")
+        pointer = _read_json(directory / f"latest_{analysis_window}.json")
+        if not pointer and analysis_window == DEFAULT_ANALYSIS_WINDOW:
+            pointer = _read_json(directory / "latest.json")
         if not pointer:
             return None
         snapshot_id = str(pointer.get("snapshot_id") or "")
@@ -103,6 +115,8 @@ def _append_journal(snapshot: dict[str, Any]) -> None:
         "snapshot_id": snapshot.get("snapshot_id"),
         "created_at": snapshot.get("created_at"),
         "as_of": snapshot.get("as_of"),
+        "analysis_window": snapshot.get("analysis_window"),
+        "analysis_start": snapshot.get("analysis_start"),
         "data_version": snapshot.get("data_version"),
         "main_scenario_id": snapshot.get("main_scenario_id"),
         "quality_flags": snapshot.get("quality_flags", []),

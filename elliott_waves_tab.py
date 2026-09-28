@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from elliott_waves.config import ASSET_SPECS
+from elliott_waves.config import ANALYSIS_WINDOWS, ASSET_SPECS, DEFAULT_ANALYSIS_WINDOW
 from elliott_waves.export import build_json_export, build_xlsx_export
 from elliott_waves.storage import read_chart_bars, read_manifest, read_quotes, read_snapshot
 from elliott_waves.summary import build_summary
@@ -20,7 +20,7 @@ ELLIOTT_PLOTLY_CONFIG = {
     "scrollZoom": True,
     "modeBarButtonsToRemove": ["lasso2d", "select2d"],
 }
-RANGE_OPTIONS = ["1Y", "3Y", "5Y", "10Y", "20Y", "Full"]
+ANALYSIS_OPTIONS = list(ANALYSIS_WINDOWS)
 
 
 def render_elliott_waves_tab() -> None:
@@ -30,25 +30,34 @@ def render_elliott_waves_tab() -> None:
         st.info("PENDING_INITIAL_COMPUTE — запустите фоновое задание Elliott Waves. Тяжёлый расчёт не выполняется при открытии вкладки.")
         return
 
-    snapshots: dict[str, dict[str, Any]] = {}
     manifest_rows = {row.get("canonical_asset_id"): row for row in manifest.get("assets", [])}
+    control_cols = st.columns([1.45, 2.1, 1.45, 1.25, 1.25])
+    with control_cols[0]:
+        chart_timeframe = st.radio("Бары", ["1D", "1W", "1M"], index=1, horizontal=True, key="elliott_chart_timeframe")
+    with control_cols[1]:
+        analysis_window = st.radio(
+            "Период анализа",
+            ANALYSIS_OPTIONS,
+            index=ANALYSIS_OPTIONS.index(DEFAULT_ANALYSIS_WINDOW),
+            horizontal=True,
+            key="elliott_analysis_window",
+        )
+    with control_cols[2]:
+        price_scale = st.radio("Шкала", ["Linear", "Log"], horizontal=True, key="elliott_price_scale")
+
+    snapshots: dict[str, dict[str, Any]] = {}
     for asset_id in ASSET_SPECS:
         row = manifest_rows.get(asset_id, {})
-        snapshot_id = row.get("snapshot_id")
+        window_row = (row.get("windows") or {}).get(analysis_window, {})
+        snapshot_id = window_row.get("snapshot_id")
+        if not snapshot_id and analysis_window == DEFAULT_ANALYSIS_WINDOW:
+            snapshot_id = row.get("snapshot_id")
         if snapshot_id:
             snapshot = read_snapshot(asset_id, snapshot_id)
             if snapshot:
                 snapshots[asset_id] = snapshot
 
-    control_cols = st.columns([1.45, 2.1, 1.45, 1.25, 1.25])
-    with control_cols[0]:
-        chart_timeframe = st.radio("Бары", ["1D", "1W", "1M"], index=1, horizontal=True, key="elliott_chart_timeframe")
-    with control_cols[1]:
-        date_range = st.radio("Диапазон", RANGE_OPTIONS, index=2, horizontal=True, key="elliott_date_range")
-    with control_cols[2]:
-        price_scale = st.radio("Шкала", ["Linear", "Log"], horizontal=True, key="elliott_price_scale")
-
-    view_settings = _current_view_settings(snapshots, chart_timeframe, date_range, price_scale)
+    view_settings = _current_view_settings(snapshots, chart_timeframe, analysis_window, price_scale)
     with control_cols[3]:
         xlsx_bytes = build_xlsx_export(manifest, snapshots, view_settings) if snapshots else b""
         st.download_button(
@@ -74,7 +83,7 @@ def render_elliott_waves_tab() -> None:
 
     st.caption(
         f"Manifest {manifest.get('manifest_id', 'n/a')} · published {manifest.get('published_at', 'n/a')} · "
-        "переключатели меняют только представление сохранённых снимков"
+        f"анализ {analysis_window} загружается из готового снимка; переключатели не запускают расчёт"
     )
     quotes = read_quotes().get("assets", {})
     ordered = list(ASSET_SPECS)
@@ -88,7 +97,7 @@ def render_elliott_waves_tab() -> None:
                     snapshots.get(asset_id),
                     quotes.get(asset_id, {}),
                     chart_timeframe,
-                    date_range,
+                    analysis_window,
                     price_scale,
                 )
 
@@ -99,7 +108,7 @@ def _render_asset_card(
     snapshot: dict[str, Any] | None,
     quote: dict[str, Any],
     chart_timeframe: str,
-    date_range: str,
+    analysis_window: str,
     price_scale: str,
 ) -> None:
     st.markdown(f"### {asset_id}")
@@ -120,7 +129,7 @@ def _render_asset_card(
     if manifest_row.get("status") != "CURRENT":
         st.warning(f"{manifest_row.get('status')}: {manifest_row.get('stale_reason')}")
 
-    scenarios = snapshot.get("scenarios", [])
+    scenarios = snapshot.get("root_scenarios", [])
     scenario_options = {scenario.get("selection_label", scenario.get("scenario_id")): scenario.get("scenario_id") for scenario in scenarios}
     scenario_key = f"elliott_scenario_{asset_id}"
     stored_scenario = st.session_state.get(scenario_key)
@@ -139,30 +148,48 @@ def _render_asset_card(
         st.info("UNRESOLVED — допустимый активный сценарий не найден.")
 
     node = _selected_node(snapshot, scenario_id)
-    degrees = ["Auto"] + sorted({str(row.get("relative_degree")) for row in snapshot.get("nodes", []) if row.get("relative_degree") and row.get("pattern_type") != "OBSERVED_LEAF"})
-    option_cols = st.columns([1.5, 1, 1])
+    option_cols = st.columns([1, 1, 1, 1.35, 1, 1])
     with option_cols[0]:
-        visible_degree = st.selectbox("Степень", degrees, key=f"elliott_degree_{asset_id}")
+        show_major = st.toggle("Major", value=True, key=f"elliott_major_{asset_id}")
     with option_cols[1]:
-        show_targets = st.toggle("Цели", value=True, key=f"elliott_targets_{asset_id}")
+        show_intermediate = st.toggle("Intermediate", value=True, key=f"elliott_intermediate_{asset_id}")
     with option_cols[2]:
+        show_minor = st.toggle("Minor", value=True, key=f"elliott_minor_{asset_id}")
+    with option_cols[3]:
+        label_mode = st.selectbox("Подписи", ["Auto", "Full", "Minimal"], key=f"elliott_labels_{asset_id}")
+    with option_cols[4]:
+        show_targets = st.toggle("Цели", value=True, key=f"elliott_targets_{asset_id}")
+    with option_cols[5]:
         show_channels = st.toggle("Каналы", value=False, key=f"elliott_channels_{asset_id}")
 
     bars = read_chart_bars(asset_id, snapshot["snapshot_id"], chart_timeframe)
-    bars = _filter_range(bars, date_range)
     if bars.empty:
-        st.error(f"Для {asset_id} нет свечей {chart_timeframe} в выбранном диапазоне.")
+        st.error(f"Для {asset_id} нет свечей {chart_timeframe} в периоде {analysis_window}.")
     else:
-        if snapshot.get("base_timeframe") == "1W" and chart_timeframe == "1D":
-            coverage = snapshot.get("display_history", {}).get("1D", {})
-            st.caption(
-                f"Дневные свечи доступны с {coverage.get('start', 'неизвестной даты')}; "
-                "разметка остаётся недельным деревом V2 и не синтезируется из недельных баров."
-            )
-        fig = _build_chart(snapshot, scenario_id, node, bars, price_scale, visible_degree, show_targets, show_channels)
+        fig = _build_chart(
+            snapshot,
+            scenario_id,
+            node,
+            bars,
+            price_scale,
+            {"Major": show_major, "Intermediate": show_intermediate, "Minor": show_minor},
+            label_mode,
+            chart_timeframe,
+            show_targets,
+            show_channels,
+        )
         st.plotly_chart(fig, use_container_width=True, config=ELLIOTT_PLOTLY_CONFIG, key=f"elliott_chart_{asset_id}")
 
-    st.markdown(build_summary(snapshot, scenario_id, node.get("node_id") if node else None, visible_degree))
+    st.markdown(build_summary(snapshot, scenario_id, node.get("node_id") if node else None, label_mode))
+    active_path = _active_path(snapshot, scenario_id)
+    if active_path:
+        st.caption(
+            "Активный путь: "
+            + " → ".join(
+                f"{item.get('degree')} · {item.get('pattern_type')}"
+                for item in active_path
+            )
+        )
     with st.expander("Подробности", expanded=False):
         _render_details(snapshot, scenario_id, node)
 
@@ -173,7 +200,9 @@ def _build_chart(
     node: dict[str, Any] | None,
     bars: pd.DataFrame,
     price_scale: str,
-    visible_degree: str,
+    visible_degrees: dict[str, bool],
+    label_mode: str,
+    chart_timeframe: str,
     show_targets: bool,
     show_channels: bool,
 ) -> go.Figure:
@@ -210,25 +239,20 @@ def _build_chart(
                 )
             )
     if node:
-        nodes = {row.get("node_id"): row for row in snapshot.get("nodes", [])}
-        visible_nodes: list[dict[str, Any]] = []
-        if visible_degree == "Auto":
-            visible_nodes = [node]
-            visible_nodes.extend(
-                nodes[child]
-                for child in node.get("children", [])
-                if child in nodes and nodes[child].get("pattern_type") != "OBSERVED_LEAF"
-            )
-        else:
-            visible_nodes = [
-                candidate
-                for candidate in _walk_tree(node, nodes)
-                if candidate.get("relative_degree") == visible_degree
-                and candidate.get("pattern_type") != "OBSERVED_LEAF"
-            ]
-            if not visible_nodes:
-                visible_nodes = [node]
-        for depth, visible_node in enumerate(visible_nodes[:30]):
+        active_ids = {item.get("node_id") for item in _active_path(snapshot, scenario_id)}
+        visible_nodes = _visible_wave_nodes(
+            snapshot,
+            scenario_id,
+            visible_degrees,
+            label_mode,
+            chart_timeframe,
+        )
+        degree_style = {
+            "Major": {"color": "#38bdf8", "width": 2.8, "marker": 8},
+            "Intermediate": {"color": "#a78bfa", "width": 1.9, "marker": 6},
+            "Minor": {"color": "#94a3b8", "width": 1.15, "marker": 4},
+        }
+        for visible_node in visible_nodes[:120]:
             labels = visible_node.get("labels") or []
             if not labels:
                 continue
@@ -241,20 +265,29 @@ def _build_chart(
             x = [pd.Timestamp(label["pivot_time"]) for label in labels]
             y = [float(label["price"]) for label in labels]
             is_forming = visible_node.get("endpoint_status") == "FORMING"
+            degree = str(visible_node.get("degree") or visible_node.get("relative_degree") or "Minor")
+            style = degree_style.get(degree, degree_style["Minor"])
+            is_active = visible_node.get("node_id") in active_ids
+            is_historical = visible_node.get("map_status") in {"HISTORICAL", "COMPLETED", "SUPERSEDED"}
+            opacity = 1.0 if is_active else (0.52 if is_historical else 0.72)
+            text = [_display_label(label.get("label"), degree) for label in labels]
+            if label_mode == "Minimal" and not is_active:
+                text = [None] * len(labels)
             fig.add_trace(
                 go.Scatter(
                     x=x,
                     y=y,
                     mode="lines+markers+text",
-                    text=[label.get("label") for label in labels],
+                    text=text,
                     textposition="top center",
-                    name=f"{visible_node.get('pattern_type')} {visible_node.get('relative_degree')}",
-                    line={"color": "#38bdf8" if depth == 0 else "#a78bfa", "width": 2.2 if depth == 0 else 1.3, "dash": "dash" if is_forming else "solid"},
-                    marker={"size": 7 if depth == 0 else 5},
+                    name=f"{degree} · {visible_node.get('pattern_type')}",
+                    opacity=opacity,
+                    line={"color": style["color"], "width": style["width"] + (0.6 if is_active else 0), "dash": "dash" if is_forming else "solid"},
+                    marker={"size": style["marker"] + (1 if is_active else 0)},
                     customdata=[
                         [
                             visible_node.get("pattern_type"),
-                            visible_node.get("relative_degree"),
+                            degree,
                             label.get("status"),
                             label.get("confirmed_at"),
                             visible_node.get("verified_depth"),
@@ -403,43 +436,75 @@ def _channel_lines(channel: dict[str, Any], visible_end: pd.Timestamp) -> list[t
 
 
 def _selected_node(snapshot: dict[str, Any], scenario_id: str | None) -> dict[str, Any] | None:
-    scenarios = {row.get("scenario_id"): row for row in snapshot.get("scenarios", [])}
-    scenario = scenarios.get(scenario_id or snapshot.get("main_scenario_id"))
+    scenarios = {row.get("scenario_id"): row for row in snapshot.get("root_scenarios", [])}
+    scenario = scenarios.get(scenario_id or snapshot.get("main_root_scenario_id"))
     if not scenario:
         return None
-    node_id = scenario.get("root_node_id")
-    return next((row for row in snapshot.get("nodes", []) if row.get("node_id") == node_id), None)
+    active_path = scenario.get("active_path") or []
+    node_id = active_path[-1] if active_path else None
+    return next((row for row in snapshot.get("wave_nodes", []) if row.get("node_id") == node_id), None)
 
 
-def _filter_range(frame: pd.DataFrame, selected: str) -> pd.DataFrame:
-    if frame is None or frame.empty or selected == "Full":
-        return frame.copy() if frame is not None else pd.DataFrame()
-    out = frame.copy()
-    out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
-    end = out["timestamp"].max()
-    years = int(selected[:-1])
-    return out.loc[out["timestamp"] >= end - pd.DateOffset(years=years)].copy()
+def _active_path(snapshot: dict[str, Any], scenario_id: str | None) -> list[dict[str, Any]]:
+    scenarios = {row.get("scenario_id"): row for row in snapshot.get("root_scenarios", [])}
+    scenario = scenarios.get(scenario_id or snapshot.get("main_root_scenario_id"))
+    nodes = {row.get("node_id"): row for row in snapshot.get("wave_nodes", [])}
+    return [nodes[node_id] for node_id in (scenario or {}).get("active_path", []) if node_id in nodes]
+
+
+def _display_label(label: Any, degree: str) -> str:
+    value = str(label or "")
+    return f"({value})" if degree == "Major" else value
+
+
+def _visible_wave_nodes(
+    snapshot: dict[str, Any],
+    scenario_id: str | None,
+    visible_degrees: dict[str, bool],
+    label_mode: str,
+    chart_timeframe: str,
+) -> list[dict[str, Any]]:
+    scenarios = {row.get("scenario_id"): row for row in snapshot.get("root_scenarios", [])}
+    scenario = scenarios.get(scenario_id or snapshot.get("main_root_scenario_id"))
+    nodes = {row.get("node_id"): row for row in snapshot.get("wave_nodes", [])}
+    active_ids = {node.get("node_id") for node in _active_path(snapshot, scenario_id)}
+    selected = [nodes[node_id] for node_id in (scenario or {}).get("node_ids", []) if node_id in nodes]
+    selected = [node for node in selected if visible_degrees.get(str(node.get("degree")), False)]
+    if label_mode == "Minimal":
+        return [node for node in selected if node.get("node_id") in active_ids]
+    if label_mode == "Auto" and chart_timeframe in {"1W", "1M"}:
+        return [
+            node
+            for node in selected
+            if node.get("degree") != "Minor" or node.get("node_id") in active_ids
+        ]
+    return selected
 
 
 def _current_view_settings(
     snapshots: dict[str, dict[str, Any]],
     chart_timeframe: str,
-    date_range: str,
+    analysis_window: str,
     price_scale: str,
 ) -> dict[str, dict[str, Any]]:
     settings: dict[str, dict[str, Any]] = {}
     for asset_id, snapshot in snapshots.items():
         scenario_label = st.session_state.get(f"elliott_scenario_{asset_id}")
-        scenario_map = {row.get("selection_label"): row.get("scenario_id") for row in snapshot.get("scenarios", [])}
-        scenario_id = scenario_map.get(scenario_label) or snapshot.get("main_scenario_id")
+        scenario_map = {row.get("selection_label"): row.get("scenario_id") for row in snapshot.get("root_scenarios", [])}
+        scenario_id = scenario_map.get(scenario_label) or snapshot.get("main_root_scenario_id")
         node = _selected_node(snapshot, scenario_id)
         settings[asset_id] = {
             "snapshot_id": snapshot.get("snapshot_id"),
             "scenario_id": scenario_id,
             "focus_node_id": node.get("node_id") if node else None,
             "chart_timeframe": chart_timeframe,
-            "visible_degree": st.session_state.get(f"elliott_degree_{asset_id}", "Auto"),
-            "date_range": date_range,
+            "analysis_window": analysis_window,
+            "visible_degrees": {
+                "Major": st.session_state.get(f"elliott_major_{asset_id}", True),
+                "Intermediate": st.session_state.get(f"elliott_intermediate_{asset_id}", True),
+                "Minor": st.session_state.get(f"elliott_minor_{asset_id}", True),
+            },
+            "label_mode": st.session_state.get(f"elliott_labels_{asset_id}", "Auto"),
             "price_scale": price_scale,
             "show_targets": st.session_state.get(f"elliott_targets_{asset_id}", True),
             "show_channels": st.session_state.get(f"elliott_channels_{asset_id}", False),
