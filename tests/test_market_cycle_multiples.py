@@ -7,6 +7,8 @@ from market_cycle_multiples import (
     MULTPL_METRICS,
     MULTPL_METRIC_GROUPS,
     calculate_earnings_growth_12m,
+    calculate_sp500_pe_15y_percentile,
+    clean_sp500_pe_history,
     load_multpl_metrics,
     multiples_range_bounds,
     parse_multpl_table,
@@ -23,8 +25,9 @@ def test_multpl_catalog_contains_requested_source_indicators_and_three_display_r
     assert "dividend_yield" not in keys
     assert "earnings" in keys
     assert len(MULTPL_METRIC_GROUPS) == 3
-    assert all(len(group) == 3 for group in MULTPL_METRIC_GROUPS)
+    assert [len(group) for group in MULTPL_METRIC_GROUPS] == [4, 3, 3]
     assert {key for group in MULTPL_METRIC_GROUPS for key in group} == display_keys
+    assert MULTPL_METRIC_GROUPS[0] == ("sp500_ps", "sp500_pe", "sp500_pe_15y_percentile", "shiller_pe")
     assert MULTPL_METRIC_GROUPS[1] == ("earnings", "earnings_growth_12m", "earnings_yield")
 
 
@@ -82,6 +85,27 @@ def test_multiple_chart_shows_reported_and_estimated_series_with_range() -> None
     assert fig.data[0].customdata.tolist() == ["Reported"]
     assert fig.layout.yaxis.ticksuffix == "x"
     assert list(fig.layout.xaxis.range) == [pd.Timestamp("2021-01-01"), pd.Timestamp("2025-12-31")]
+
+
+def test_sp500_pe_excludes_jan_through_sep_2009_only() -> None:
+    dates = pd.to_datetime(["2008-12-01", "2009-01-01", "2009-09-01", "2009-10-01"])
+    frame = pd.DataFrame({"Date": dates, "Value": [15.0, 16.0, 17.0, 18.0], "Estimate": False})
+
+    cleaned = clean_sp500_pe_history(frame)
+
+    assert cleaned["Date"].tolist() == [pd.Timestamp("2008-12-01"), pd.Timestamp("2009-10-01")]
+
+
+def test_sp500_pe_15y_percentile_uses_full_trailing_fifteen_year_window() -> None:
+    dates = pd.date_range("2000-01-01", "2016-01-01", freq="MS")
+    pe = pd.DataFrame({"Date": dates, "Value": range(1, len(dates) + 1), "Estimate": False})
+
+    percentile = calculate_sp500_pe_15y_percentile(pe)
+
+    assert percentile["Date"].min() == pd.Timestamp("2015-01-01")
+    assert len(percentile) == 13
+    assert percentile.iloc[0]["Value"] == 100.0
+    assert percentile.iloc[-1]["Value"] == 100.0
 
 
 def test_earnings_growth_is_12_month_roc_matched_by_calendar_month() -> None:
