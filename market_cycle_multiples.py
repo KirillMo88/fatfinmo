@@ -30,20 +30,18 @@ MULTPL_METRICS = (
 
 EARNINGS_GROWTH_URL = "https://www.multpl.com/s-p-500-earnings/table/by-month"
 DERIVED_MULTPL_METRICS = (
-    MultipleMetric("earnings_growth_12m", "Earnings Growth", EARNINGS_GROWTH_URL, "%"),
+    MultipleMetric("earnings_growth_12m", "S&P 500 Earnings Growth", EARNINGS_GROWTH_URL, "%"),
     MultipleMetric("sp500_pe_15y_percentile", "S&P 500 P/E 15Y Percentile", MULTPL_METRICS[1].url, "%"),
     MultipleMetric("sp500_peg", "S&P 500 PEG", MULTPL_METRICS[1].url, "x"),
     MultipleMetric("sp500_peg_15y_percentile", "S&P 500 PEG 15Y Percentile", MULTPL_METRICS[1].url, "%"),
     MultipleMetric("earnings_growth_15y_percentile", "Earnings Growth 15Y Percentile", EARNINGS_GROWTH_URL, "%"),
 )
-MULTPL_DISPLAY_METRICS = MULTPL_METRICS + tuple(
-    metric for metric in DERIVED_MULTPL_METRICS if metric.key != "earnings_growth_12m"
-)
+MULTPL_DISPLAY_METRICS = MULTPL_METRICS + DERIVED_MULTPL_METRICS
 
 MULTPL_METRIC_GROUPS = (
     ("sp500_pe", "sp500_pe_15y_percentile", "sp500_peg", "sp500_peg_15y_percentile"),
     ("sp500_ps", "shiller_pe"),
-    ("earnings", "earnings_growth_15y_percentile", "earnings_yield"),
+    ("earnings", "earnings_growth_12m", "earnings_growth_15y_percentile", "earnings_yield"),
     ("gdp_growth", "real_gdp_growth", "inflation"),
 )
 
@@ -159,6 +157,46 @@ def calculate_sp500_peg(pe: pd.DataFrame, earnings_growth: pd.DataFrame) -> pd.D
         | pe_frame["GrowthEstimate"]
     )
     return pe_frame.dropna(subset=["Value"])[columns].reset_index(drop=True)
+
+
+def calculate_fundamental_outlook(
+    metrics: dict[str, pd.DataFrame],
+) -> dict[str, tuple[float | None, float | None]]:
+    results: dict[str, tuple[float | None, float | None]] = {}
+    for key in ("sp500_pe", "sp500_peg", "earnings_growth_12m"):
+        frame = metrics.get(key, pd.DataFrame())
+        if frame.empty:
+            results[key] = (None, None)
+            continue
+
+        monthly = frame.copy()
+        monthly["Date"] = pd.to_datetime(monthly["Date"], errors="coerce")
+        monthly["Value"] = pd.to_numeric(monthly["Value"], errors="coerce")
+        monthly["Month"] = monthly["Date"].dt.to_period("M")
+        monthly = monthly.dropna(subset=["Month", "Value"]).drop_duplicates("Month", keep="last")
+        values = monthly.set_index("Month")["Value"].sort_index()
+        if values.empty:
+            results[key] = (None, None)
+            continue
+
+        months = pd.period_range(values.index.min(), values.index.max(), freq="M")
+        average = values.reindex(months).rolling(window=3, min_periods=3).mean().dropna()
+        if average.empty:
+            results[key] = (None, None)
+            continue
+
+        current = float(average.iloc[-1])
+        previous = average.get(average.index[-1] - 12)
+        if previous is None or pd.isna(previous):
+            change = None
+        elif key == "earnings_growth_12m":
+            change = current - float(previous)
+        elif float(previous) == 0:
+            change = None
+        else:
+            change = (current / float(previous) - 1.0) * 100.0
+        results[key] = (current, change)
+    return results
 
 
 def fetch_multpl_metric(metric: MultipleMetric, timeout: float = 15.0) -> pd.DataFrame:
