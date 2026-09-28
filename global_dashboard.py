@@ -309,7 +309,13 @@ def build_global_dashboard_snapshot(
     rates_latest = _latest(getattr(rates_snapshot, "history", pd.DataFrame()), "Date")
     funding_latest = _latest(getattr(funding_snapshot, "daily", pd.DataFrame()), "Date")
     treasury_latest = _latest(getattr(treasury_snapshot, "weekly", pd.DataFrame()), "Date")
-    treasury_monthly_latest = _latest(getattr(treasury_snapshot, "monthly", pd.DataFrame()), "Date")
+    treasury_monthly = getattr(treasury_snapshot, "monthly", pd.DataFrame())
+    if treasury_monthly is None or treasury_monthly.empty:
+        # TreasuryFiscalSnapshot stores the monthly refinancing frame as
+        # ``financing``; ``monthly`` is retained as a compatibility fallback
+        # for older snapshot adapters.
+        treasury_monthly = getattr(treasury_snapshot, "financing", pd.DataFrame())
+    treasury_monthly_latest = _latest(treasury_monthly, "Date")
     transition = transition_snapshot or {}
 
     liquidity = {
