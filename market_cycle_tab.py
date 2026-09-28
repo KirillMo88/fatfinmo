@@ -47,7 +47,7 @@ from spy_macro_outlook import (
 
 MARKET_CYCLE_TTL_SECONDS = 21600
 MARKET_CYCLE_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
-MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v2"
+MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v3"
 SPY_MACRO_CACHE_SCHEMA = "spy-macro-outlook-v1"
 MARKET_CYCLE_PERSISTENT_CACHE_DIR = Path(
     os.getenv("MARKET_CYCLE_CACHE_DIR", Path(__file__).resolve().parent / "persistent" / "snapshots")
@@ -580,6 +580,7 @@ def build_top_level_analytics(
             "Current Risk",
             [
                 ("Status", text(current.get("CurrentMarketRiskState"))),
+                ("Last Signal", format_last_signal(current)),
                 ("Breadth Risk", classify_component_state(current.get("CurrentRiskBreadthRisk"))),
                 ("RSI Divergence Risk", classify_component_state(current.get("CurrentRiskRSIDivergenceRisk"))),
                 ("VIX Risk", classify_component_state(current.get("CurrentRiskVIXRisk"))),
@@ -629,6 +630,14 @@ def extension_summary(zone: Any, percentile: Any) -> str:
         label = label.replace("_", " ").title()
     pctl = num(percentile)
     return label if pctl == "N/A" else f"{label} ({pctl})"
+
+
+def format_last_signal(current: dict[str, Any]) -> str:
+    signal = text(current.get("CurrentRiskLastSignal"))
+    signal_date = pd.to_datetime(current.get("CurrentRiskLastSignalDate"), errors="coerce")
+    if signal == "N/A" or pd.isna(signal_date):
+        return "N/A"
+    return f"{signal} — {signal_date.strftime('%Y-%m-%d')}"
 
 
 def render_card(title: str, headline: str, rows: list[tuple[str, str]]) -> None:

@@ -9,6 +9,7 @@ from market_cycle import (
     calculate_current_spx_performance,
     forward_max_drawdown,
     forward_max_drawdown_from_low,
+    latest_current_risk_signal,
     overlay_latest_daily_current_risk,
 )
 from market_cycle_tab import build_top_level_analytics, range_domain
@@ -95,12 +96,25 @@ def test_top_level_analytics_contains_requested_three_sections() -> None:
     }
     assert dict(cards[3][1]) == {
         "Status": "NORMAL",
+        "Last Signal": "N/A",
         "Breadth Risk": "HIGH",
         "RSI Divergence Risk": "MODERATE",
         "VIX Risk": "LOW",
         "High Beta Risk": "LOW",
         "High Yield Risk": "LOW",
     }
+
+
+def test_top_level_current_risk_shows_last_signal_and_date() -> None:
+    cards = build_top_level_analytics(
+        {
+            "CurrentMarketRiskState": "NORMAL",
+            "CurrentRiskLastSignal": "RED FLAG + CREDIT CONFIRMATION",
+            "CurrentRiskLastSignalDate": pd.Timestamp("2026-09-22"),
+        }
+    )
+
+    assert dict(cards[3][1])["Last Signal"] == "RED FLAG + CREDIT CONFIRMATION — 2026-09-22"
 
 
 def test_fundamental_outlook_follows_macro_outlook_in_top_analytics() -> None:
@@ -177,6 +191,26 @@ def test_latest_daily_current_risk_overlays_stale_weekly_summary() -> None:
     assert current["CurrentMarketRiskState"] == "MODERATE"
     assert current["CurrentRiskAsOfDate"] == pd.Timestamp("2026-09-22")
     assert current["CycleContext"] == "UNCHANGED"
+
+
+def test_latest_current_risk_signal_uses_latest_new_event() -> None:
+    daily = pd.DataFrame(
+        {
+            "CurrentRiskNewEvent": [False, True, False, True],
+            "CurrentRiskSignalClass": [
+                "INACTIVE",
+                "MODERATE",
+                "INACTIVE",
+                "RED FLAG + CREDIT CONFIRMATION",
+            ],
+        },
+        index=pd.to_datetime(["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-15"]),
+    )
+
+    result = latest_current_risk_signal(daily)
+
+    assert result["CurrentRiskLastSignal"] == "RED FLAG + CREDIT CONFIRMATION"
+    assert result["CurrentRiskLastSignalDate"] == pd.Timestamp("2026-09-15")
 
 
 def test_daily_range_uses_latest_index_date_not_last_completed_week() -> None:

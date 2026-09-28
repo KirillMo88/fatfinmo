@@ -66,6 +66,7 @@ def build_market_cycle_snapshot(end_date: str | pd.Timestamp | None = None) -> M
     add_vulnerability(weekly_history)
     add_analog_engine(weekly_history)
     current = overlay_latest_daily_current_risk(latest_current(weekly_history), daily)
+    current.update(latest_current_risk_signal(daily))
     current.update(calculate_current_spx_performance(daily))
     correction_current = latest_current(correction_daily)
     for key, value in correction_current.items():
@@ -417,6 +418,44 @@ def overlay_latest_daily_current_risk(current: dict[str, Any], daily: pd.DataFra
     result["CurrentRiskAsOfDate"] = pd.Timestamp(d.iloc[-1]["Date"])
     result["CurrentRiskFrequency"] = "DAILY"
     return result
+
+
+def latest_current_risk_signal(daily: pd.DataFrame) -> dict[str, Any]:
+    """Return the latest plotted new Current Risk signal and its observation date."""
+    empty = {
+        "CurrentRiskLastSignal": "N/A",
+        "CurrentRiskLastSignalDate": pd.NaT,
+    }
+    if daily.empty:
+        return empty
+
+    d = daily.copy()
+    if "Date" not in d:
+        d["Date"] = pd.to_datetime(d.index, errors="coerce")
+    else:
+        d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    d = d.dropna(subset=["Date"]).sort_values("Date")
+    if d.empty or "CurrentRiskSignalClass" not in d:
+        return empty
+    if "CurrentRiskNewEvent" not in d:
+        if "CurrentRiskActivation" not in d:
+            return empty
+        d["CurrentRiskNewEvent"] = current_risk_new_event(d["CurrentRiskActivation"], lookback_sessions=5)
+
+    events = d[
+        d["CurrentRiskNewEvent"].fillna(False).astype(bool)
+        & d["CurrentRiskSignalClass"].astype(str).ne("INACTIVE")
+    ]
+    if events.empty:
+        return empty
+    latest = events.iloc[-1]
+    signal = str(latest.get("CurrentRiskSignalClass", "")).strip()
+    if not signal or signal.lower() == "nan":
+        return empty
+    return {
+        "CurrentRiskLastSignal": signal,
+        "CurrentRiskLastSignalDate": pd.Timestamp(latest["Date"]),
+    }
 
 
 def build_structural_monthly(monthly: pd.DataFrame) -> pd.DataFrame:
