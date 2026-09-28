@@ -90,6 +90,10 @@ def test_dashboard_maps_production_outputs_and_marks_missing_fragility():
         "Date": "2026-09-18", "TreasuryLiquidityState": "MILD INJECTION",
         "FiscalImpulseState": "POSITIVE / ACCELERATING", "TreasuryFinancingPressure": "MODERATE",
         "PolicyMix": "FISCAL & LIQUIDITY SUPPORT",
+    }]), monthly=pd.DataFrame([{
+        "Date": "2026-09-18", "near_term_refinancing_pressure": 54.0,
+        "pressure_3m_percentile": 60.0, "pressure_6m_percentile": 45.0,
+        "pressure_ratio_3m": 1.2, "pressure_ratio_6m": 1.1,
     }]))
     result = build_global_dashboard_snapshot(
         liquidity_regime=liquidity, forecast_frame=forecast, forecast_status={"DataAsOf": "2026-09-18"},
@@ -102,6 +106,9 @@ def test_dashboard_maps_production_outputs_and_marks_missing_fragility():
     assert "Global Macro Score" not in result.fields
     assert len(result.forward_outlook) == 4
     assert result.forward_outlook.loc[result.forward_outlook["Asset"] == "BTC", "12M Median"].iloc[0] == 0.12
+    assert result.treasury["NearTermRefinancingScore"] == 54.0
+    assert result.treasury["NearTermRefinancing3M"] == 60.0
+    assert result.treasury["NearTermRefinancing6M"] == 45.0
 
 
 def test_forward_outlook_handles_partial_asset_history():
