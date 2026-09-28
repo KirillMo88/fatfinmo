@@ -20,6 +20,7 @@ from market_cycle_multiples import (
     MULTPL_DISPLAY_METRICS,
     MULTPL_METRIC_GROUPS,
     MultipleMetric,
+    calculate_fundamental_outlook,
     load_multpl_metrics,
     multiples_range_bounds,
 )
@@ -303,6 +304,7 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
 
     if spy_macro_outlook is not None:
         render_spy_macro_outlook(spy_macro_outlook, history)
+    render_fundamental_outlook(int(st.session_state.get("market_cycle_refresh_nonce", 0)))
 
     st.markdown("### Current Risk")
     risk_col, confirm_col = st.columns([1.05, 1.25])
@@ -420,6 +422,33 @@ def render_market_cycle_multiples(refresh_nonce: int = 0) -> None:
                     st.plotly_chart(builder(metric, frame, range_start, range_end), use_container_width=True, config=MARKET_CYCLE_PLOTLY_CONFIG)
                 st.markdown(f"[Source: Multpl]({metric.url})")
     st.caption("Monthly, quarterly, and annual series are shown at their published frequencies. Latest Multpl estimates are marked in chart tooltips. Data is cached for six hours; use Refresh Market Cycle to reload.")
+
+
+def render_fundamental_outlook(refresh_nonce: int = 0) -> None:
+    st.markdown("### Fundamental Outlook")
+    try:
+        metric_frames, _ = load_multpl_metrics_cached(refresh_nonce)
+    except Exception as exc:
+        st.warning(f"Fundamental Outlook data is temporarily unavailable: {exc}")
+        return
+
+    summary = calculate_fundamental_outlook(metric_frames)
+    panels = [
+        ("P/E", "sp500_pe", "x", "%"),
+        ("PEG", "sp500_peg", "x", "%"),
+        ("Earnings Growth", "earnings_growth_12m", "%", " pp"),
+    ]
+    columns = st.columns(len(panels))
+    for column, (title, key, value_unit, change_unit) in zip(columns, panels):
+        value, change = summary[key]
+        if value is None:
+            display_value = "n/a"
+        else:
+            formatted_value = f"{value:.2f}{value_unit}"
+            formatted_change = "n/a" if change is None else f"{change:+.1f}{change_unit}"
+            display_value = f"{formatted_value} (12M Change {formatted_change})"
+        with column:
+            render_top_level_panel(title, [("3MA", display_value)])
 
 
 def build_multiple_metric_fig(

@@ -8,6 +8,7 @@ from market_cycle_multiples import (
     MULTPL_METRICS,
     MULTPL_METRIC_GROUPS,
     calculate_earnings_growth_12m,
+    calculate_fundamental_outlook,
     calculate_sp500_peg,
     calculate_sp500_pe_15y_percentile,
     clean_sp500_pe_history,
@@ -34,13 +35,15 @@ def test_multpl_catalog_contains_requested_source_indicators_and_four_display_ro
     assert "dividend_yield" not in keys
     assert "earnings" in keys
     assert len(MULTPL_METRIC_GROUPS) == 4
-    assert [len(group) for group in MULTPL_METRIC_GROUPS] == [4, 2, 3, 3]
+    assert [len(group) for group in MULTPL_METRIC_GROUPS] == [4, 2, 4, 3]
     assert {key for group in MULTPL_METRIC_GROUPS for key in group} == display_keys
     assert MULTPL_METRIC_GROUPS[0] == (
         "sp500_pe", "sp500_pe_15y_percentile", "sp500_peg", "sp500_peg_15y_percentile"
     )
     assert MULTPL_METRIC_GROUPS[1] == ("sp500_ps", "shiller_pe")
-    assert MULTPL_METRIC_GROUPS[2] == ("earnings", "earnings_growth_15y_percentile", "earnings_yield")
+    assert MULTPL_METRIC_GROUPS[2] == (
+        "earnings", "earnings_growth_12m", "earnings_growth_15y_percentile", "earnings_yield"
+    )
 
 
 def test_parse_multpl_table_keeps_estimate_flag_and_parses_percent_values() -> None:
@@ -151,6 +154,21 @@ def test_earnings_growth_percentile_uses_green_for_high_values() -> None:
 
     assert fig.layout.shapes[0].fillcolor == "#ef4444"
     assert fig.layout.shapes[-1].fillcolor == "#15803d"
+
+
+def test_fundamental_outlook_uses_three_month_average_and_12_month_comparison() -> None:
+    dates = pd.date_range("2024-01-31", periods=15, freq="ME")
+    metrics = {
+        "sp500_pe": pd.DataFrame({"Date": dates, "Value": range(10, 160, 10)}),
+        "sp500_peg": pd.DataFrame({"Date": dates, "Value": range(1, 16)}),
+        "earnings_growth_12m": pd.DataFrame({"Date": dates, "Value": range(1, 16)}),
+    }
+
+    summary = calculate_fundamental_outlook(metrics)
+
+    assert summary["sp500_pe"] == (140.0, 600.0)
+    assert summary["sp500_peg"] == (14.0, 600.0)
+    assert summary["earnings_growth_12m"] == (14.0, 12.0)
 
 
 def test_sp500_pe_excludes_jan_through_sep_2009_only() -> None:
