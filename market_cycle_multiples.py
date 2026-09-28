@@ -32,12 +32,18 @@ EARNINGS_GROWTH_URL = "https://www.multpl.com/s-p-500-earnings/table/by-month"
 DERIVED_MULTPL_METRICS = (
     MultipleMetric("earnings_growth_12m", "Earnings Growth", EARNINGS_GROWTH_URL, "%"),
     MultipleMetric("sp500_pe_15y_percentile", "S&P 500 P/E 15Y Percentile", MULTPL_METRICS[1].url, "%"),
+    MultipleMetric("sp500_peg", "S&P 500 PEG", MULTPL_METRICS[1].url, "x"),
+    MultipleMetric("sp500_peg_15y_percentile", "S&P 500 PEG 15Y Percentile", MULTPL_METRICS[1].url, "%"),
+    MultipleMetric("earnings_growth_15y_percentile", "Earnings Growth 15Y Percentile", EARNINGS_GROWTH_URL, "%"),
 )
-MULTPL_DISPLAY_METRICS = MULTPL_METRICS + DERIVED_MULTPL_METRICS
+MULTPL_DISPLAY_METRICS = MULTPL_METRICS + tuple(
+    metric for metric in DERIVED_MULTPL_METRICS if metric.key != "earnings_growth_12m"
+)
 
 MULTPL_METRIC_GROUPS = (
-    ("sp500_ps", "sp500_pe", "sp500_pe_15y_percentile", "shiller_pe"),
-    ("earnings", "earnings_growth_12m", "earnings_yield"),
+    ("sp500_pe", "sp500_pe_15y_percentile", "sp500_peg", "sp500_peg_15y_percentile"),
+    ("sp500_ps", "shiller_pe"),
+    ("earnings", "earnings_growth_15y_percentile", "earnings_yield"),
     ("gdp_growth", "real_gdp_growth", "inflation"),
 )
 
@@ -95,12 +101,12 @@ def clean_sp500_pe_history(pe: pd.DataFrame) -> pd.DataFrame:
     return pe.loc[~excluded].reset_index(drop=True)
 
 
-def calculate_sp500_pe_15y_percentile(pe: pd.DataFrame) -> pd.DataFrame:
+def calculate_trailing_percentile(data: pd.DataFrame, years: int = 15) -> pd.DataFrame:
     columns = ["Date", "Value", "Estimate"]
-    if pe.empty:
+    if data.empty:
         return pd.DataFrame(columns=columns)
 
-    frame = pe.copy()
+    frame = data.copy()
     frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
     frame["Value"] = pd.to_numeric(frame["Value"], errors="coerce")
     frame = frame.dropna(subset=["Date", "Value"]).sort_values("Date").reset_index(drop=True)
@@ -110,7 +116,7 @@ def calculate_sp500_pe_15y_percentile(pe: pd.DataFrame) -> pd.DataFrame:
     percentiles = [float("nan")] * len(frame)
 
     for index, row in frame.iterrows():
-        window_start = row["Date"] - pd.DateOffset(years=15)
+        window_start = row["Date"] - pd.DateOffset(years=years)
         if frame.at[0, "Date"] > window_start:
             continue
         start = frame["Date"].searchsorted(window_start, side="left")
@@ -121,6 +127,38 @@ def calculate_sp500_pe_15y_percentile(pe: pd.DataFrame) -> pd.DataFrame:
     frame["Value"] = percentiles
     frame["Estimate"] = frame.get("Estimate", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
     return frame.dropna(subset=["Value"])[columns].reset_index(drop=True)
+
+
+def calculate_sp500_pe_15y_percentile(pe: pd.DataFrame) -> pd.DataFrame:
+    return calculate_trailing_percentile(pe, years=15)
+
+
+def calculate_sp500_peg(pe: pd.DataFrame, earnings_growth: pd.DataFrame) -> pd.DataFrame:
+    columns = ["Date", "Value", "Estimate"]
+    if pe.empty or earnings_growth.empty:
+        return pd.DataFrame(columns=columns)
+
+    pe_frame = pe.copy()
+    growth_frame = earnings_growth.copy()
+    for frame in (pe_frame, growth_frame):
+        frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+        frame["Month"] = frame["Date"].dt.to_period("M")
+        frame["Value"] = pd.to_numeric(frame["Value"], errors="coerce")
+    pe_frame = pe_frame.dropna(subset=["Month", "Value"])
+    growth_frame = growth_frame.dropna(subset=["Month", "Value"])
+    growth_by_month = growth_frame.drop_duplicates("Month", keep="last").set_index("Month")
+    pe_frame = pe_frame.drop_duplicates("Month", keep="last").copy()
+    pe_frame["EarningsGrowth"] = pe_frame["Month"].map(growth_by_month["Value"])
+    pe_frame["GrowthEstimate"] = pe_frame["Month"].map(
+        growth_by_month.get("Estimate", pd.Series(False, index=growth_by_month.index))
+    ).fillna(False).astype(bool)
+    pe_frame = pe_frame.loc[pe_frame["EarningsGrowth"].gt(0)].copy()
+    pe_frame["Value"] = pe_frame["Value"] / pe_frame["EarningsGrowth"]
+    pe_frame["Estimate"] = (
+        pe_frame.get("Estimate", pd.Series(False, index=pe_frame.index)).fillna(False).astype(bool)
+        | pe_frame["GrowthEstimate"]
+    )
+    return pe_frame.dropna(subset=["Value"])[columns].reset_index(drop=True)
 
 
 def fetch_multpl_metric(metric: MultipleMetric, timeout: float = 15.0) -> pd.DataFrame:
@@ -150,6 +188,13 @@ def load_multpl_metrics() -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
     if "sp500_pe" in metrics:
         metrics["sp500_pe"] = clean_sp500_pe_history(metrics["sp500_pe"])
         metrics["sp500_pe_15y_percentile"] = calculate_sp500_pe_15y_percentile(metrics["sp500_pe"])
+    if "earnings_growth_12m" in metrics:
+        metrics["earnings_growth_15y_percentile"] = calculate_trailing_percentile(
+            metrics["earnings_growth_12m"], years=15
+        )
+    if "sp500_pe" in metrics and "earnings_growth_12m" in metrics:
+        metrics["sp500_peg"] = calculate_sp500_peg(metrics["sp500_pe"], metrics["earnings_growth_12m"])
+        metrics["sp500_peg_15y_percentile"] = calculate_trailing_percentile(metrics["sp500_peg"], years=15)
     result_keys = (*by_key, *(metric.key for metric in DERIVED_MULTPL_METRICS))
     return {key: metrics[key] for key in result_keys if key in metrics}, errors
 

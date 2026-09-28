@@ -408,8 +408,12 @@ def render_market_cycle_multiples(refresh_nonce: int = 0) -> None:
                     st.info(f"{metric.title} data is currently unavailable.")
                 else:
                     builder = (
-                        build_sp500_pe_percentile_fig
-                        if key == "sp500_pe_15y_percentile"
+                        build_multiple_percentile_fig
+                        if key in {
+                            "sp500_pe_15y_percentile",
+                            "sp500_peg_15y_percentile",
+                            "earnings_growth_15y_percentile",
+                        }
                         else build_multiple_metric_fig
                     )
                     st.plotly_chart(builder(metric, frame, range_start, range_end), use_container_width=True, config=MARKET_CYCLE_PLOTLY_CONFIG)
@@ -453,7 +457,7 @@ def build_multiple_metric_fig(
     return style_fig(fig, metric.title, 340)
 
 
-def build_sp500_pe_percentile_fig(
+def build_multiple_percentile_fig(
     metric: MultipleMetric,
     data: pd.DataFrame,
     range_start: pd.Timestamp | None,
@@ -466,21 +470,24 @@ def build_sp500_pe_percentile_fig(
     if range_end is not None:
         frame = frame.loc[frame["Date"].le(range_end)]
 
-    colors = ["#166534", "#15803d", "#22c55e", "#65a30d", "#84cc16", "#eab308", "#f59e0b", "#f97316", "#ef4444", "#b91c1c"]
-    for lower, color in zip(range(0, 100, 10), colors):
-        upper = lower + 10
-        band = frame["Value"].where(frame["Value"].ge(lower) & (frame["Value"].lt(upper) if upper < 100 else frame["Value"].le(upper)))
-        fig.add_trace(
-            go.Scatter(
-                x=frame["Date"],
-                y=band,
-                mode="lines",
-                line={"width": 0},
-                fill="tozeroy",
-                fillcolor=color,
-                showlegend=False,
-                hoverinfo="skip",
-            )
+    zones = [
+        (0, 10, "#38bdf8", "Extreme Oversold"),
+        (10, 25, "#60a5fa", "Oversold"),
+        (25, 75, "#64748b", "Normal"),
+        (75, 90, "#facc15", "Extended"),
+        (90, 97.5, "#f97316", "Overextended"),
+        (97.5, 100, "#ef4444", "Extreme"),
+    ]
+    for lower, upper, color, label in zones:
+        fig.add_hrect(
+            y0=lower,
+            y1=upper,
+            fillcolor=color,
+            opacity=0.28,
+            line_width=0,
+            annotation_text=label,
+            annotation_position="left",
+            annotation_font={"color": "#f8fafc", "size": 10},
         )
     if not frame.empty:
         fig.add_trace(
@@ -491,7 +498,7 @@ def build_sp500_pe_percentile_fig(
                 name=metric.title,
                 line={"color": "#e2e8f0", "width": 1.5},
                 customdata=frame["Estimate"].map({True: "Estimate", False: "Reported"}),
-                hovertemplate="%{x|%b %Y}<br>15Y Percentile: %{y:.1f}%<br>%{customdata}<extra></extra>",
+                hovertemplate=f"%{{x|%b %Y}}<br>{metric.title}: %{{y:.1f}}%<br>%{{customdata}}<extra></extra>",
             )
         )
     fig.update_yaxes(title_text="15Y Percentile", ticksuffix="%", range=[0, 100])
