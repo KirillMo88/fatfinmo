@@ -77,6 +77,54 @@ ECONOMY_REGIMES = ["GOLDILOCKS", "REFLATION", "STAGFLATION", "DISINFLATIONARY SL
 ASSET_TICKERS = {"SPY": "SPY", "QQQ": "QQQ", "GLD": "GLD", "BTC": "BTC-USD"}
 FORWARD_HORIZONS = {"3M": 13, "6M": 26, "12M": 52}
 
+# Canonical asset positioning map used by the Business Cycle dashboard.  The
+# model keeps the defensive regime name ``DISINFLATIONARY SLOWDOWN`` for
+# backwards compatibility; the dashboard presents it as the shorter
+# ``DEFLATION`` label in the composition table.
+ECONOMY_REGIME_LABELS = {
+    "GOLDILOCKS": "GOLDILOCKS",
+    "REFLATION": "REFLATION",
+    "STAGFLATION": "STAGFLATION",
+    "DISINFLATIONARY SLOWDOWN": "DEFLATION",
+    "DEFLATION": "DEFLATION",
+}
+ECONOMY_REGIME_ASSETS = {
+    "GOLDILOCKS": ("Growth", "SMID", "EM", "HY", "Cyclicals"),
+    "REFLATION": ("Cyclicals", "SMID", "EM", "HY", "Commodities"),
+    "STAGFLATION": ("Value", "Defensives", "Large Cap", "IG", "USD"),
+    "DEFLATION": ("Long Treasuries", "Growth", "Large Cap", "IG", "Gold"),
+}
+
+
+def economy_regime_label(regime: Any) -> str:
+    normalized = str(regime or "").strip().upper()
+    return ECONOMY_REGIME_LABELS.get(normalized, normalized or "DATA INCOMPLETE")
+
+
+def economy_regime_assets(regime: Any) -> str:
+    label = economy_regime_label(regime)
+    return ", ".join(ECONOMY_REGIME_ASSETS.get(label, ())) or "UNAVAILABLE"
+
+
+def economy_regime_composition() -> pd.DataFrame:
+    """Return the display table describing the four macro regime profiles."""
+    return pd.DataFrame(
+        [
+            {"Factor": "General", "Goldilocks": "Risk Assets", "Reflation": "Risk Assets", "Stagflation / Inflation": "Defensive", "Deflation": "Defensive"},
+            {"Factor": "Beta", "Goldilocks": "High Beta", "Reflation": "High Beta", "Stagflation / Inflation": "Low Beta", "Deflation": "Low Beta"},
+            {"Factor": "Cyclicality", "Goldilocks": "Cyclicals", "Reflation": "Cyclicals", "Stagflation / Inflation": "Defensives", "Deflation": "Defensives"},
+            {"Factor": "Style", "Goldilocks": "Growth", "Reflation": "Growth", "Stagflation / Inflation": "Value", "Deflation": "Growth"},
+            {"Factor": "Market Cap", "Goldilocks": "SMID", "Reflation": "SMID", "Stagflation / Inflation": "Large Cap", "Deflation": "Large Cap"},
+            {"Factor": "Regional", "Goldilocks": "US", "Reflation": "International", "Stagflation / Inflation": "US", "Deflation": "US"},
+            {"Factor": "Geography", "Goldilocks": "EM", "Reflation": "EM", "Stagflation / Inflation": "DM", "Deflation": "DM"},
+            {"Factor": "Fixed Income", "Goldilocks": "Spread Products", "Reflation": "Spread Products", "Stagflation / Inflation": "Treasuries", "Deflation": "Treasuries"},
+            {"Factor": "Treasury Curve", "Goldilocks": "Short > Belly > Long", "Reflation": "Short > Belly > Long", "Stagflation / Inflation": "Short > Belly > Long", "Deflation": "Long > Belly > Short"},
+            {"Factor": "Credit", "Goldilocks": "HY", "Reflation": "HY", "Stagflation / Inflation": "IG", "Deflation": "IG"},
+            {"Factor": "Commodities", "Goldilocks": "Industrial > Energy > Agriculture", "Reflation": "Industrial > Energy > Agriculture", "Stagflation / Inflation": "Agriculture > Energy > Industrial", "Deflation": "Agriculture > Energy > Industrial"},
+            {"Factor": "Currencies", "Goldilocks": "Gold > FX > USD", "Reflation": "Gold > FX > USD", "Stagflation / Inflation": "USD > Gold > FX", "Deflation": "Gold > USD > FX"},
+        ]
+    )
+
 
 @dataclass
 class BusinessCycleSnapshot:
