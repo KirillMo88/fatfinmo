@@ -206,6 +206,7 @@ def test_latest_current_risk_signal_uses_latest_new_event() -> None:
         },
         index=pd.to_datetime(["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-15"]),
     )
+    daily.index.name = "Date"
 
     result = latest_current_risk_signal(daily)
 
