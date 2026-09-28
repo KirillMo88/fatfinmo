@@ -13,7 +13,12 @@ from market_cycle_multiples import (
     multiples_range_bounds,
     parse_multpl_table,
 )
-from market_cycle_tab import build_multiple_metric_fig
+from market_cycle_tab import (
+    build_multiple_metric_fig,
+    read_persistent_snapshot_cache,
+    spy_macro_source_fingerprint,
+    write_persistent_snapshot_cache,
+)
 
 
 def test_multpl_catalog_contains_requested_source_indicators_and_three_display_rows() -> None:
@@ -67,6 +72,31 @@ def test_multiples_range_is_shared_and_max_has_no_forced_start() -> None:
     assert start_20y == pd.Timestamp("2006-06-01")
     assert end == max_end == pd.Timestamp("2026-06-01")
     assert start_max is None
+
+
+def test_persistent_snapshot_cache_round_trips_and_checks_identity(tmp_path) -> None:
+    cache_path = tmp_path / "market-cycle.pkl"
+    expected = {"latest": pd.Timestamp("2026-09-28"), "values": [1, 2, 3]}
+
+    write_persistent_snapshot_cache(cache_path, "schema-1", "source-a", expected)
+
+    assert read_persistent_snapshot_cache(cache_path, "schema-1", "source-a") == expected
+    assert read_persistent_snapshot_cache(cache_path, "schema-2", "source-a") is None
+    assert read_persistent_snapshot_cache(cache_path, "schema-1", "source-b") is None
+
+
+def test_spy_macro_cache_fingerprint_tracks_latest_spx_input() -> None:
+    base = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-09-21", "2026-09-28"]),
+            "SPX_Close": [6500.0, 6600.0],
+        }
+    )
+
+    first = spy_macro_source_fingerprint(base)
+    changed = base.assign(SPX_Close=[6500.0, 6601.0])
+
+    assert first != spy_macro_source_fingerprint(changed)
 
 
 def test_multiple_chart_shows_reported_and_estimated_series_with_range() -> None:

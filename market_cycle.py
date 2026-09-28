@@ -2966,28 +2966,32 @@ def classify_vulnerability(row: dict[str, Any]) -> str:
 
 
 def forward_max_drawdown(close: pd.Series, weeks: int) -> pd.Series:
-    values = pd.to_numeric(close, errors="coerce")
-    out = []
-    for idx, value in enumerate(values):
-        if not np.isfinite(safe_float(value)) or idx + weeks >= len(values):
-            out.append(np.nan)
-            continue
-        path = values.iloc[idx + 1 : idx + weeks + 1].dropna()
-        out.append(float(path.min() / value - 1.0) if not path.empty else np.nan)
-    return pd.Series(out, index=close.index)
+    values = pd.to_numeric(close, errors="coerce").to_numpy(dtype=float)
+    return _forward_window_drawdown(values, values, close.index, weeks)
 
 
 def forward_max_drawdown_from_low(close: pd.Series, low: pd.Series, weeks: int) -> pd.Series:
-    closes = pd.to_numeric(close, errors="coerce")
-    lows = pd.to_numeric(low, errors="coerce")
-    out = []
-    for idx, value in enumerate(closes):
-        if not np.isfinite(safe_float(value)) or idx + weeks >= len(closes):
-            out.append(np.nan)
-            continue
-        path = lows.iloc[idx + 1 : idx + weeks + 1].dropna()
-        out.append(float(path.min() / value - 1.0) if not path.empty else np.nan)
-    return pd.Series(out, index=close.index)
+    closes = pd.to_numeric(close, errors="coerce").to_numpy(dtype=float)
+    lows = pd.to_numeric(low, errors="coerce").to_numpy(dtype=float)
+    return _forward_window_drawdown(closes, lows, close.index, weeks)
+
+
+def _forward_window_drawdown(
+    closes: np.ndarray, lows: np.ndarray, index: pd.Index, weeks: int
+) -> pd.Series:
+    result = np.full(len(closes), np.nan, dtype=float)
+    if weeks <= 0 or len(closes) <= weeks:
+        return pd.Series(result, index=index)
+
+    future_windows = np.lib.stride_tricks.sliding_window_view(lows[1:], weeks)
+    valid_values = ~np.isnan(future_windows)
+    future_min = np.min(np.where(valid_values, future_windows, np.inf), axis=1)
+    has_future_values = valid_values.any(axis=1)
+    valid_closes = np.isfinite(closes[:-weeks])
+    valid = valid_closes & has_future_values
+    result_indices = np.flatnonzero(valid)
+    result[result_indices] = future_min[result_indices] / closes[result_indices] - 1.0
+    return pd.Series(result, index=index)
 
 
 def outlook_confidence(n: int, coverage: float, similarity: float, returns: pd.Series) -> str:

@@ -7,6 +7,8 @@ from market_cycle import (
     build_momentum_monthly,
     build_structural_monthly,
     calculate_current_spx_performance,
+    forward_max_drawdown,
+    forward_max_drawdown_from_low,
     overlay_latest_daily_current_risk,
 )
 from market_cycle_tab import build_top_level_analytics, range_domain
@@ -17,6 +19,25 @@ def monthly_fixture() -> pd.DataFrame:
     trend = np.linspace(100.0, 500.0, len(dates))
     cycle = 15.0 * np.sin(np.arange(len(dates)) / 9.0)
     return pd.DataFrame({"Date": dates, "SPX_Close": trend + cycle})
+
+
+def test_forward_drawdown_windows_match_reference_with_missing_bars() -> None:
+    close = pd.Series([100.0, 90.0, np.nan, 110.0, 80.0, 120.0])
+    low = pd.Series([98.0, 85.0, np.nan, 105.0, 75.0, 118.0])
+
+    expected_close = pd.Series([-0.1, 110.0 / 90.0 - 1.0, np.nan, 80.0 / 110.0 - 1.0, np.nan, np.nan])
+    expected_low = pd.Series([-0.15, 105.0 / 90.0 - 1.0, np.nan, 75.0 / 110.0 - 1.0, np.nan, np.nan])
+
+    pd.testing.assert_series_equal(forward_max_drawdown(close, 2), expected_close)
+    pd.testing.assert_series_equal(forward_max_drawdown_from_low(close, low, 2), expected_low)
+
+
+def test_forward_drawdown_handles_windows_without_any_future_values() -> None:
+    close = pd.Series([100.0, np.nan, np.nan, 120.0, 130.0])
+
+    result = forward_max_drawdown(close, 2)
+
+    assert result.isna().all()
 
 
 def test_structural_and_medium_term_momentum_windows_are_calculated() -> None:
