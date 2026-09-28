@@ -577,11 +577,7 @@ def render_returns_section(snapshot: BusinessCycleSnapshot) -> None:
     st.markdown("#### Asset Composition")
     active_regime = economy_regime_label(snapshot.current.get("EconomyRegime"))
     st.caption(f"Current Economy Regime: {active_regime}. The highlighted column is the active regime profile.")
-    st.dataframe(
-        style_asset_composition(economy_regime_composition(), active_regime),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.table(style_asset_composition(economy_regime_composition(), active_regime))
 
     st.markdown("#### Information Content Comparison")
     st.dataframe(format_eta(snapshot.eta_squared), use_container_width=True, hide_index=True)
