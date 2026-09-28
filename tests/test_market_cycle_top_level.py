@@ -12,6 +12,7 @@ from market_cycle import (
     overlay_latest_daily_current_risk,
 )
 from market_cycle_tab import build_top_level_analytics, range_domain
+from market_cycle_multiples import format_fundamental_outlook_rows
 
 
 def monthly_fixture() -> pd.DataFrame:
@@ -100,6 +101,45 @@ def test_top_level_analytics_contains_requested_three_sections() -> None:
         "High Beta Risk": "LOW",
         "High Yield Risk": "LOW",
     }
+
+
+def test_fundamental_outlook_follows_macro_outlook_in_top_analytics() -> None:
+    macro = type(
+        "Macro",
+        (),
+        {
+            "current": {
+                "Macro_3M": 40,
+                "Macro_6M": 45,
+                "Macro_9M": 50,
+                "Macro_12M": 55,
+                "Transmission_Score": 60,
+            },
+            "history": pd.DataFrame(),
+        },
+    )()
+    fundamentals = {
+        "sp500_pe": (24.0, 8.0),
+        "sp500_peg": (1.8, -4.0),
+        "earnings_growth_12m": (12.5, 2.0),
+    }
+
+    cards = build_top_level_analytics({}, macro, fundamentals)
+
+    assert [title for title, _ in cards][-2:] == ["Macro Outlook", "Fundamental Outlook"]
+    assert dict(cards[-1][1]) == {
+        "P/E (3MA)": "24.00x (12M Change +8.0%)",
+        "PEG (3MA)": "1.80x (12M Change -4.0%)",
+        "Earnings Growth (3MA)": "12.50% (12M Change +2.0 pp)",
+    }
+
+
+def test_fundamental_outlook_rows_show_unavailable_metrics_explicitly() -> None:
+    assert format_fundamental_outlook_rows({}) == [
+        ("P/E (3MA)", "n/a"),
+        ("PEG (3MA)", "n/a"),
+        ("Earnings Growth (3MA)", "n/a"),
+    ]
 
 
 def test_current_performance_includes_the_partial_current_month() -> None:
