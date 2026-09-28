@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import html
+import os
+import pickle
+import tempfile
+import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -40,6 +45,11 @@ from spy_macro_outlook import (
 
 MARKET_CYCLE_TTL_SECONDS = 21600
 MARKET_CYCLE_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
+MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v2"
+SPY_MACRO_CACHE_SCHEMA = "spy-macro-outlook-v1"
+MARKET_CYCLE_PERSISTENT_CACHE_DIR = Path(
+    os.getenv("MARKET_CYCLE_CACHE_DIR", Path(__file__).resolve().parent / "persistent" / "snapshots")
+)
 MARKET_CYCLE_RANGE_OPTIONS = ["1Y", "5Y", "10Y", "20Y", "FULL"]
 MARKET_CYCLE_RANGE_YEARS = {"1Y": 1, "5Y": 5, "10Y": 10, "20Y": 20}
 
@@ -107,16 +117,77 @@ CYCLE_RISK_REGIME_COLORS = {
 }
 
 
-@st.cache_data(show_spinner=True, ttl=MARKET_CYCLE_TTL_SECONDS)
+@st.cache_resource(show_spinner=True, ttl=MARKET_CYCLE_TTL_SECONDS)
 def load_market_cycle_snapshot_cached(refresh_nonce: int = 0) -> MarketCycleSnapshot:
-    _ = refresh_nonce
-    return build_market_cycle_snapshot()
+    cache_path = MARKET_CYCLE_PERSISTENT_CACHE_DIR / f"{MARKET_CYCLE_CACHE_SCHEMA}.pkl"
+    if refresh_nonce == 0:
+        cached = read_persistent_snapshot_cache(cache_path, MARKET_CYCLE_CACHE_SCHEMA, "full")
+        if cached is not None:
+            return cached
+    snapshot = build_market_cycle_snapshot()
+    write_persistent_snapshot_cache(cache_path, MARKET_CYCLE_CACHE_SCHEMA, "full", snapshot)
+    return snapshot
 
 
-@st.cache_data(show_spinner=True, ttl=MARKET_CYCLE_TTL_SECONDS)
+@st.cache_resource(show_spinner=True, ttl=MARKET_CYCLE_TTL_SECONDS)
 def load_spy_macro_outlook_cached(history: pd.DataFrame, api_key: str | None = None, refresh_nonce: int = 0) -> SPYMacroOutlook:
-    _ = refresh_nonce
-    return build_spy_macro_outlook(history, api_key)
+    source_fingerprint = spy_macro_source_fingerprint(history)
+    cache_path = MARKET_CYCLE_PERSISTENT_CACHE_DIR / f"{SPY_MACRO_CACHE_SCHEMA}.pkl"
+    if refresh_nonce == 0:
+        cached = read_persistent_snapshot_cache(cache_path, SPY_MACRO_CACHE_SCHEMA, source_fingerprint)
+        if cached is not None:
+            return cached
+    outlook = build_spy_macro_outlook(history, api_key)
+    write_persistent_snapshot_cache(cache_path, SPY_MACRO_CACHE_SCHEMA, source_fingerprint, outlook)
+    return outlook
+
+
+def spy_macro_source_fingerprint(history: pd.DataFrame) -> str:
+    if history.empty:
+        return "empty"
+    dates = pd.to_datetime(history["Date"], errors="coerce")
+    closes = pd.to_numeric(history["SPX_Close"], errors="coerce")
+    valid = dates.notna() & closes.notna()
+    if not valid.any():
+        return f"empty:{len(history)}"
+    last = int(np.flatnonzero(valid.to_numpy())[-1])
+    return f"{int(valid.sum())}:{dates.loc[last].isoformat()}:{float(closes.loc[last]):.8f}"
+
+
+def read_persistent_snapshot_cache(path: Path, schema: str, fingerprint: str) -> Any | None:
+    try:
+        with path.open("rb") as cache_file:
+            entry = pickle.load(cache_file)
+        age_seconds = time.time() - float(entry["created_at"])
+        if (
+            entry.get("schema") == schema
+            and entry.get("fingerprint") == fingerprint
+            and 0 <= age_seconds < MARKET_CYCLE_TTL_SECONDS
+        ):
+            return entry["value"]
+    except Exception:
+        return None
+    return None
+
+
+def write_persistent_snapshot_cache(path: Path, schema: str, fingerprint: str, value: Any) -> None:
+    temp_path: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as cache_file:
+            temp_path = Path(cache_file.name)
+            pickle.dump(
+                {"schema": schema, "fingerprint": fingerprint, "created_at": time.time(), "value": value},
+                cache_file,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        os.replace(temp_path, path)
+    except Exception:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 @st.cache_data(show_spinner=False, ttl=MARKET_CYCLE_TTL_SECONDS)
@@ -142,16 +213,18 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
         st.error(f"Market Cycle model failed: {exc}")
         return
 
-    history = snapshot.history.copy()
+    history = snapshot.history
     if history.empty:
         st.info("Market Cycle data is unavailable.")
         return
-    history["Date"] = pd.to_datetime(history["Date"], errors="coerce")
+    if not pd.api.types.is_datetime64_any_dtype(history["Date"]):
+        history = history.copy()
+        history["Date"] = pd.to_datetime(history["Date"], errors="coerce")
     current = snapshot.current or {}
 
     try:
         spy_macro_outlook = load_spy_macro_outlook_cached(
-            history,
+            history[["Date", "SPX_Close"]],
             api_key,
             int(st.session_state.get("market_cycle_refresh_nonce", 0)),
         )
