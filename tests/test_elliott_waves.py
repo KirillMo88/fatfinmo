@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from elliott_waves.config import ASSET_SPECS
+from elliott_waves.config import ANALYSIS_WINDOWS, ASSET_SPECS, DEFAULT_ANALYSIS_WINDOW
 from elliott_waves.data import aggregate_daily_bars, data_version
 from elliott_waves.engine import ElliottWaveEngine
 import elliott_waves.export as export_module
@@ -132,9 +132,9 @@ def test_asset_contracts_use_confirmed_symbols_and_timeframes():
     assert ASSET_SPECS["NDX"].provider_symbol == "^NDX"
     assert ASSET_SPECS["GOLD"].provider_symbol == "TVC:GOLD"
     assert ASSET_SPECS["GOLD"].instrument_type == "cfd_index_proxy"
-    assert ASSET_SPECS["GOLD"].base_timeframe == "1W"
+    assert ASSET_SPECS["GOLD"].base_timeframe == "1D"
     assert ASSET_SPECS["BTCUSD"].provider_symbol == "INDEX:BTCUSD"
-    assert ASSET_SPECS["BTCUSD"].base_timeframe == "1W"
+    assert ASSET_SPECS["BTCUSD"].base_timeframe == "1D"
 
 
 def test_daily_aggregation_preserves_missing_volume_and_calendar_periods():
@@ -443,6 +443,19 @@ def test_t36_current_vintage_history_is_not_called_live_pit():
 def test_t38_display_scale_is_not_an_engine_parameter():
     assert "price_scale" not in ElliottWaveEngine().parameters
     assert ElliottWaveEngine().parameters["measurement_mode"] == "arithmetic"
+
+
+def test_t38b_analysis_start_is_backend_window_with_warmup_only():
+    assert list(ANALYSIS_WINDOWS) == ["1Y", "3Y", "5Y", "10Y"]
+    assert DEFAULT_ANALYSIS_WINDOW == "5Y"
+    bars = normalized_daily(list(np.linspace(100, 200, 4500)), start="2013-01-01")
+    one_year = ElliottWaveEngine().analyze(bars, ASSET_SPECS["SPX"], analysis_window="1Y")
+    ten_year = ElliottWaveEngine().analyze(bars, ASSET_SPECS["SPX"], analysis_window="10Y")
+    assert pd.Timestamp(one_year["analysis_start"]) > pd.Timestamp(ten_year["analysis_start"])
+    assert one_year["analysis_bar_count"] < ten_year["analysis_bar_count"]
+    assert one_year["analysis_warmup_bars"] <= 260
+    for node in one_year["wave_nodes"]:
+        assert pd.Timestamp(node["start_point"]["pivot_time"]) >= pd.Timestamp(one_year["analysis_start"])
 
 
 def test_t37_visible_range_is_not_an_engine_input():

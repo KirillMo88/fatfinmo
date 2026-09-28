@@ -10,7 +10,15 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .config import ENGINE_PARAMETERS, ENGINE_VERSION, PATTERN_LABELS, RULE_PROFILE, AssetSpec
+from .config import (
+    ANALYSIS_WINDOWS,
+    DEFAULT_ANALYSIS_WINDOW,
+    ENGINE_PARAMETERS,
+    ENGINE_VERSION,
+    PATTERN_LABELS,
+    RULE_PROFILE,
+    AssetSpec,
+)
 from .data import data_version as calculate_data_version, validate_bars
 from .lifecycle import evaluate_lifecycle
 from .models import Pivot, RuleCheck, Scenario, Target, WaveNode
@@ -24,6 +32,7 @@ from .validators import (
     validate_triangle,
     validate_zigzag,
 )
+from .wave_map import WaveMapBuilder
 
 
 class ElliottWaveEngine:
@@ -33,11 +42,33 @@ class ElliottWaveEngine:
             self.parameters.update(parameters)
         self.parameter_hash = _stable_hash(self.parameters, 20)
 
-    def analyze(self, bars: pd.DataFrame, spec: AssetSpec) -> dict[str, Any]:
+    def analyze(
+        self,
+        bars: pd.DataFrame,
+        spec: AssetSpec,
+        *,
+        analysis_window: str = DEFAULT_ANALYSIS_WINDOW,
+    ) -> dict[str, Any]:
+        if analysis_window not in ANALYSIS_WINDOWS:
+            raise ValueError(
+                f"Unsupported analysis window {analysis_window!r}; expected one of {tuple(ANALYSIS_WINDOWS)}"
+            )
         values = validate_bars(bars, spec).reset_index(drop=True)
-        closed = values.loc[values["is_closed"]].reset_index(drop=True)
-        if closed.empty:
+        all_closed = values.loc[values["is_closed"]].reset_index(drop=True)
+        if all_closed.empty:
             raise ValueError(f"{spec.canonical_asset_id}: no closed bars for Elliott analysis")
+        as_of_timestamp = pd.to_datetime(all_closed.iloc[-1]["timestamp"], utc=True)
+        requested_analysis_start = as_of_timestamp - pd.DateOffset(years=ANALYSIS_WINDOWS[analysis_window])
+        first_timestamp = pd.to_datetime(all_closed.iloc[0]["timestamp"], utc=True)
+        effective_analysis_start = max(requested_analysis_start, first_timestamp)
+        timestamps = pd.to_datetime(all_closed["timestamp"], utc=True)
+        analysis_start_index = int(timestamps.searchsorted(effective_analysis_start, side="left"))
+        warmup_bars = int(self.parameters.get("analysis_warmup_bars", 260))
+        warmup_start_index = max(0, analysis_start_index - warmup_bars)
+        closed = all_closed.iloc[warmup_start_index:].reset_index(drop=True)
+        analysis_start = pd.Timestamp(effective_analysis_start).isoformat()
+        analysis_warmup_start = pd.Timestamp(closed.iloc[0]["timestamp"]).isoformat()
+        source_version = calculate_data_version(all_closed)
         version = calculate_data_version(closed)
         streams = build_causal_pivot_streams(
             closed,
@@ -50,14 +81,22 @@ class ElliottWaveEngine:
         nodes, active_node_ids, search_statistics = self._build_nodes(closed, streams, spec)
         scenarios = self._rank_scenarios(nodes, active_node_ids, len(closed))
         self._attach_scenarios(nodes, scenarios)
-        main_scenario_id = scenarios[0].scenario_id if scenarios else None
+        wave_map = WaveMapBuilder().build(
+            nodes,
+            closed,
+            analysis_window=analysis_window,
+            analysis_start=analysis_start,
+        )
+        main_scenario_id = wave_map["main_root_scenario_id"]
         created_at = pd.Timestamp.now(tz="UTC").isoformat()
-        as_of = pd.Timestamp(closed.iloc[-1]["timestamp"]).isoformat()
+        as_of = as_of_timestamp.isoformat()
         snapshot_id = _stable_hash(
             {
                 "asset": spec.canonical_asset_id,
                 "as_of": as_of,
                 "data_version": version,
+                "analysis_window": analysis_window,
+                "analysis_start": analysis_start,
                 "parameters": self.parameter_hash,
                 "engine": ENGINE_VERSION,
             },
@@ -67,7 +106,11 @@ class ElliottWaveEngine:
         events = self._events(streams, scenarios, nodes, as_of, search_statistics)
         events.extend(lifecycle_events)
         events.sort(key=lambda item: (item["known_at"], item["event_id"]))
-        unresolved = [] if scenarios else ["UNRESOLVED: no CORE candidate passed the available geometry checks"]
+        unresolved = (
+            []
+            if wave_map["wave_nodes"]
+            else ["UNRESOLVED: no CORE candidate passed the available geometry checks"]
+        )
         quality_flags = ["HISTORICAL_RECEIVED_AT_UNAVAILABLE"]
         if any(stream.ambiguous_bar_ids for stream in streams):
             quality_flags.append("AMBIGUOUS_BARS_PRESENT")
@@ -102,21 +145,40 @@ class ElliottWaveEngine:
             "parameter_hash": self.parameter_hash,
             "parameters": self.parameters,
             "data_version": version,
-            "history_start": pd.Timestamp(closed.iloc[0]["timestamp"]).isoformat(),
+            "source_data_version": source_version,
+            "history_start": first_timestamp.isoformat(),
             "history_end": as_of,
-            "bar_count": int(len(closed)),
+            "bar_count": int(len(all_closed)),
+            "analysis_window": analysis_window,
+            "requested_analysis_start": pd.Timestamp(requested_analysis_start).isoformat(),
+            "analysis_start": analysis_start,
+            "analysis_warmup_start": analysis_warmup_start,
+            "analysis_warmup_bars": int(analysis_start_index - warmup_start_index),
+            "analysis_bar_count": int((timestamps >= effective_analysis_start).sum()),
             "main_scenario_id": main_scenario_id,
-            "alternatives": [scenario.scenario_id for scenario in scenarios[1:]],
+            "main_root_scenario_id": main_scenario_id,
+            "alternatives": [scenario["scenario_id"] for scenario in wave_map["root_scenarios"][1:]],
             "unresolved_reasons": unresolved,
             "pivot_streams": [stream.to_dict() for stream in streams],
             "nodes": node_dicts,
             "scenarios": scenario_dicts,
+            "root_scenarios": wave_map["root_scenarios"],
+            "wave_nodes": wave_map["wave_nodes"],
+            "structural_edges": wave_map["structural_edges"],
+            "active_major_node_id": wave_map["active_major_node_id"],
+            "active_intermediate_node_id": wave_map["active_intermediate_node_id"],
+            "active_minor_node_id": wave_map["active_minor_node_id"],
+            "historical_completed_node_ids": wave_map["historical_completed_node_ids"],
+            "unresolved_intervals": wave_map["unresolved_intervals"],
             "rule_checks": [check for node in node_dicts for check in node["rule_checks"]],
             "ratios": [ratio for node in node_dicts for ratio in node["ratios"]],
             "targets": [target for node in node_dicts for target in node["targets"]],
             "channels": [channel for node in node_dicts for channel in node["channels"]],
             "events": events,
-            "search_statistics": search_statistics,
+            "search_statistics": {
+                **search_statistics,
+                "wave_map": wave_map["wave_map_statistics"],
+            },
             "quality_flags": quality_flags,
         }
 

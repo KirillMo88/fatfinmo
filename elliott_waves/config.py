@@ -4,8 +4,10 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-ENGINE_VERSION = "ELLIOTT_WAVE_ENGINE_V2"
+ENGINE_VERSION = "ELLIOTT_WAVE_MAP_V3"
 RULE_PROFILE = "CLASSIC_ARITHMETIC_V2"
+ANALYSIS_WINDOWS: dict[str, int] = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}
+DEFAULT_ANALYSIS_WINDOW = "5Y"
 
 
 @dataclass(frozen=True)
@@ -70,9 +72,9 @@ ASSET_SPECS: dict[str, AssetSpec] = {
         session_calendar="TRADINGVIEW_TVC_GOLD",
         source_timezone="Etc/UTC",
         adjustment_mode="provider_raw",
-        base_timeframe="1W",
+        base_timeframe="1D",
         provider_label="TradingView MCP",
-        provenance_note="TradingView CFDs on Gold (US$ / OZ); explicitly not labelled as physical spot.",
+        provenance_note="TradingView CFDs on Gold (US$ / OZ); daily analysis is limited to the latest 5000 provider bars.",
     ),
     "BTCUSD": AssetSpec(
         canonical_asset_id="BTCUSD",
@@ -85,9 +87,9 @@ ASSET_SPECS: dict[str, AssetSpec] = {
         session_calendar="24X7_UTC",
         source_timezone="Etc/UTC",
         adjustment_mode="provider_raw",
-        base_timeframe="1W",
+        base_timeframe="1D",
         provider_label="TradingView MCP",
-        provenance_note="Bitcoin all time history index; not BTCUSDT and not an exchange trading pair.",
+        provenance_note="Bitcoin all time history index; daily analysis is limited to the latest 5000 provider bars and is not BTCUSDT.",
     ),
 }
 
@@ -141,6 +143,10 @@ ENGINE_PARAMETERS: dict[str, Any] = {
     "macro_inputs_in_engine": False,
     "probability_output": False,
     "price_target_date_output": False,
+    "analysis_windows": ANALYSIS_WINDOWS,
+    "default_analysis_window": DEFAULT_ANALYSIS_WINDOW,
+    "analysis_warmup_bars": 260,
+    "wave_map_degrees": ["Major", "Intermediate", "Minor"],
 }
 
 
