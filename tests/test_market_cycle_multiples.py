@@ -4,9 +4,11 @@ import pandas as pd
 
 from market_cycle_multiples import (
     DERIVED_MULTPL_METRICS,
+    MULTPL_DISPLAY_METRICS,
     MULTPL_METRICS,
     MULTPL_METRIC_GROUPS,
     calculate_earnings_growth_12m,
+    calculate_sp500_peg,
     calculate_sp500_pe_15y_percentile,
     clean_sp500_pe_history,
     load_multpl_metrics,
@@ -15,25 +17,30 @@ from market_cycle_multiples import (
 )
 from market_cycle_tab import (
     build_multiple_metric_fig,
+    build_multiple_percentile_fig,
     read_persistent_snapshot_cache,
     spy_macro_source_fingerprint,
     write_persistent_snapshot_cache,
 )
 
 
-def test_multpl_catalog_contains_requested_source_indicators_and_three_display_rows() -> None:
+def test_multpl_catalog_contains_requested_source_indicators_and_four_display_rows() -> None:
     keys = {metric.key for metric in MULTPL_METRICS}
-    display_keys = keys | {metric.key for metric in DERIVED_MULTPL_METRICS}
+    display_keys = {metric.key for metric in MULTPL_DISPLAY_METRICS}
 
     assert len(keys) == 8
+    assert len(DERIVED_MULTPL_METRICS) == 5
     assert "real_earnings_growth" not in keys
     assert "dividend_yield" not in keys
     assert "earnings" in keys
-    assert len(MULTPL_METRIC_GROUPS) == 3
-    assert [len(group) for group in MULTPL_METRIC_GROUPS] == [4, 3, 3]
+    assert len(MULTPL_METRIC_GROUPS) == 4
+    assert [len(group) for group in MULTPL_METRIC_GROUPS] == [4, 2, 3, 3]
     assert {key for group in MULTPL_METRIC_GROUPS for key in group} == display_keys
-    assert MULTPL_METRIC_GROUPS[0] == ("sp500_ps", "sp500_pe", "sp500_pe_15y_percentile", "shiller_pe")
-    assert MULTPL_METRIC_GROUPS[1] == ("earnings", "earnings_growth_12m", "earnings_yield")
+    assert MULTPL_METRIC_GROUPS[0] == (
+        "sp500_pe", "sp500_pe_15y_percentile", "sp500_peg", "sp500_peg_15y_percentile"
+    )
+    assert MULTPL_METRIC_GROUPS[1] == ("sp500_ps", "shiller_pe")
+    assert MULTPL_METRIC_GROUPS[2] == ("earnings", "earnings_growth_15y_percentile", "earnings_yield")
 
 
 def test_parse_multpl_table_keeps_estimate_flag_and_parses_percent_values() -> None:
@@ -138,6 +145,33 @@ def test_sp500_pe_15y_percentile_uses_full_trailing_fifteen_year_window() -> Non
     assert percentile.iloc[-1]["Value"] == 100.0
 
 
+def test_peg_uses_pe_divided_by_earnings_growth_percent() -> None:
+    dates = pd.to_datetime(["2020-01-01", "2020-02-01"])
+    pe = pd.DataFrame({"Date": dates, "Value": [20.0, 30.0], "Estimate": [False, True]})
+    growth = pd.DataFrame({"Date": dates, "Value": [10.0, -5.0], "Estimate": [False, False]})
+
+    peg = calculate_sp500_peg(pe, growth)
+
+    assert peg["Date"].tolist() == [pd.Timestamp("2020-01-01")]
+    assert peg["Value"].tolist() == [2.0]
+    assert peg["Estimate"].tolist() == [False]
+
+
+def test_percentile_chart_uses_labeled_regime_bands() -> None:
+    from market_cycle_multiples import MultipleMetric
+
+    metric = MultipleMetric("test_percentile", "Test 15Y Percentile", "https://example.com", "%")
+    data = pd.DataFrame(
+        {"Date": pd.date_range("2020-01-01", periods=3, freq="YS"), "Value": [5.0, 50.0, 95.0], "Estimate": False}
+    )
+
+    fig = build_multiple_percentile_fig(metric, data, None, None)
+
+    assert len(fig.layout.shapes) == 6
+    assert [shape.y0 for shape in fig.layout.shapes] == [0, 10, 25, 75, 90, 97.5]
+    assert list(fig.data[-1].y) == [5.0, 50.0, 95.0]
+
+
 def test_earnings_growth_is_12_month_roc_matched_by_calendar_month() -> None:
     dates = pd.date_range("2020-01-31", periods=27, freq="ME").delete(5)
     values = [100.0 + i for i in range(27) if i != 5]
@@ -173,4 +207,5 @@ def test_multpl_loader_includes_derived_earnings_growth(monkeypatch) -> None:
 
     assert not errors
     assert "earnings_growth_12m" in data
+    assert "earnings_growth_15y_percentile" in data
     assert abs(data["earnings_growth_12m"].iloc[-1]["Value"] - 10.0) < 1e-10
