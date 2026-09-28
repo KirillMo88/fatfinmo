@@ -430,6 +430,7 @@ def latest_current_risk_signal(daily: pd.DataFrame) -> dict[str, Any]:
         return empty
 
     d = daily.copy()
+    d.index.name = None
     if "Date" not in d:
         d["Date"] = pd.to_datetime(d.index, errors="coerce")
     else:
