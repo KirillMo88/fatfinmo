@@ -69,6 +69,7 @@ from financial_fragility_tab import render_financial_fragility_tab
 from treasury_fiscal_regime_tab import render_treasury_fiscal_regime_tab
 from treasury_funding_policy import read_snapshot as read_treasury_funding_policy_snapshot
 from gold_regime_tab import render_gold_regime_tab
+from elliott_waves_tab import render_elliott_waves_tab
 from btc_cycle_tab import render_btc_cycle_tab
 from market_cycle_tab import load_market_cycle_snapshot_cached, render_market_cycle_tab
 from global_m2_cycle import (
@@ -6944,6 +6945,7 @@ def main():
         "Graphs",
         "AI Dashboard",
         "Market Cycle",
+        "Eliot waves",
         "Liquidity Cycle",
         "Business Cycle",
         "Rates & Financial Conditions",
@@ -7216,6 +7218,8 @@ def main():
         render_market_regime_tab(market_snapshot)
     elif active_view == "Market Cycle":
         render_market_cycle_tab(get_fred_api_key_for_app())
+    elif active_view == "Eliot waves":
+        render_elliott_waves_tab()
     elif active_view == "Business Cycle":
         render_business_cycle_tab(get_fred_api_key_for_app())
     elif active_view == "Global Macro":

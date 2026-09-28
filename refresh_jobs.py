@@ -13,6 +13,8 @@ import pandas as pd
 
 import app
 import positioning
+from elliott_waves.service import refresh_all_assets, refresh_quote_overlay
+from elliott_waves.storage import MANIFEST_PATH as ELLIOTT_MANIFEST_PATH
 from liquidity_forecast import ERROR_PATH, SNAPSHOT_PATH, refresh_forecast_snapshot
 from rates_financial_conditions import SNAPSHOT_PATH as RATES_FC_SNAPSHOT_PATH, refresh_snapshot as refresh_rates_fc_snapshot
 from funding_conditions import WEEKLY_PATH as FUNDING_SNAPSHOT_PATH, refresh_snapshot as refresh_funding_snapshot
@@ -100,6 +102,7 @@ def run_nightly_analytics() -> None:
                 meta["SourceCalculatedAt"] = calculated_at
                 app.atomic_write_snapshot("screener_snapshot_latest", key, frame, meta)
                 rows_updated += len(frame)
+            refresh_all_assets(force=True)
         log_job("nightly_analytics", started, "CURRENT", rows_updated)
     except FileExistsError:
         log_job("nightly_analytics", started, "SKIPPED_LOCKED")
@@ -124,6 +127,7 @@ def update_market_performance_overlay() -> None:
                     continue
                 overlay, _, _ = app.compute_performance_table(slow_df, key, refresh_bucket)
                 rows_updated += len(overlay)
+            refresh_quote_overlay()
         log_job("market_performance_10m", started, "CURRENT", rows_updated)
     except FileExistsError:
         log_job("market_performance_10m", started, "SKIPPED_LOCKED")
@@ -321,6 +325,8 @@ def run_scheduler() -> None:
     if os.getenv("SCREENER_RUN_NIGHTLY_ON_START_IF_MISSING", "1").strip().lower() in {"1", "true", "yes"}:
         if latest_screener_snapshot_time() is None:
             run_job_safely("nightly_analytics_startup", run_nightly_analytics)
+        elif not ELLIOTT_MANIFEST_PATH.exists():
+            run_job_safely("elliott_waves_startup", refresh_all_assets)
         if not SNAPSHOT_PATH.exists():
             run_job_safely("liquidity_forecast_startup", run_liquidity_forecast)
         if not RATES_FC_SNAPSHOT_PATH.exists():
@@ -358,12 +364,14 @@ def run_scheduler() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screener refresh jobs")
-    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "liquidity-forecast", "rates-financial-conditions", "funding-conditions", "treasury-fiscal-regime", "weekly-positioning", "scheduler"])
+    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "elliott-waves", "liquidity-forecast", "rates-financial-conditions", "funding-conditions", "treasury-fiscal-regime", "weekly-positioning", "scheduler"])
     args = parser.parse_args()
     if args.job == "market-performance":
         update_market_performance_overlay()
     elif args.job == "nightly-analytics":
         run_nightly_analytics()
+    elif args.job == "elliott-waves":
+        refresh_all_assets(force=True)
     elif args.job == "liquidity-forecast":
         run_liquidity_forecast()
     elif args.job == "rates-financial-conditions":
