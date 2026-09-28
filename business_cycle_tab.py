@@ -12,6 +12,9 @@ from plotly.subplots import make_subplots
 from business_cycle import (
     BUSINESS_PHASES,
     ECONOMY_REGIMES,
+    economy_regime_assets,
+    economy_regime_composition,
+    economy_regime_label,
     BusinessCycleSnapshot,
     build_business_cycle_snapshot,
 )
@@ -374,6 +377,7 @@ def render_current_status(current: dict[str, Any]) -> None:
             [
                 ("Business Direction", fmt_text(current.get("BusinessCycleDirection"))),
                 ("Inflation Direction", fmt_text(current.get("InflationState"))),
+                ("Assets", economy_regime_assets(current.get("EconomyRegime"))),
                 ("Regime Confidence", fmt_text(current.get("RegimeConfidence"))),
                 ("Labor Cycle", fmt_text(current.get("LaborCycleState"))),
                 ("Productivity Flag", "YES" if bool(current.get("ProductivityExpansionFlag")) else "NO"),
@@ -570,6 +574,15 @@ def render_returns_section(snapshot: BusinessCycleSnapshot) -> None:
         st.dataframe(style_return_stats(filter_return_stats(phase, asset, horizon)), use_container_width=True, hide_index=True, height=table_height(filter_return_stats(phase, asset, horizon)))
         st.dataframe(style_return_stats(filter_return_stats(regime, asset, horizon)), use_container_width=True, hide_index=True, height=table_height(filter_return_stats(regime, asset, horizon)))
 
+    st.markdown("#### Asset Composition")
+    active_regime = economy_regime_label(snapshot.current.get("EconomyRegime"))
+    st.caption(f"Current Economy Regime: {active_regime}. The highlighted column is the active regime profile.")
+    st.dataframe(
+        style_asset_composition(economy_regime_composition(), active_regime),
+        use_container_width=True,
+        hide_index=True,
+    )
+
     st.markdown("#### Information Content Comparison")
     st.dataframe(format_eta(snapshot.eta_squared), use_container_width=True, hide_index=True)
 
@@ -601,6 +614,38 @@ def style_return_stats(frame: pd.DataFrame) -> Any:
         .map(lambda value: return_cell_style(value), subset=[col for col in ["AverageReturn", "MedianReturn", "HitRate"] if col in out.columns])
         .set_properties(**{"background-color": "#0f131a", "color": "#e5e7eb", "border-color": "#263241"})
     )
+
+
+def style_asset_composition(frame: pd.DataFrame, active_regime: str) -> Any:
+    out = frame.copy()
+    active = economy_regime_label(active_regime)
+    column_aliases = {
+        "GOLDILOCKS": "Goldilocks",
+        "REFLATION": "Reflation",
+        "STAGFLATION": "Stagflation / Inflation",
+        "DEFLATION": "Deflation",
+        "DISINFLATIONARY SLOWDOWN": "Deflation",
+    }
+    active_column = column_aliases.get(str(active).upper())
+    if active_column not in out.columns:
+        active_column = None
+    styler = out.style.set_properties(
+        **{"background-color": "#0f131a", "color": "#e5e7eb", "border-color": "#263241"}
+    )
+    if active_column:
+        position = int(out.columns.get_loc(active_column))
+        styler = styler.set_properties(
+            subset=[active_column],
+            **{"background-color": "#1d4ed8", "color": "#ffffff", "font-weight": "700"},
+        ).set_table_styles(
+            [
+                {
+                    "selector": f"th.col{position}",
+                    "props": [("background-color", "#1d4ed8"), ("color", "#ffffff"), ("font-weight", "700")],
+                }
+            ]
+        )
+    return styler
 
 
 def build_return_heatmap(frame: pd.DataFrame, asset: str, metric: str) -> go.Figure:
