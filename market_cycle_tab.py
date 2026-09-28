@@ -11,6 +11,13 @@ from plotly.subplots import make_subplots
 
 from current_risk import classify_component_state, current_risk_new_event
 from market_cycle import MarketCycleSnapshot, build_market_cycle_snapshot
+from market_cycle_multiples import (
+    MULTPL_METRICS,
+    MULTPL_METRIC_GROUPS,
+    MultipleMetric,
+    load_multpl_metrics,
+    multiples_range_bounds,
+)
 from spx_seasonality import (
     MONTH_LABELS,
     SPXSeasonality,
@@ -110,6 +117,12 @@ def load_market_cycle_snapshot_cached(refresh_nonce: int = 0) -> MarketCycleSnap
 def load_spy_macro_outlook_cached(history: pd.DataFrame, api_key: str | None = None, refresh_nonce: int = 0) -> SPYMacroOutlook:
     _ = refresh_nonce
     return build_spy_macro_outlook(history, api_key)
+
+
+@st.cache_data(show_spinner=False, ttl=MARKET_CYCLE_TTL_SECONDS)
+def load_multpl_metrics_cached(refresh_nonce: int = 0) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    _ = refresh_nonce
+    return load_multpl_metrics()
 
 
 def render_market_cycle_tab(api_key: str | None = None) -> None:
@@ -284,7 +297,80 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
         unsafe_allow_html=True,
     )
     st.caption("Historical analog output is a conditional historical distribution, not an investment recommendation.")
+    render_market_cycle_multiples(int(st.session_state.get("market_cycle_refresh_nonce", 0)))
     render_market_cycle_methodology()
+
+
+def render_market_cycle_multiples(refresh_nonce: int = 0) -> None:
+    st.markdown("### Multiples")
+    selection = st.radio(
+        "Multiples time range",
+        ["10Y", "20Y", "MAX"],
+        index=0,
+        horizontal=True,
+        key="market_cycle_multiples_range",
+    )
+    try:
+        metric_frames, errors = load_multpl_metrics_cached(refresh_nonce)
+    except Exception as exc:
+        st.error(f"Multpl data is temporarily unavailable: {exc}")
+        return
+
+    if not metric_frames:
+        st.error("Multpl data is temporarily unavailable for all nine indicators.")
+        return
+    if errors:
+        failed_titles = [metric.title for metric in MULTPL_METRICS if metric.key in errors]
+        st.warning("Some Multpl series could not be loaded: " + ", ".join(failed_titles))
+
+    range_start, range_end = multiples_range_bounds(metric_frames, selection)
+    metric_by_key = {metric.key: metric for metric in MULTPL_METRICS}
+    for group in MULTPL_METRIC_GROUPS:
+        columns = st.columns(3)
+        for column, key in zip(columns, group):
+            metric = metric_by_key[key]
+            with column:
+                frame = metric_frames.get(key, pd.DataFrame())
+                if frame.empty:
+                    st.info(f"{metric.title} data is currently unavailable.")
+                else:
+                    st.plotly_chart(
+                        build_multiple_metric_fig(metric, frame, range_start, range_end),
+                        use_container_width=True,
+                        config=MARKET_CYCLE_PLOTLY_CONFIG,
+                    )
+                st.markdown(f"[Source: Multpl]({metric.url})")
+    st.caption("Monthly, quarterly, and annual series are shown at their published frequencies. Latest Multpl estimates are marked in chart tooltips. Data is cached for six hours; use Refresh Market Cycle to reload.")
+
+
+def build_multiple_metric_fig(
+    metric: MultipleMetric,
+    data: pd.DataFrame,
+    range_start: pd.Timestamp | None,
+    range_end: pd.Timestamp | None,
+) -> go.Figure:
+    fig = go.Figure()
+    if not data.empty:
+        frame = data.copy()
+        if range_start is not None:
+            frame = frame.loc[frame["Date"].ge(range_start)]
+        if range_end is not None:
+            frame = frame.loc[frame["Date"].le(range_end)]
+        fig.add_trace(
+            go.Scatter(
+                x=frame["Date"],
+                y=frame["Value"],
+                mode="lines",
+                name=metric.title,
+                line={"color": "#38bdf8", "width": 2},
+                customdata=frame["Estimate"].map({True: "Estimate", False: "Reported"}),
+                hovertemplate=f"%{{x|%b %Y}}<br>%{{y:.2f}}{metric.unit}<br>%{{customdata}}<extra></extra>",
+            )
+        )
+    fig.update_yaxes(title_text="Value" if metric.unit == "x" else "Value (%)", ticksuffix=metric.unit)
+    if range_start is not None and range_end is not None:
+        fig.update_xaxes(range=[range_start, range_end])
+    return style_fig(fig, metric.title, 340)
 
 
 def render_summary_cards(current: dict[str, Any], spy_macro_outlook: SPYMacroOutlook | None = None) -> None:
