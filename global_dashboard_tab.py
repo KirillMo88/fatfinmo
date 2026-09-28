@@ -15,7 +15,12 @@ from funding_conditions import read_snapshot as read_funding_snapshot, read_wres
 from financial_fragility_export import build_financial_fragility_validation_workbook
 from global_dashboard import GlobalDashboardSnapshot, build_global_dashboard_snapshot
 from liquidity_forecast import read_forecast_snapshot
-from market_cycle_tab import load_market_cycle_snapshot_cached, load_spy_macro_outlook_cached
+from market_cycle_multiples import calculate_fundamental_outlook, format_fundamental_outlook_rows
+from market_cycle_tab import (
+    load_market_cycle_snapshot_cached,
+    load_multpl_metrics_cached,
+    load_spy_macro_outlook_cached,
+)
 from spy_macro_outlook import SPY_MACRO_HORIZONS, score_direction, score_state
 from rates_financial_conditions import read_snapshot as read_rates_snapshot
 from treasury_fiscal_regime import read_snapshot as read_treasury_snapshot
@@ -373,12 +378,21 @@ def render_global_dashboard_tab(
             )
     except Exception as exc:
         errors.append(f"SPY Macro Outlook: {type(exc).__name__}: {exc}")
+    fundamental_outlook = None
+    try:
+        metric_frames, _ = load_multpl_metrics_cached(
+            int(st.session_state.get("market_cycle_refresh_nonce", 0))
+        )
+        fundamental_outlook = calculate_fundamental_outlook(metric_frames)
+    except Exception as exc:
+        fundamental_outlook = calculate_fundamental_outlook({})
+        errors.append(f"Fundamental Outlook: {type(exc).__name__}: {exc}")
     as_of = pd.to_datetime(dashboard.fields.get("DashboardAsOf"), errors="coerce")
     st.caption(f"Dashboard as of {as_of.date() if pd.notna(as_of) else 'unavailable'} | Production outputs are shown without a combined global score.")
     if errors:
         st.warning("Some modules are unavailable; the rest of the dashboard remains active. " + " | ".join(errors))
 
-    _render_executive(dashboard, macro_outlook)
+    _render_executive(dashboard, macro_outlook, fundamental_outlook)
     _render_diagnostics(dashboard, loaded)
 
 
@@ -412,7 +426,11 @@ def _cycle_percent(value: Any) -> str:
     return f"{number * 100:.1f}%" if np.isfinite(number) else "n/a"
 
 
-def _render_executive(d: GlobalDashboardSnapshot, macro_outlook: Any = None) -> None:
+def _render_executive(
+    d: GlobalDashboardSnapshot,
+    macro_outlook: Any = None,
+    fundamental_outlook: dict[str, tuple[float | None, float | None]] | None = None,
+) -> None:
     lq, mk, ec, rt, fd, tr = d.liquidity, d.market, d.economy, d.rates, d.funding, d.treasury
     st.markdown("### Global Liquidity & Forecast")
     liquidity_columns = st.columns(4, gap="medium")
@@ -471,7 +489,7 @@ def _render_executive(d: GlobalDashboardSnapshot, macro_outlook: Any = None) -> 
         )
 
     st.markdown("### Market Cycle")
-    cycle_cols = st.columns(6, gap="medium")
+    cycle_cols = st.columns(7, gap="medium")
     with cycle_cols[0]:
         _render_cycle_panel(
             "Structural Market Cycle",
@@ -532,6 +550,11 @@ def _render_executive(d: GlobalDashboardSnapshot, macro_outlook: Any = None) -> 
             macro_rows.append(("Status", "UNAVAILABLE"))
         _render_cycle_panel("Macro Outlook", macro_rows, accent_color=_macro_outlook_color(macro_outlook))
     with cycle_cols[5]:
+        _render_cycle_panel(
+            "Fundamental Outlook",
+            format_fundamental_outlook_rows(fundamental_outlook or {}),
+        )
+    with cycle_cols[6]:
         _card("Historical Outlook", _pct(mk["HistoricalOutlook_12M_Median"]), [
             ("12M P(positive)", _pct(mk["HistoricalOutlook_12M_PPositive"])),
             ("P(drawdown >15%)", _pct(mk["HistoricalOutlook_DD15"])),

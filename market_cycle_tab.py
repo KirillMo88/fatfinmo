@@ -21,6 +21,7 @@ from market_cycle_multiples import (
     MULTPL_METRIC_GROUPS,
     MultipleMetric,
     calculate_fundamental_outlook,
+    format_fundamental_outlook_rows,
     load_multpl_metrics,
     multiples_range_bounds,
 )
@@ -233,7 +234,15 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
         spy_macro_outlook = None
         st.warning(f"SPY Macro Outlook is temporarily unavailable: {exc}")
 
-    render_summary_cards(current, spy_macro_outlook)
+    refresh_nonce = int(st.session_state.get("market_cycle_refresh_nonce", 0))
+    try:
+        metric_frames, _ = load_multpl_metrics_cached(refresh_nonce)
+        fundamental_outlook = calculate_fundamental_outlook(metric_frames)
+    except Exception as exc:
+        fundamental_outlook = calculate_fundamental_outlook({})
+        st.warning(f"Fundamental Outlook data is temporarily unavailable: {exc}")
+
+    render_summary_cards(current, spy_macro_outlook, fundamental_outlook)
     st.markdown("### Historical Outlook - Current Market State")
     render_outlook_table(snapshot.outlook)
 
@@ -304,7 +313,6 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
 
     if spy_macro_outlook is not None:
         render_spy_macro_outlook(spy_macro_outlook, history)
-    render_fundamental_outlook(int(st.session_state.get("market_cycle_refresh_nonce", 0)))
 
     st.markdown("### Current Risk")
     risk_col, confirm_col = st.columns([1.05, 1.25])
@@ -424,33 +432,6 @@ def render_market_cycle_multiples(refresh_nonce: int = 0) -> None:
     st.caption("Monthly, quarterly, and annual series are shown at their published frequencies. Latest Multpl estimates are marked in chart tooltips. Data is cached for six hours; use Refresh Market Cycle to reload.")
 
 
-def render_fundamental_outlook(refresh_nonce: int = 0) -> None:
-    st.markdown("### Fundamental Outlook")
-    try:
-        metric_frames, _ = load_multpl_metrics_cached(refresh_nonce)
-    except Exception as exc:
-        st.warning(f"Fundamental Outlook data is temporarily unavailable: {exc}")
-        return
-
-    summary = calculate_fundamental_outlook(metric_frames)
-    panels = [
-        ("P/E", "sp500_pe", "x", "%"),
-        ("PEG", "sp500_peg", "x", "%"),
-        ("Earnings Growth", "earnings_growth_12m", "%", " pp"),
-    ]
-    columns = st.columns(len(panels))
-    for column, (title, key, value_unit, change_unit) in zip(columns, panels):
-        value, change = summary[key]
-        if value is None:
-            display_value = "n/a"
-        else:
-            formatted_value = f"{value:.2f}{value_unit}"
-            formatted_change = "n/a" if change is None else f"{change:+.1f}{change_unit}"
-            display_value = f"{formatted_value} (12M Change {formatted_change})"
-        with column:
-            render_top_level_panel(title, [("3MA", display_value)])
-
-
 def build_multiple_metric_fig(
     metric: MultipleMetric,
     data: pd.DataFrame,
@@ -549,15 +530,23 @@ def build_multiple_percentile_fig(
     return style_fig(fig, metric.title, 340)
 
 
-def render_summary_cards(current: dict[str, Any], spy_macro_outlook: SPYMacroOutlook | None = None) -> None:
-    cards = build_top_level_analytics(current, spy_macro_outlook)
+def render_summary_cards(
+    current: dict[str, Any],
+    spy_macro_outlook: SPYMacroOutlook | None = None,
+    fundamental_outlook: dict[str, tuple[float | None, float | None]] | None = None,
+) -> None:
+    cards = build_top_level_analytics(current, spy_macro_outlook, fundamental_outlook)
     cols = st.columns(len(cards))
     for idx, (title, rows) in enumerate(cards):
         with cols[idx]:
             render_top_level_panel(title, rows)
 
 
-def build_top_level_analytics(current: dict[str, Any], spy_macro_outlook: SPYMacroOutlook | None = None) -> list[tuple[str, list[tuple[str, str]]]]:
+def build_top_level_analytics(
+    current: dict[str, Any],
+    spy_macro_outlook: SPYMacroOutlook | None = None,
+    fundamental_outlook: dict[str, tuple[float | None, float | None]] | None = None,
+) -> list[tuple[str, list[tuple[str, str]]]]:
     cards = [
         (
             "Structural Market Cycle",
@@ -611,6 +600,8 @@ def build_top_level_analytics(current: dict[str, Any], spy_macro_outlook: SPYMac
             )
         macro_rows.append(("Financial Transmission", _spy_macro_value(spy_macro_outlook.current.get("Transmission_Score"), " / 100")))
         cards.append(("Macro Outlook", macro_rows))
+    if fundamental_outlook is not None:
+        cards.append(("Fundamental Outlook", format_fundamental_outlook_rows(fundamental_outlook)))
     return cards
 
 
