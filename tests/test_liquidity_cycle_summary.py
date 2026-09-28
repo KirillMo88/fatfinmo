@@ -1,6 +1,9 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
+import app as application
 from app import _liquidity_cycle_maturity_pct, _liquidity_ordinary_roc
 
 
@@ -17,3 +20,10 @@ def test_liquidity_cycle_maturity_uses_october_2022_trough_and_65_month_length()
 
     assert np.isclose(maturity, expected_months / 65.0 * 100.0)
     assert round(maturity) == 73
+
+
+def test_asset_allocation_cycle_image_is_bundled_with_app():
+    image = Path(application.__file__).resolve().parent / "assets" / "asset-allocation-cycle.png"
+
+    assert image.is_file()
+    assert image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
