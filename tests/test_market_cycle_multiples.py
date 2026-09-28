@@ -124,6 +124,35 @@ def test_multiple_chart_shows_reported_and_estimated_series_with_range() -> None
     assert list(fig.layout.xaxis.range) == [pd.Timestamp("2021-01-01"), pd.Timestamp("2025-12-31")]
 
 
+def test_peg_chart_is_clamped_to_five() -> None:
+    from market_cycle_multiples import MultipleMetric
+
+    metric = MultipleMetric("sp500_peg", "S&P 500 PEG", "https://example.com", "x")
+    data = pd.DataFrame(
+        {"Date": pd.to_datetime(["2025-01-01"]), "Value": [6.0], "Estimate": [False]}
+    )
+
+    fig = build_multiple_metric_fig(metric, data, None, None)
+
+    assert list(fig.layout.yaxis.range) == [0, 5]
+
+
+def test_earnings_growth_percentile_uses_green_for_high_values() -> None:
+    from market_cycle_multiples import MultipleMetric
+
+    metric = MultipleMetric(
+        "earnings_growth_15y_percentile", "Earnings Growth 15Y Percentile", "https://example.com", "%"
+    )
+    data = pd.DataFrame(
+        {"Date": pd.to_datetime(["2025-01-01"]), "Value": [95.0], "Estimate": [False]}
+    )
+
+    fig = build_multiple_percentile_fig(metric, data, None, None)
+
+    assert fig.layout.shapes[0].fillcolor == "#ef4444"
+    assert fig.layout.shapes[-1].fillcolor == "#15803d"
+
+
 def test_sp500_pe_excludes_jan_through_sep_2009_only() -> None:
     dates = pd.to_datetime(["2008-12-01", "2009-01-01", "2009-09-01", "2009-10-01"])
     frame = pd.DataFrame({"Date": dates, "Value": [15.0, 16.0, 17.0, 18.0], "Estimate": False})
