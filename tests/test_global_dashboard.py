@@ -90,7 +90,7 @@ def test_dashboard_maps_production_outputs_and_marks_missing_fragility():
         "Date": "2026-09-18", "TreasuryLiquidityState": "MILD INJECTION",
         "FiscalImpulseState": "POSITIVE / ACCELERATING", "TreasuryFinancingPressure": "MODERATE",
         "PolicyMix": "FISCAL & LIQUIDITY SUPPORT",
-    }]), monthly=pd.DataFrame([{
+    }]), financing=pd.DataFrame([{
         "Date": "2026-09-18", "near_term_refinancing_pressure": 54.0,
         "pressure_3m_percentile": 60.0, "pressure_6m_percentile": 45.0,
         "pressure_ratio_3m": 1.2, "pressure_ratio_6m": 1.1,
