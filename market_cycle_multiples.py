@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -197,6 +198,31 @@ def calculate_fundamental_outlook(
             change = (current / float(previous) - 1.0) * 100.0
         results[key] = (current, change)
     return results
+
+
+def format_fundamental_outlook_rows(
+    summary: dict[str, tuple[float | None, float | None]],
+) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    definitions = (
+        ("P/E (3MA)", "sp500_pe", "x", "%"),
+        ("PEG (3MA)", "sp500_peg", "x", "%"),
+        ("Earnings Growth (3MA)", "earnings_growth_12m", "%", " pp"),
+    )
+    for label, key, value_unit, change_unit in definitions:
+        value, change = summary.get(key, (None, None))
+        if value is None or not math.isfinite(value):
+            display_value = "n/a"
+        else:
+            formatted_value = f"{value:.2f}{value_unit}"
+            formatted_change = (
+                "n/a"
+                if change is None or not math.isfinite(change)
+                else f"{change:+.1f}{change_unit}"
+            )
+            display_value = f"{formatted_value} (12M Change {formatted_change})"
+        rows.append((label, display_value))
+    return rows
 
 
 def fetch_multpl_metric(metric: MultipleMetric, timeout: float = 15.0) -> pd.DataFrame:
