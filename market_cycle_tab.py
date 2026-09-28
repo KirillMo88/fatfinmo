@@ -374,6 +374,7 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
     render_market_cycle_methodology()
 
 
+@st.fragment
 def render_market_cycle_multiples(refresh_nonce: int = 0) -> None:
     st.markdown("### Multiples")
     selection = st.radio(
