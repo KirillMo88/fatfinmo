@@ -179,6 +179,21 @@ def _inflation_color(score: Any) -> str:
     return "#ef4444" if value > 0.2 else "#22c55e"
 
 
+def _near_term_refinancing_color(score: Any) -> str:
+    """Color the financing card from the 0-100 near-term refinancing score."""
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return "#64748b"
+    if not np.isfinite(value):
+        return "#64748b"
+    if value < 45:
+        return "#22c55e"
+    if value <= 55:
+        return "#facc15"
+    return "#ef4444"
+
+
 def _economy_regime_color(value: Any) -> str:
     text = str(value or "").upper()
     if "GOLDILOCKS" in text or "REFLATION" in text:
@@ -625,10 +640,13 @@ def _render_executive(
         ], accent_color=_fiscal_color(tr["FiscalGrowthImpulse"]))
     with cols[2]:
         _card("Financing Pressure", tr["FinancingPressure"], [
+            ("Near-term score", _fmt(tr["NearTermRefinancingScore"], 1)),
+            ("3M pressure score", _fmt(tr["NearTermRefinancing3M"], 1)),
+            ("6M pressure score", _fmt(tr["NearTermRefinancing6M"], 1)),
             ("Bill financing share", _pct(tr["BillFinancingShare"])),
             ("Duration supply percentile", _pct(tr["DurationSupplyProxy"])),
             ("Absorption", tr["AbsorptionState"]),
-        ])
+        ], accent_color=_near_term_refinancing_color(tr["NearTermRefinancingScore"]))
     st.markdown(f"<div class='gd-policy'>Policy Mix: {html.escape(str(tr['PolicyMix']))}</div>", unsafe_allow_html=True)
 
     st.markdown("### Cross-Cycle Sequence")
