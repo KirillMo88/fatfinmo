@@ -317,7 +317,7 @@ def render_market_cycle_multiples(refresh_nonce: int = 0) -> None:
         return
 
     if not metric_frames:
-        st.error("Multpl data is temporarily unavailable for all nine indicators.")
+        st.error("Multpl data is temporarily unavailable for all indicators.")
         return
     if errors:
         failed_titles = [metric.title for metric in MULTPL_METRICS if metric.key in errors]
@@ -326,7 +326,7 @@ def render_market_cycle_multiples(refresh_nonce: int = 0) -> None:
     range_start, range_end = multiples_range_bounds(metric_frames, selection)
     metric_by_key = {metric.key: metric for metric in MULTPL_DISPLAY_METRICS}
     for group in MULTPL_METRIC_GROUPS:
-        columns = st.columns(3)
+        columns = st.columns(len(group))
         for column, key in zip(columns, group):
             metric = metric_by_key[key]
             with column:
@@ -334,11 +334,12 @@ def render_market_cycle_multiples(refresh_nonce: int = 0) -> None:
                 if frame.empty:
                     st.info(f"{metric.title} data is currently unavailable.")
                 else:
-                    st.plotly_chart(
-                        build_multiple_metric_fig(metric, frame, range_start, range_end),
-                        use_container_width=True,
-                        config=MARKET_CYCLE_PLOTLY_CONFIG,
+                    builder = (
+                        build_sp500_pe_percentile_fig
+                        if key == "sp500_pe_15y_percentile"
+                        else build_multiple_metric_fig
                     )
+                    st.plotly_chart(builder(metric, frame, range_start, range_end), use_container_width=True, config=MARKET_CYCLE_PLOTLY_CONFIG)
                 st.markdown(f"[Source: Multpl]({metric.url})")
     st.caption("Monthly, quarterly, and annual series are shown at their published frequencies. Latest Multpl estimates are marked in chart tooltips. Data is cached for six hours; use Refresh Market Cycle to reload.")
 
@@ -374,6 +375,53 @@ def build_multiple_metric_fig(
             )
         )
     fig.update_yaxes(title_text=axis_title, ticksuffix=axis_suffix)
+    if range_start is not None and range_end is not None:
+        fig.update_xaxes(range=[range_start, range_end])
+    return style_fig(fig, metric.title, 340)
+
+
+def build_sp500_pe_percentile_fig(
+    metric: MultipleMetric,
+    data: pd.DataFrame,
+    range_start: pd.Timestamp | None,
+    range_end: pd.Timestamp | None,
+) -> go.Figure:
+    fig = go.Figure()
+    frame = data.copy()
+    if range_start is not None:
+        frame = frame.loc[frame["Date"].ge(range_start)]
+    if range_end is not None:
+        frame = frame.loc[frame["Date"].le(range_end)]
+
+    colors = ["#166534", "#15803d", "#22c55e", "#65a30d", "#84cc16", "#eab308", "#f59e0b", "#f97316", "#ef4444", "#b91c1c"]
+    for lower, color in zip(range(0, 100, 10), colors):
+        upper = lower + 10
+        band = frame["Value"].where(frame["Value"].ge(lower) & (frame["Value"].lt(upper) if upper < 100 else frame["Value"].le(upper)))
+        fig.add_trace(
+            go.Scatter(
+                x=frame["Date"],
+                y=band,
+                mode="lines",
+                line={"width": 0},
+                fill="tozeroy",
+                fillcolor=color,
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+    if not frame.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=frame["Date"],
+                y=frame["Value"],
+                mode="lines",
+                name=metric.title,
+                line={"color": "#e2e8f0", "width": 1.5},
+                customdata=frame["Estimate"].map({True: "Estimate", False: "Reported"}),
+                hovertemplate="%{x|%b %Y}<br>15Y Percentile: %{y:.1f}%<br>%{customdata}<extra></extra>",
+            )
+        )
+    fig.update_yaxes(title_text="15Y Percentile", ticksuffix="%", range=[0, 100])
     if range_start is not None and range_end is not None:
         fig.update_xaxes(range=[range_start, range_end])
     return style_fig(fig, metric.title, 340)
