@@ -453,6 +453,8 @@ def build_multiple_metric_fig(
             )
         )
     fig.update_yaxes(title_text=axis_title, ticksuffix=axis_suffix)
+    if metric.key == "sp500_peg":
+        fig.update_yaxes(range=[0, 5])
     if range_start is not None and range_end is not None:
         fig.update_xaxes(range=[range_start, range_end])
     return style_fig(fig, metric.title, 340)
@@ -471,14 +473,24 @@ def build_multiple_percentile_fig(
     if range_end is not None:
         frame = frame.loc[frame["Date"].le(range_end)]
 
-    zones = [
-        (0, 10, "#38bdf8", "Extreme Oversold"),
-        (10, 25, "#60a5fa", "Oversold"),
-        (25, 75, "#64748b", "Normal"),
-        (75, 90, "#facc15", "Extended"),
-        (90, 97.5, "#f97316", "Overextended"),
-        (97.5, 100, "#ef4444", "Extreme"),
-    ]
+    if metric.key == "earnings_growth_15y_percentile":
+        zones = [
+            (0, 10, "#ef4444", "Extreme Oversold"),
+            (10, 25, "#f97316", "Oversold"),
+            (25, 75, "#64748b", "Normal"),
+            (75, 90, "#84cc16", "Extended"),
+            (90, 97.5, "#22c55e", "Overextended"),
+            (97.5, 100, "#15803d", "Extreme"),
+        ]
+    else:
+        zones = [
+            (0, 10, "#38bdf8", "Extreme Oversold"),
+            (10, 25, "#60a5fa", "Oversold"),
+            (25, 75, "#64748b", "Normal"),
+            (75, 90, "#facc15", "Extended"),
+            (90, 97.5, "#f97316", "Overextended"),
+            (97.5, 100, "#ef4444", "Extreme"),
+        ]
     for lower, upper, color, label in zones:
         fig.add_hrect(
             y0=lower,
