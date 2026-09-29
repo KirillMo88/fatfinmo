@@ -22,29 +22,47 @@ AISC_ZONE_COLORS = (
 )
 
 
-def filter_aisc_range(frame: pd.DataFrame, selected_range: str) -> pd.DataFrame:
+def aisc_range_window(
+    frame: pd.DataFrame,
+    selected_range: str,
+    anchor_date: pd.Timestamp | None = None,
+) -> tuple[pd.Timestamp, pd.Timestamp] | None:
     if frame.empty or selected_range == "MAX":
-        return frame.copy()
+        return None
     years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
     if years is None:
+        return None
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    end = pd.to_datetime(anchor_date, errors="coerce") if anchor_date is not None else dates.max()
+    if pd.isna(end):
+        return None
+    return end - pd.DateOffset(years=years), end
+
+
+def filter_aisc_range(
+    frame: pd.DataFrame,
+    selected_range: str,
+    anchor_date: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    window = aisc_range_window(frame, selected_range, anchor_date)
+    if window is None:
         return frame.copy()
     dates = pd.to_datetime(frame["date"], errors="coerce")
-    end = dates.max()
-    if pd.isna(end):
-        return frame.iloc[0:0].copy()
-    return frame.loc[dates.ge(end - pd.DateOffset(years=years))].copy()
+    start, end = window
+    return frame.loc[dates.ge(start) & dates.le(end)].copy()
 
 
 def render_gold_aisc_valuation(
     snapshot: GoldAISCValuationSnapshot | None,
     selected_range: str = "5Y",
+    range_end: pd.Timestamp | None = None,
 ) -> None:
     st.markdown("#### Gold / AISC Valuation")
     if snapshot is None or snapshot.history.empty:
         st.info("Gold / AISC valuation data is unavailable.")
         return
 
-    data = filter_aisc_range(snapshot.history, selected_range)
+    data = filter_aisc_range(snapshot.history, selected_range, range_end)
     data = data.dropna(subset=["gold_aisc_ratio", "aisc"])
     if data.empty:
         st.info("Gold / AISC valuation data is unavailable for the selected range.")
@@ -73,13 +91,16 @@ def render_gold_aisc_valuation(
         st.metric("Quarter", quarter)
 
     st.plotly_chart(
-        build_gold_aisc_valuation_fig(data),
+        build_gold_aisc_valuation_fig(data, aisc_range_window(snapshot.history, selected_range, range_end)),
         use_container_width=True,
         config={"displayModeBar": False, "responsive": True},
     )
 
 
-def build_gold_aisc_valuation_fig(frame: pd.DataFrame) -> go.Figure:
+def build_gold_aisc_valuation_fig(
+    frame: pd.DataFrame,
+    x_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
+) -> go.Figure:
     data = frame.sort_values("date").copy()
     data["date"] = pd.to_datetime(data["date"], errors="coerce")
     data["gold_close"] = pd.to_numeric(data["gold_close"], errors="coerce")
@@ -185,6 +206,8 @@ def build_gold_aisc_valuation_fig(frame: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(title_text="Premium / Discount (%)", ticksuffix="%", row=2, col=1)
     fig.update_yaxes(title_text="AISC ($/oz)", row=3, col=1)
     fig.update_xaxes(title_text="Date", row=3, col=1)
+    if x_range is not None:
+        fig.update_xaxes(range=list(x_range))
     fig.update_layout(
         height=900,
         template="plotly_dark",

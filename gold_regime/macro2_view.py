@@ -26,6 +26,7 @@ def render_gold_structural_macro2(
     snapshot: GoldStructuralMacro2Snapshot | None,
     aisc_snapshot: GoldAISCValuationSnapshot | None = None,
     selected_range: str = "5Y",
+    range_end: pd.Timestamp | None = None,
 ) -> None:
     st.markdown("### Gold Structural Macro 2")
     st.caption("Macro conditions for future Gold returns across 3–12 month horizons")
@@ -36,7 +37,7 @@ def render_gold_structural_macro2(
     current = snapshot.current or {}
     render_horizon_table(current)
     render_formula_details()
-    render_gold_aisc_valuation(aisc_snapshot, selected_range)
+    render_gold_aisc_valuation(aisc_snapshot, selected_range, range_end)
     render_current_term_structure(current)
     render_macro2_diagnostics(current)
     render_macro2_model_details(current)
