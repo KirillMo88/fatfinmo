@@ -10,7 +10,7 @@ from gold_regime.aisc import (
     build_quarterly_aisc,
 )
 from gold_regime.aisc_view import filter_aisc_range
-from gold_regime.demand_structure import build_demand_structure_frame
+from gold_regime.demand_structure import DEMAND_CATEGORIES, build_demand_structure_frame
 from gold_regime.demand_structure_view import build_demand_structure_fig, filter_demand_range
 
 
@@ -64,7 +64,7 @@ def test_aisc_range_uses_the_shared_global_range_anchor() -> None:
     assert filtered["date"].max() == pd.Timestamp("2026-06-01")
 
 
-def test_demand_structure_has_two_quarterly_stacked_series_and_shared_range() -> None:
+def test_demand_structure_has_three_quarterly_stacked_series_and_shared_range() -> None:
     frame = build_demand_structure_frame()
     filtered = filter_demand_range(frame, "5Y", pd.Timestamp("2026-09-27"))
     figure = build_demand_structure_fig(
@@ -72,9 +72,10 @@ def test_demand_structure_has_two_quarterly_stacked_series_and_shared_range() ->
         (pd.Timestamp("2021-09-27"), pd.Timestamp("2026-09-27")),
     )
 
-    assert len(frame) == 198
+    assert len(frame) == 264
+    assert DEMAND_CATEGORIES == ["Jewellery", "Technology", "Investment", "Central Banks"]
     assert frame["date"].min() == pd.Timestamp("2010-03-31")
     assert frame["date"].max() == pd.Timestamp("2026-06-30")
-    assert len(figure.data) == 6
+    assert len(figure.data) == 12
     assert figure.layout.barmode == "relative"
     assert list(figure.layout.xaxis.range) == [pd.Timestamp("2021-09-27"), pd.Timestamp("2026-09-27")]
