@@ -35,6 +35,7 @@ services:
       - ./persistent/tradingview_mcp:/app/persistent/tradingview_mcp
       - ./persistent/elliott_waves:/app/persistent/elliott_waves
       - ./persistent/technical_outlook:/app/persistent/technical_outlook
+      - ./persistent/technical_outlook_simple_v3:/app/persistent/technical_outlook_simple_v3
 
   screener-jobs:
     build: .
@@ -71,6 +72,7 @@ services:
       - ./persistent/tradingview_mcp:/app/persistent/tradingview_mcp
       - ./persistent/elliott_waves:/app/persistent/elliott_waves
       - ./persistent/technical_outlook:/app/persistent/technical_outlook
+      - ./persistent/technical_outlook_simple_v3:/app/persistent/technical_outlook_simple_v3
 
   tester:
     build: .
