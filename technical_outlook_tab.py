@@ -105,7 +105,7 @@ def render_technical_outlook_asset(
     overlay_cols = st.columns(4)
     show_primary = overlay_cols[0].checkbox("Elliott Primary", value=True, key=f"to_primary_{ticker}")
     show_alternative = overlay_cols[1].checkbox("Elliott Alternative", value=False, key=f"to_alt_{ticker}")
-    show_levels = overlay_cols[2].checkbox("Support / Resistance", value=False, key=f"to_levels_{ticker}")
+    show_levels = overlay_cols[2].checkbox("Support / Resistance", value=True, key=f"to_levels_{ticker}")
     show_profile = overlay_cols[3].checkbox("Volume Profile", value=False, key=f"to_profile_{ticker}")
     if show_primary and show_alternative:
         st.caption("Primary and Alternative are both visible by explicit selection.")
@@ -166,10 +166,22 @@ def build_technical_chart(
         if name in frame and frame[name].notna().any():
             layers.append(base.mark_line(color=color, strokeWidth=1.5).encode(y=alt.Y(f"{name}:Q", scale=alt.Scale(zero=False))))
     if show_levels:
-        zones = pd.DataFrame(snapshot.get("support_resistance") or [])
+        zones = _visible_support_resistance(snapshot)
         if not zones.empty:
-            zones["color"] = np.where(zones["role"] == "SUPPORT", "#22c55e", "#ef4444")
-            layers.append(alt.Chart(zones).mark_rect(opacity=0.10).encode(y="low:Q", y2="high:Q", color=alt.Color("color:N", scale=None, legend=None)))
+            layers.append(
+                alt.Chart(zones).mark_rect().encode(
+                    y="low:Q",
+                    y2="high:Q",
+                    color=alt.Color("color:N", scale=None, legend=None),
+                    opacity=alt.Opacity("zone_opacity:Q", scale=None, legend=None),
+                    tooltip=[
+                        alt.Tooltip("role:N", title="Zone"),
+                        alt.Tooltip("confluence:N", title="Confluence"),
+                        alt.Tooltip("low:Q", title="Low", format=",.2f"),
+                        alt.Tooltip("high:Q", title="High", format=",.2f"),
+                    ],
+                )
+            )
     if show_profile:
         profile = snapshot.get("volume_profile") or {}
         profile_levels = []
@@ -212,6 +224,18 @@ def _elliott_layers(candidate: dict[str, Any] | None, color: str, start: pd.Time
     line = alt.Chart(points).mark_line(color=color, strokeWidth=1.6).encode(x="date:T", y=alt.Y("price:Q", scale=alt.Scale(zero=False)))
     labels = alt.Chart(points).mark_text(color=color, dy=-10, fontWeight="bold").encode(x="date:T", y="price:Q", text="label:N")
     return [line, labels]
+
+
+def _visible_support_resistance(snapshot: dict[str, Any]) -> pd.DataFrame:
+    zones = pd.DataFrame(snapshot.get("support_resistance") or [])
+    if zones.empty or "confluence" not in zones or "role" not in zones:
+        return pd.DataFrame()
+    zones = zones.loc[zones["confluence"].isin(["HIGH", "VERY_HIGH"])].copy()
+    if zones.empty:
+        return zones
+    zones["color"] = np.where(zones["role"] == "SUPPORT", "#00ff88", "#ff4d5a")
+    zones["zone_opacity"] = np.where(zones["confluence"] == "VERY_HIGH", 0.42, 0.26)
+    return zones
 
 
 def _render_analysis(snapshot: dict[str, Any]) -> None:
