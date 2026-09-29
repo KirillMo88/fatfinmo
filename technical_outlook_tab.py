@@ -288,7 +288,8 @@ def _render_analysis(snapshot: dict[str, Any]) -> None:
     zones = snapshot.get("support_resistance") or []
     if zones:
         st.dataframe(pd.DataFrame([{
-            "Role": zone.get("role"), "Zone": f"{zone.get('low', 0):,.2f}–{zone.get('high', 0):,.2f}", "Confluence": zone.get("confluence"),
+            "Role": zone.get("role"), "Zone": f"{zone.get('low', 0):,.2f}–{zone.get('high', 0):,.2f}",
+            "Distance from Price %": _zone_distance_from_price(snapshot.get("price"), zone), "Confluence": zone.get("confluence"),
             "Sources": ", ".join(zone.get("sources") or []), "Timeframes": ", ".join(zone.get("timeframes") or []),
         } for zone in zones]), hide_index=True, use_container_width=True)
 
@@ -402,3 +403,14 @@ def _range(value: Any) -> str:
 
 def _range_list(value: Any) -> str:
     return f"{_price(value[0])}–{_price(value[1])}" if isinstance(value, list) and len(value) >= 2 else "N/A"
+
+
+def _zone_distance_from_price(current_price: Any, zone: dict[str, Any]) -> str:
+    try:
+        average_price = (float(zone["low"]) + float(zone["high"])) / 2.0
+        if average_price == 0.0:
+            return "N/A"
+        distance = float(current_price) / average_price - 1.0
+        return f"{distance:+.2%}"
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return "N/A"
