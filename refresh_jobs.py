@@ -23,6 +23,12 @@ from treasury_funding_policy import refresh_snapshot as refresh_treasury_funding
 from technical_outlook.config import MODEL_VERSION as TECHNICAL_OUTLOOK_MODEL_VERSION
 from technical_outlook.service import refresh_all_core_assets as refresh_technical_outlook_assets
 from technical_outlook.storage import MANIFEST_PATH as TECHNICAL_OUTLOOK_MANIFEST_PATH, read_manifest as read_technical_outlook_manifest
+from technical_outlook_simple_v3.config import MODEL_VERSION as TECHNICAL_OUTLOOK_SIMPLE_V3_MODEL_VERSION
+from technical_outlook_simple_v3.service import refresh_all_core_assets as refresh_technical_outlook_simple_v3_assets
+from technical_outlook_simple_v3.storage import (
+    MANIFEST_PATH as TECHNICAL_OUTLOOK_SIMPLE_V3_MANIFEST_PATH,
+    read_manifest as read_technical_outlook_simple_v3_manifest,
+)
 
 
 JOB_DIR = Path("persistent") / "job_status"
@@ -108,6 +114,8 @@ def run_nightly_analytics() -> None:
             refresh_all_assets(force=True)
             technical_manifest = refresh_technical_outlook_assets(run_at=datetime.now(timezone.utc))
             rows_updated += sum(1 for item in technical_manifest.get("assets", []) if item.get("status") == "CURRENT")
+            simple_v3_manifest = refresh_technical_outlook_simple_v3_assets(run_at=datetime.now(timezone.utc))
+            rows_updated += sum(1 for item in simple_v3_manifest.get("assets", []) if item.get("status") == "CURRENT")
         log_job("nightly_analytics", started, "CURRENT", rows_updated)
     except FileExistsError:
         log_job("nightly_analytics", started, "SKIPPED_LOCKED")
@@ -337,6 +345,11 @@ def run_scheduler() -> None:
             or read_technical_outlook_manifest().get("model_version") != TECHNICAL_OUTLOOK_MODEL_VERSION
         ):
             run_job_safely("technical_outlook_startup", refresh_technical_outlook_assets)
+        if (
+            not TECHNICAL_OUTLOOK_SIMPLE_V3_MANIFEST_PATH.exists()
+            or read_technical_outlook_simple_v3_manifest().get("model_version") != TECHNICAL_OUTLOOK_SIMPLE_V3_MODEL_VERSION
+        ):
+            run_job_safely("technical_outlook_simple_v3_startup", refresh_technical_outlook_simple_v3_assets)
         if not SNAPSHOT_PATH.exists():
             run_job_safely("liquidity_forecast_startup", run_liquidity_forecast)
         if not RATES_FC_SNAPSHOT_PATH.exists():
