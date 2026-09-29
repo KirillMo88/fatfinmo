@@ -10,6 +10,7 @@ import streamlit as st
 
 from .macro2 import HORIZONS
 from .aisc_view import render_gold_aisc_valuation
+from .demand_structure_view import render_demand_structure
 from .models import GoldAISCValuationSnapshot, GoldStructuralMacro2Snapshot
 
 
@@ -38,6 +39,7 @@ def render_gold_structural_macro2(
     render_horizon_table(current)
     render_formula_details()
     render_gold_aisc_valuation(aisc_snapshot, selected_range, range_end)
+    render_demand_structure(selected_range, range_end)
     render_current_term_structure(current)
     render_macro2_diagnostics(current)
     render_macro2_model_details(current)
