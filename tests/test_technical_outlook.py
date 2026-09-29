@@ -29,7 +29,7 @@ from technical_outlook.engine import TechnicalOutlookEngine, _chart_frame
 from technical_outlook.llm import LLM_TEXT_FIELDS, structured_llm_input, validate_llm_output
 from technical_outlook.service import apply_llm_schedule
 from technical_outlook import storage
-from technical_outlook_tab import _visible_support_resistance, build_technical_chart
+from technical_outlook_tab import _visible_support_resistance, _zone_distance_from_price, build_technical_chart
 
 
 def pivot(price: float, index: int, kind: str, status: str = "CONFIRMED", degree: str = "INTERMEDIATE") -> dict:
@@ -251,6 +251,12 @@ def test_support_resistance_overlay_keeps_only_bright_high_confluence_zones() ->
     assert list(zones["confluence"]) == ["HIGH", "VERY_HIGH"]
     assert list(zones["color"]) == ["#00ff88", "#ff4d5a"]
     assert zones.loc[zones["confluence"] == "VERY_HIGH", "zone_opacity"].iloc[0] > zones.loc[zones["confluence"] == "HIGH", "zone_opacity"].iloc[0]
+
+
+def test_zone_distance_from_price_uses_zone_average() -> None:
+    assert _zone_distance_from_price(110.0, {"low": 99.0, "high": 101.0}) == "+10.00%"
+    assert _zone_distance_from_price(90.0, {"low": 99.0, "high": 101.0}) == "-10.00%"
+    assert _zone_distance_from_price(100.0, {"low": 0.0, "high": 0.0}) == "N/A"
 
 
 def test_llm_input_uses_weekly_and_daily_frames_only() -> None:
