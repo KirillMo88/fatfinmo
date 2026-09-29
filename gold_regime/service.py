@@ -214,6 +214,7 @@ def load_gold_mcp_weekly() -> pd.Series:
 
 def load_gold_mcp_daily() -> pd.Series:
     """Load the existing daily TVC:GOLD series used by the AISC valuation."""
+    tvc_values = pd.Series(dtype="float64", name="gold_price")
     try:
         frame = get_ohlcv_data(GOLD_MCP_SYMBOL, interval="1D", count=5000)
     except Exception:
@@ -226,23 +227,36 @@ def load_gold_mcp_daily() -> pd.Series:
             latest = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
             values = values.loc[(values["date"] >= GOLD_HISTORY_START) & (values["date"] <= latest)]
         if not values.empty:
-            return (
+            tvc_values = (
                 values.sort_values("date")
                 .drop_duplicates("date", keep="last")
                 .set_index("date")["close"]
                 .rename("gold_price")
             )
 
-    # Keep the module usable if TVC:GOLD is temporarily unavailable. GLD is
+    # The MCP can occasionally return a valid but very short recent window
+    # (for example, only the latest two bars). Supplement that response with
+    # the existing GLD daily fallback so the AISC chart retains its history;
+    # TVC:GOLD remains authoritative wherever both series overlap.
+    if len(tvc_values) >= 4000:
+        return tvc_values
+
+    # Keep the module usable if TVC:GOLD is unavailable or incomplete. GLD is
     # the same fallback already used by the existing Gold Regime history.
     try:
         raw = yf.download("GLD", period="max", interval="1d", auto_adjust=False, progress=False, threads=False)
         daily = drop_incomplete_daily_bar(extract_ohlcv(raw, "GLD"))
         if not daily.empty:
-            return daily["Close"].rename("gold_price")
+            yahoo_values = daily["Close"].rename("gold_price").copy()
+            yahoo_values.index = pd.to_datetime(yahoo_values.index, errors="coerce", utc=True).tz_localize(None)
+            yahoo_values = yahoo_values[~yahoo_values.index.isna()]
+            if tvc_values.empty:
+                return yahoo_values.sort_index()
+            combined = pd.concat([yahoo_values, tvc_values]).sort_index()
+            return combined[~combined.index.duplicated(keep="last")].rename("gold_price")
     except Exception:
         pass
-    return pd.Series(dtype="float64", name="gold_price")
+    return tvc_values
 
 
 def _series_from_start(series: pd.Series | None, start: pd.Timestamp) -> pd.Series | None:
