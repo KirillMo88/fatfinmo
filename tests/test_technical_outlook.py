@@ -30,7 +30,7 @@ from technical_outlook.engine import TechnicalOutlookEngine, _chart_frame
 from technical_outlook.llm import LLM_INPUT_MAX_CHARS, LLM_TEXT_FIELDS, serialize_llm_input, structured_llm_input, validate_llm_output
 from technical_outlook.service import apply_llm_schedule
 from technical_outlook import storage
-from technical_outlook_tab import _visible_support_resistance, _zone_distance_from_price, build_technical_chart
+from technical_outlook_tab import _analysis_content, _visible_support_resistance, _zone_distance_from_price, build_technical_chart
 
 
 def pivot(price: float, index: int, kind: str, status: str = "CONFIRMED", degree: str = "INTERMEDIATE") -> dict:
@@ -282,6 +282,24 @@ def test_zone_distance_from_price_uses_zone_average() -> None:
     assert _zone_distance_from_price(110.0, {"low": 99.0, "high": 101.0}) == "+10.00%"
     assert _zone_distance_from_price(90.0, {"low": 99.0, "high": 101.0}) == "-10.00%"
     assert _zone_distance_from_price(100.0, {"low": 0.0, "high": 0.0}) == "N/A"
+
+
+def test_technical_outlook_v0_uses_only_pre_weekly_sr_outputs() -> None:
+    snapshot = {
+        "support_resistance": [{"id": "v0-low", "confluence": "LOW"}],
+        "daily_support_resistance": [{"id": "daily-new", "confluence": "VERY_HIGH"}],
+        "weekly_support_resistance": [{"id": "weekly-new", "confluence": "VERY_HIGH"}],
+        "scenarios": [{"scenario": "v0"}],
+        "daily_scenarios": [{"scenario": "daily-new"}],
+        "weekly_scenarios": [{"scenario": "weekly-new"}],
+        "confirmation_matrix": [{"event": "v0"}],
+        "daily_confirmation_matrix": [{"event": "daily-new"}],
+        "weekly_confirmation_matrix": [{"event": "weekly-new"}],
+    }
+    content = _analysis_content(snapshot, legacy=True, use_weekly=True)
+    assert content["zones"] == snapshot["support_resistance"]
+    assert content["scenarios"] == snapshot["scenarios"]
+    assert content["confirmation"] == snapshot["confirmation_matrix"]
 
 
 def test_llm_input_uses_weekly_and_daily_frames_only() -> None:

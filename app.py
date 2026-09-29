@@ -72,7 +72,7 @@ from gold_regime_tab import render_gold_regime_tab
 from elliott_waves_tab import render_elliott_waves_tab
 from btc_cycle_tab import render_btc_cycle_tab
 from market_cycle_tab import load_market_cycle_snapshot_cached, render_market_cycle_tab
-from technical_outlook_tab import render_technical_outlook_tab
+from technical_outlook_tab import render_technical_outlook_tab, render_technical_outlook_v0_tab
 from global_m2_cycle import (
     build_global_m2_cycle_fig,
     build_global_m2_cycle_history,
@@ -6945,6 +6945,7 @@ def main():
         "Charts",
         "Graphs",
         "Technical Outlook",
+        "Technical Outlook v0",
         "AI Dashboard",
         "Market Cycle",
         "Eliot waves",
@@ -7187,6 +7188,8 @@ def main():
         render_graphs_tab(graph_ordered_df.drop(columns=["__row_id__"], errors="ignore"), selected_universe, selected_universe_name)
     elif active_view == "Technical Outlook":
         render_technical_outlook_tab(table_df.get("Ticker", pd.Series(dtype="object")).dropna().astype(str).tolist())
+    elif active_view == "Technical Outlook v0":
+        render_technical_outlook_v0_tab(table_df.get("Ticker", pd.Series(dtype="object")).dropna().astype(str).tolist())
     elif active_view == "AI Dashboard":
         render_ai_dashboard_tab()
     elif active_view == "CIO View":
