@@ -118,7 +118,7 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
     render_gold_history_chart(snapshot, selected_range, snapshot.structural_macro2)
     if snapshot.structural_macro2 is not None and snapshot.structural_macro2.history is not None and not snapshot.structural_macro2.history.empty:
         render_macro2_narrative(snapshot.structural_macro2.current or {})
-    render_gold_structural_macro2(snapshot.structural_macro2)
+    render_gold_structural_macro2(snapshot.structural_macro2, snapshot.aisc_valuation, selected_range)
     render_signal_explanation(current)
     render_macro_detail(current)
     render_global_monetary_liquidity_context(current)

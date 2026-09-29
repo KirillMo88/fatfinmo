@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from .aisc import aisc_config
+
 
 GOLD_REGIME_CONFIG = {
     "percentile": {
@@ -47,6 +49,7 @@ GOLD_REGIME_CONFIG = {
         "demand_rotation_yoy": None,
         "last_updated": None,
     },
+    "aisc": aisc_config(),
 }
 
 

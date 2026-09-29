@@ -21,6 +21,12 @@ class GoldStructuralMacro2Snapshot:
 
 
 @dataclass(frozen=True)
+class GoldAISCValuationSnapshot:
+    current: dict[str, Any]
+    history: pd.DataFrame
+
+
+@dataclass(frozen=True)
 class GoldRegimeSnapshot:
     current: dict[str, Any]
     history: pd.DataFrame
@@ -29,4 +35,5 @@ class GoldRegimeSnapshot:
     cot_contract_market_name: str | None = None
     freshness: dict[str, Freshness] = field(default_factory=dict)
     structural_macro2: GoldStructuralMacro2Snapshot | None = None
+    aisc_valuation: GoldAISCValuationSnapshot | None = None
     gold_cycle_history: pd.DataFrame = field(default_factory=pd.DataFrame)
