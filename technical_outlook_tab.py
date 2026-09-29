@@ -102,11 +102,12 @@ def render_technical_outlook_asset(
         except Exception as exc:
             st.error(f"{ticker}: LLM analysis failed — {type(exc).__name__}: {exc}")
 
-    overlay_cols = st.columns(4)
+    overlay_cols = st.columns(5)
     show_primary = overlay_cols[0].checkbox("Elliott Primary", value=True, key=f"to_primary_{ticker}")
     show_alternative = overlay_cols[1].checkbox("Elliott Alternative", value=False, key=f"to_alt_{ticker}")
-    show_levels = overlay_cols[2].checkbox("Support / Resistance", value=True, key=f"to_levels_{ticker}")
-    show_profile = overlay_cols[3].checkbox("Volume Profile", value=False, key=f"to_profile_{ticker}")
+    show_levels = overlay_cols[2].checkbox("Daily Support / Resistance", value=True, key=f"to_levels_{ticker}")
+    show_weekly_levels = overlay_cols[3].checkbox("Weekly Support / Resistance", value=True, key=f"to_weekly_levels_{ticker}")
+    show_profile = overlay_cols[4].checkbox("Volume Profile", value=False, key=f"to_profile_{ticker}")
     if show_primary and show_alternative:
         st.caption("Primary and Alternative are both visible by explicit selection.")
 
@@ -125,6 +126,7 @@ def render_technical_outlook_asset(
                     alternative=elliott.get("alternative") if show_alternative else None,
                     show_levels=show_levels,
                     show_profile=show_profile,
+                    show_weekly_levels=show_weekly_levels,
                 )
                 st.altair_chart(chart, use_container_width=True)
 
@@ -140,6 +142,7 @@ def build_technical_chart(
     alternative: dict[str, Any] | None,
     show_levels: bool,
     show_profile: bool,
+    show_weekly_levels: bool = False,
 ) -> alt.VConcatChart:
     frame = bars.tail(500).copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True).dt.tz_convert(None)
@@ -165,8 +168,10 @@ def build_technical_chart(
     for name, color in colors.items():
         if name in frame and frame[name].notna().any():
             layers.append(base.mark_line(color=color, strokeWidth=1.5).encode(y=alt.Y(f"{name}:Q", scale=alt.Scale(zero=False))))
-    if show_levels:
-        zones = _visible_support_resistance(snapshot)
+    for visible, level_set in ((show_levels, "daily"), (show_weekly_levels, "weekly")):
+        if not visible:
+            continue
+        zones = _visible_support_resistance(snapshot, level_set=level_set)
         if not zones.empty:
             layers.append(
                 alt.Chart(zones).mark_rect().encode(
@@ -179,6 +184,7 @@ def build_technical_chart(
                         alt.Tooltip("confluence:N", title="Confluence"),
                         alt.Tooltip("low:Q", title="Low", format=",.2f"),
                         alt.Tooltip("high:Q", title="High", format=",.2f"),
+                        alt.Tooltip("level_set:N", title="Timeframe"),
                     ],
                 )
             )
@@ -226,15 +232,24 @@ def _elliott_layers(candidate: dict[str, Any] | None, color: str, start: pd.Time
     return [line, labels]
 
 
-def _visible_support_resistance(snapshot: dict[str, Any]) -> pd.DataFrame:
-    zones = pd.DataFrame(snapshot.get("support_resistance") or [])
+def _visible_support_resistance(snapshot: dict[str, Any], *, level_set: str = "daily") -> pd.DataFrame:
+    weekly = str(level_set).lower() == "weekly"
+    key = "weekly_support_resistance" if weekly else "daily_support_resistance"
+    fallback = [] if weekly else snapshot.get("support_resistance")
+    zones = pd.DataFrame(snapshot.get(key) or fallback or [])
     if zones.empty or "confluence" not in zones or "role" not in zones:
         return pd.DataFrame()
     zones = zones.loc[zones["confluence"].isin(["HIGH", "VERY_HIGH"])].copy()
     if zones.empty:
         return zones
-    zones["color"] = np.where(zones["role"] == "SUPPORT", "#00ff88", "#ff4d5a")
-    zones["zone_opacity"] = np.where(zones["confluence"] == "VERY_HIGH", 0.42, 0.26)
+    if weekly:
+        zones["color"] = np.where(zones["role"] == "SUPPORT", "#00d4ff", "#ffb020")
+        zones["zone_opacity"] = np.where(zones["confluence"] == "VERY_HIGH", 0.48, 0.32)
+        zones["level_set"] = "WEEKLY"
+    else:
+        zones["color"] = np.where(zones["role"] == "SUPPORT", "#00ff88", "#ff4d5a")
+        zones["zone_opacity"] = np.where(zones["confluence"] == "VERY_HIGH", 0.42, 0.26)
+        zones["level_set"] = "DAILY"
     return zones
 
 
@@ -285,19 +300,38 @@ def _render_analysis(snapshot: dict[str, Any]) -> None:
     }]), hide_index=True, use_container_width=True)
 
     st.markdown("#### Key Levels")
-    zones = snapshot.get("support_resistance") or []
+    level_timeframe = st.radio(
+        "S/R analysis timeframe",
+        ("Weekly", "Daily"),
+        horizontal=True,
+        key=f"technical_outlook_level_timeframe_{snapshot.get('ticker', 'asset')}",
+    )
+    use_weekly = level_timeframe == "Weekly"
+    zones = (
+        snapshot.get("weekly_support_resistance")
+        if use_weekly
+        else snapshot.get("daily_support_resistance") or snapshot.get("support_resistance")
+    ) or []
+    zones = [zone for zone in zones if zone.get("confluence") in {"HIGH", "VERY_HIGH"}][:20]
     if zones:
         st.dataframe(pd.DataFrame([{
             "Role": zone.get("role"), "Zone": f"{zone.get('low', 0):,.2f}–{zone.get('high', 0):,.2f}",
             "Distance from Price %": _zone_distance_from_price(snapshot.get("price"), zone), "Confluence": zone.get("confluence"),
             "Sources": ", ".join(zone.get("sources") or []), "Timeframes": ", ".join(zone.get("timeframes") or []),
         } for zone in zones]), hide_index=True, use_container_width=True)
+    else:
+        st.info(f"No HIGH or VERY_HIGH {level_timeframe.lower()} confluence zones are available.")
 
     st.markdown("#### Scenario Matrix")
+    scenarios = (
+        snapshot.get("weekly_scenarios")
+        if use_weekly
+        else snapshot.get("daily_scenarios") or snapshot.get("scenarios")
+    ) or []
     st.dataframe(pd.DataFrame([{
         "Scenario": item.get("scenario"), "Probability": f"{item.get('probability')}%", "Trigger": item.get("trigger"),
         "Expected Path": " → ".join(_price(value) for value in item.get("expected_path", [])), "Target": _range_list(item.get("target_zone")), "Invalidation": item.get("invalidation"),
-    } for item in snapshot.get("scenarios", [])]), hide_index=True, use_container_width=True)
+    } for item in scenarios]), hide_index=True, use_container_width=True)
 
     st.markdown("#### Forecast Horizons")
     horizon_cols = st.columns(3)
@@ -309,7 +343,12 @@ def _render_analysis(snapshot: dict[str, Any]) -> None:
             st.caption(item.get("explanation", ""))
 
     st.markdown("#### Confirmation / Invalidation")
-    st.dataframe(pd.DataFrame(snapshot.get("confirmation_matrix") or []), hide_index=True, use_container_width=True)
+    confirmation = (
+        snapshot.get("weekly_confirmation_matrix")
+        if use_weekly
+        else snapshot.get("daily_confirmation_matrix") or snapshot.get("confirmation_matrix")
+    ) or []
+    st.dataframe(pd.DataFrame(confirmation), hide_index=True, use_container_width=True)
     with st.expander("Historical Analogs"):
         analogs = snapshot.get("historical_analogs") or {}
         st.markdown(f"Similar Historical Periods: **{analogs.get('sample_size', 0)}**")

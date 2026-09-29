@@ -9,6 +9,7 @@ import pandas as pd
 
 
 LLM_SCHEMA_VERSION = "TECHNICAL_OUTLOOK_LLM_V2"
+LLM_INPUT_MAX_CHARS = 60_000
 
 LLM_TEXT_FIELDS = (
     "summary",
@@ -69,7 +70,7 @@ def call_llm_interpretation(snapshot: dict[str, Any]) -> tuple[dict[str, Any], s
             "All candidate values are strings except waves. waves is an array of objects containing exactly pivot_time, price, wave_label, wave_status. "
             "confidence is HIGH, MEDIUM, or LOW. direction is UP, DOWN, or NEUTRAL."
         ),
-        input=json.dumps(structured_llm_input(snapshot), ensure_ascii=False, indent=2),
+        input=serialize_llm_input(snapshot),
     )
     parsed = parse_json_text(getattr(response, "output_text", "") or "")
     return validate_llm_output(parsed, snapshot), model
@@ -82,33 +83,105 @@ def structured_llm_input(snapshot: dict[str, Any]) -> dict[str, Any]:
         "analysis_horizon": "6M",
         "as_of": snapshot.get("as_of_timestamp"),
         "weekly": {
-            "market_structure": snapshot.get("weekly_structure"),
+            "market_structure": _compact_structure(snapshot.get("weekly_structure")),
             "moving_averages": snapshot.get("weekly_moving_averages"),
             "momentum": snapshot.get("weekly_indicators"),
-            "pivots": snapshot.get("weekly_pivots"),
+            "pivots": _compact_pivots(snapshot.get("weekly_pivots"), 18),
         },
         "daily": {
-            "market_structure": snapshot.get("daily_structure"),
+            "market_structure": _compact_structure(snapshot.get("daily_structure")),
             "moving_averages": snapshot.get("daily_moving_averages"),
             "momentum": snapshot.get("daily_indicators"),
             "volume": snapshot.get("volume_state"),
-            "pivots": snapshot.get("daily_pivots"),
-            "minor_pivots": snapshot.get("minor_pivots"),
+            "pivots": _compact_pivots(snapshot.get("daily_pivots"), 24),
+            "minor_pivots": _compact_pivots(snapshot.get("minor_pivots"), 24),
         },
-        "support_resistance": snapshot.get("support_resistance"),
-        "volume_profile": snapshot.get("volume_profile"),
-        "divergences": snapshot.get("divergences"),
+        "support_resistance": {
+            "weekly": _compact_zones(snapshot.get("weekly_support_resistance"), 16),
+            "daily": _compact_zones(snapshot.get("daily_support_resistance") or snapshot.get("support_resistance"), 10),
+        },
+        "volume_profile": {
+            "weekly": _compact_profile(snapshot.get("weekly_volume_profile")),
+            "daily": _compact_profile(snapshot.get("daily_volume_profile") or snapshot.get("volume_profile")),
+        },
+        "divergences": _compact_divergences(snapshot.get("divergences")),
         "scenario_engine": {
             "components": snapshot.get("scenario_components"),
             "probabilities": snapshot.get("scenario_probabilities"),
-            "scenarios": snapshot.get("scenarios"),
-            "confirmation_matrix": snapshot.get("confirmation_matrix"),
+            "weekly_scenarios": snapshot.get("weekly_scenarios") or snapshot.get("scenarios"),
+            "daily_scenarios": snapshot.get("daily_scenarios") or snapshot.get("scenarios"),
+            "weekly_confirmation_matrix": snapshot.get("weekly_confirmation_matrix") or snapshot.get("confirmation_matrix"),
+            "daily_confirmation_matrix": snapshot.get("daily_confirmation_matrix") or snapshot.get("confirmation_matrix"),
         },
         "forecast_horizons": snapshot.get("horizons"),
-        "historical_analogs": snapshot.get("historical_analogs"),
+        "historical_analogs": _compact_analogs(snapshot.get("historical_analogs")),
         "deterministic_summary": snapshot.get("deterministic_narrative"),
         "final_quant_state": snapshot.get("final_state"),
     }
+
+
+def serialize_llm_input(snapshot: dict[str, Any]) -> str:
+    """Build a bounded request body rather than sending the persisted snapshot verbatim."""
+    value = json.dumps(structured_llm_input(snapshot), ensure_ascii=False, separators=(",", ":"))
+    if len(value) > LLM_INPUT_MAX_CHARS:
+        raise ValueError(
+            f"Technical Outlook LLM input is unexpectedly large ({len(value):,} characters; "
+            f"limit {LLM_INPUT_MAX_CHARS:,})"
+        )
+    return value
+
+
+def _compact_structure(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result = {
+        field: value.get(field)
+        for field in ("state", "sequence", "volatility_state", "explanation")
+    }
+    result["last_high"] = _compact_pivots([value.get("last_high")], 1)[0] if isinstance(value.get("last_high"), dict) else None
+    result["last_low"] = _compact_pivots([value.get("last_low")], 1)[0] if isinstance(value.get("last_low"), dict) else None
+    return result
+
+
+def _compact_divergences(value: Any) -> list[dict[str, Any]]:
+    fields = ("type", "indicator", "direction", "timeframe", "magnitude", "active", "detected_at")
+    divergences = value if isinstance(value, list) else []
+    return [
+        {field: item.get(field) for field in fields}
+        for item in divergences[-12:]
+        if isinstance(item, dict)
+    ]
+
+
+def _compact_analogs(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "sample_size": value.get("sample_size"),
+        "warning": value.get("warning"),
+        "periods": (value.get("periods") or [])[:10],
+        "returns": value.get("returns"),
+        "drawdown_probabilities": value.get("drawdown_probabilities"),
+    }
+
+
+def _compact_pivots(value: Any, limit: int) -> list[dict[str, Any]]:
+    fields = ("pivot_time", "price", "kind", "status", "timeframe", "degree", "confirmation_time")
+    pivots = value if isinstance(value, list) else []
+    return [{field: pivot.get(field) for field in fields} for pivot in pivots[-limit:] if isinstance(pivot, dict)]
+
+
+def _compact_zones(value: Any, limit: int) -> list[dict[str, Any]]:
+    fields = ("low", "high", "center", "role", "sources", "timeframes", "confluence_score", "confluence")
+    zones = value if isinstance(value, list) else []
+    return [{field: zone.get(field) for field in fields} for zone in zones[:limit] if isinstance(zone, dict)]
+
+
+def _compact_profile(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    fields = ("status", "poc", "hvns", "lvns", "value_area", "lookback_bars", "range")
+    return {field: value.get(field) for field in fields}
 
 
 def validate_llm_output(payload: dict[str, Any], snapshot: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -62,8 +62,31 @@ class TechnicalOutlookEngine:
         daily_momentum = momentum_state(daily)
         divergences = detect_divergences(weekly, major_pivots, "WEEKLY") + detect_divergences(daily, intermediate_pivots, "DAILY")
         volume = volume_state(daily)
-        profile = volume_profile(daily)
-        zones = build_support_resistance(daily, intermediate_pivots, profile)
+        daily_profile = volume_profile(daily)
+        weekly_window = weekly.tail(500).copy()
+        weekly_window_start = pd.Timestamp(weekly_window.iloc[0]["timestamp"])
+        weekly_window_end = pd.Timestamp(weekly_window.iloc[-1]["timestamp"])
+        weekly_level_pivots = [
+            pivot for pivot in major_pivots
+            if weekly_window_start <= pd.Timestamp(pivot["pivot_time"]) <= weekly_window_end
+        ]
+        weekly_profile = volume_profile(weekly_window)
+        daily_zones = build_support_resistance(
+            daily,
+            intermediate_pivots,
+            daily_profile,
+            timeframe="DAILY",
+            max_pivots=10,
+            max_zones=10,
+        )
+        weekly_zones = build_support_resistance(
+            weekly_window,
+            weekly_level_pivots,
+            weekly_profile,
+            timeframe="WEEKLY",
+            max_pivots=None,
+            max_zones=20,
+        )
         analogs = historical_analogs(weekly)
         confidence = final_confidence(weekly_structure, daily_structure, daily_momentum, volume, analogs)
         price = float(daily.iloc[-1]["close"])
@@ -75,14 +98,19 @@ class TechnicalOutlookEngine:
             daily_momentum,
             volume,
             divergences,
-            zones,
+            daily_zones,
             analogs,
             extension,
             price,
         )
         probabilities = scenario_probabilities(components, confidence)
-        scenarios = build_scenarios(price, zones, probabilities, daily_momentum)
-        horizons = _horizon_states(weekly_structure, daily_structure, daily_momentum, probabilities, zones, price)
+        daily_scenarios = build_scenarios(
+            price, daily_zones, probabilities, daily_momentum, timeframe_label="Daily"
+        )
+        weekly_scenarios = build_scenarios(
+            price, weekly_zones, probabilities, weekly_momentum, timeframe_label="Weekly"
+        )
+        horizons = _horizon_states(weekly_structure, daily_structure, daily_momentum, probabilities, daily_zones, price)
         multi_timeframe = _multi_timeframe_state(weekly_structure["state"], daily_structure["state"])
         final_state = {
             "structural_trend": _direction(weekly_structure["state"]),
@@ -120,8 +148,12 @@ class TechnicalOutlookEngine:
             "minor_pivots": minor_pivots,
             "divergences": divergences,
             "volume_state": volume,
-            "volume_profile": profile,
-            "support_resistance": zones,
+            "volume_profile": daily_profile,
+            "daily_volume_profile": daily_profile,
+            "weekly_volume_profile": weekly_profile,
+            "support_resistance": daily_zones,
+            "daily_support_resistance": daily_zones,
+            "weekly_support_resistance": weekly_zones,
             "elliott_source": "LLM",
             "elliott_primary": None,
             "elliott_alternative": None,
@@ -132,13 +164,23 @@ class TechnicalOutlookEngine:
             "bull_probability": probabilities["BULLISH"],
             "neutral_probability": probabilities["NEUTRAL"],
             "bear_probability": probabilities["BEARISH"],
-            "scenarios": scenarios,
+            "scenarios": daily_scenarios,
+            "daily_scenarios": daily_scenarios,
+            "weekly_scenarios": weekly_scenarios,
             "short_term_bias": horizons["short_term"]["state"],
             "medium_term_bias": horizons["medium_term"]["state"],
             "six_month_bias": horizons["six_month"]["state"],
             "horizons": horizons,
-            "expected_path": next(item["expected_path"] for item in scenarios if item["scenario"] == final_state["six_month_bias"]),
-            "confirmation_matrix": confirmation_matrix(scenarios, zones, price),
+            "expected_path": next(item["expected_path"] for item in daily_scenarios if item["scenario"] == final_state["six_month_bias"]),
+            "confirmation_matrix": confirmation_matrix(
+                daily_scenarios, daily_zones, price, timeframe_label="Daily"
+            ),
+            "daily_confirmation_matrix": confirmation_matrix(
+                daily_scenarios, daily_zones, price, timeframe_label="Daily"
+            ),
+            "weekly_confirmation_matrix": confirmation_matrix(
+                weekly_scenarios, weekly_zones, price, timeframe_label="Weekly"
+            ),
             "historical_analogs": analogs,
             "final_state": final_state,
             "confidence": confidence,
