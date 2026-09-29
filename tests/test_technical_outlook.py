@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from elliott_waves.data import _normalized_frame
 from technical_outlook.analytics import (
     calculate_indicators,
     classify_structure,
@@ -23,7 +24,8 @@ from technical_outlook.elliott import (
     validate_triangle,
     validate_zigzag,
 )
-from technical_outlook.engine import _chart_frame
+from technical_outlook.config import CORE_ASSETS
+from technical_outlook.engine import TechnicalOutlookEngine, _chart_frame
 from technical_outlook.llm import LLM_TEXT_FIELDS, structured_llm_input, validate_llm_output
 from technical_outlook.service import apply_llm_schedule
 from technical_outlook import storage
@@ -201,6 +203,30 @@ def test_chart_payload_is_limited_to_latest_500_bars() -> None:
     result = _chart_frame(frame)
     assert len(result) == 500
     assert result.iloc[0]["timestamp"] == frame.iloc[-500]["timestamp"]
+
+
+def test_engine_builds_weekly_and_daily_frames_without_quant_elliott() -> None:
+    spec = CORE_ASSETS["SPY"]
+    dates = pd.date_range("2019-01-02", periods=1800, freq="B")
+    close = 100 + np.arange(len(dates)) * 0.08 + np.sin(np.arange(len(dates)) / 12) * 4
+    daily = _normalized_frame(
+        dates=dates,
+        opens=pd.Series(close - 0.2),
+        highs=pd.Series(close + 1.0),
+        lows=pd.Series(close - 1.0),
+        closes=pd.Series(close),
+        volumes=pd.Series(1_000_000 + np.arange(len(dates)) * 100),
+        timeframe="1D",
+        spec=spec,
+        now=pd.Timestamp("2030-01-01"),
+    )
+    snapshot, charts = TechnicalOutlookEngine().analyze(daily, spec, created_at=datetime(2030, 1, 2, tzinfo=timezone.utc))
+    assert set(charts) == {"1W", "1D"}
+    assert len(charts["1D"]) == 500
+    assert "weekly_structure" in snapshot and "daily_structure" in snapshot
+    assert "monthly_structure" not in snapshot
+    assert snapshot["elliott_source"] == "LLM"
+    assert snapshot["scenario_components"]["elliott"] is None
 
 
 def test_chart_has_no_pan_or_zoom_interaction() -> None:
