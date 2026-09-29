@@ -214,11 +214,13 @@ def load_gold_mcp_weekly() -> pd.Series:
 
 def load_gold_mcp_daily() -> pd.Series:
     """Load the existing daily TVC:GOLD series used by the AISC valuation."""
-    tvc_values = pd.Series(dtype="float64", name="gold_price")
     try:
-        frame = get_ohlcv_data(GOLD_MCP_SYMBOL, interval="1D", count=5000)
+        # Force refresh here because an earlier short MCP response can be
+        # cached for 24 hours and would otherwise leave the valuation chart
+        # with only one or two visible points.
+        frame = get_ohlcv_data(GOLD_MCP_SYMBOL, interval="1D", count=5000, force=True)
     except Exception:
-        frame = pd.DataFrame()
+        return pd.Series(dtype="float64", name="gold_price")
     if frame is not None and not frame.empty and {"date", "close"}.issubset(frame.columns):
         dates = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_localize(None)
         closes = pd.to_numeric(frame["close"], errors="coerce")
@@ -227,36 +229,13 @@ def load_gold_mcp_daily() -> pd.Series:
             latest = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
             values = values.loc[(values["date"] >= GOLD_HISTORY_START) & (values["date"] <= latest)]
         if not values.empty:
-            tvc_values = (
+            return (
                 values.sort_values("date")
                 .drop_duplicates("date", keep="last")
                 .set_index("date")["close"]
                 .rename("gold_price")
             )
-
-    # The MCP can occasionally return a valid but very short recent window
-    # (for example, only the latest two bars). Supplement that response with
-    # the existing GLD daily fallback so the AISC chart retains its history;
-    # TVC:GOLD remains authoritative wherever both series overlap.
-    if len(tvc_values) >= 4000:
-        return tvc_values
-
-    # Keep the module usable if TVC:GOLD is unavailable or incomplete. GLD is
-    # the same fallback already used by the existing Gold Regime history.
-    try:
-        raw = yf.download("GLD", period="max", interval="1d", auto_adjust=False, progress=False, threads=False)
-        daily = drop_incomplete_daily_bar(extract_ohlcv(raw, "GLD"))
-        if not daily.empty:
-            yahoo_values = daily["Close"].rename("gold_price").copy()
-            yahoo_values.index = pd.to_datetime(yahoo_values.index, errors="coerce", utc=True).tz_localize(None)
-            yahoo_values = yahoo_values[~yahoo_values.index.isna()]
-            if tvc_values.empty:
-                return yahoo_values.sort_index()
-            combined = pd.concat([yahoo_values, tvc_values]).sort_index()
-            return combined[~combined.index.duplicated(keep="last")].rename("gold_price")
-    except Exception:
-        pass
-    return tvc_values
+    return pd.Series(dtype="float64", name="gold_price")
 
 
 def _series_from_start(series: pd.Series | None, start: pd.Timestamp) -> pd.Series | None:
