@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
 
 import numpy as np
@@ -28,7 +30,10 @@ from technical_outlook.elliott import (
 from technical_outlook.config import CORE_ASSETS
 from technical_outlook.engine import TechnicalOutlookEngine, _chart_frame
 from technical_outlook.llm import LLM_INPUT_MAX_CHARS, LLM_TEXT_FIELDS, serialize_llm_input, structured_llm_input, validate_llm_output
+from technical_outlook.legacy_v0 import build_confirmation_matrix_v0, build_scenarios_v0, build_support_resistance_v0
+from technical_outlook.scenario_v1 import apply_relevance, build_scenarios_v1, support_resistance_component_v1
 from technical_outlook.service import apply_llm_schedule
+from technical_outlook.sr_v1 import build_cross_timeframe_zones, build_support_resistance_v1
 from technical_outlook import storage
 from technical_outlook_tab import _analysis_content, _visible_support_resistance, _zone_distance_from_price, build_technical_chart
 
@@ -254,6 +259,159 @@ def test_structural_weekly_levels_use_weekly_smas_and_all_window_pivots() -> Non
     assert {"sma50", "sma100", "sma200"}.issubset(sources)
 
 
+def test_legacy_v0_is_a_physically_separate_frozen_calculation() -> None:
+    frame = calculate_indicators(weekly_frame(np.linspace(100, 160, 260).tolist(), atr=2.0))
+    pivots = [pivot(value, index + 20, "LOW" if index % 2 == 0 else "HIGH") for index, value in enumerate([120.0, 128.0, 124.0, 140.0])]
+    profile = {"status": "NOT_AVAILABLE"}
+    original = build_support_resistance(frame, pivots, profile, timeframe="DAILY", max_pivots=10, max_zones=10)
+    frozen = build_support_resistance_v0(frame, pivots, profile, timeframe="DAILY", max_pivots=10, max_zones=10)
+    assert frozen == original
+    probabilities = {"BULLISH": 45, "NEUTRAL": 25, "BEARISH": 30}
+    scenarios = build_scenarios_v0(160.0, frozen, probabilities, {"classification": "POSITIVE"}, timeframe_label="Daily")
+    matrix = build_confirmation_matrix_v0(scenarios, frozen, 160.0, timeframe_label="Daily")
+    assert [item["probability"] for item in scenarios] == [45, 25, 30]
+    assert matrix[0]["interpretation"] == "Bull scenario confirmed"
+
+
+@pytest.mark.parametrize(
+    ("ticker", "scale", "golden_hash"),
+    [
+        ("SPY", 1.0, "cd1fff5cb7f4be9e7a2c2a42d91bcf5094ef46a1805e91fd4895dc2d03019acc"),
+        ("QQQ", 1.7, "9b5c77728dcfab2b50bce3f1f3cf7751e0c0061dc4466469e81dda71dd6808f3"),
+        ("GLD", 0.65, "4483744d79a23e9f8ceb928d08c917425c0aa96bba74b7b39b89af9a33e4098a"),
+        ("BTC-USD", 150.0, "9d8cc6389cda15e6f6659ab2eb0028b786f734ea4037c0275c74d0601d28afc8"),
+    ],
+)
+def test_legacy_v0_golden_snapshots(ticker: str, scale: float, golden_hash: str) -> None:
+    dates = pd.date_range("2020-01-03", periods=260, freq="W-FRI")
+    close = (100 + np.arange(260) * 0.2 + np.sin(np.arange(260) / 8) * 3) * scale
+    frame = calculate_indicators(pd.DataFrame({
+        "timestamp": dates,
+        "open": close - 0.2 * scale,
+        "high": close + scale,
+        "low": close - scale,
+        "close": close,
+        "volume": 1_000_000 + np.arange(260),
+        "atr14": 2 * scale,
+    }))
+    pivots = []
+    for index, (price, kind) in enumerate(((120, "LOW"), (140, "HIGH"), (128, "LOW"), (155, "HIGH"))):
+        timestamp = pd.Timestamp("2022-01-07") + pd.Timedelta(weeks=index * 10)
+        pivots.append({
+            "pivot_id": f"{ticker}:{index}", "price": price * scale, "bar_index": 100 + index * 10,
+            "kind": kind, "pivot_time": timestamp.isoformat(),
+            "confirmation_time": (timestamp + pd.Timedelta(weeks=1)).isoformat(), "status": "CONFIRMED",
+        })
+    zones = build_support_resistance_v0(frame, pivots, {"status": "NOT_AVAILABLE"}, timeframe="DAILY", max_pivots=10, max_zones=10)
+    probabilities = scenario_probabilities({
+        "trend": 70, "momentum": 40, "elliott": None, "volume": 0,
+        "extension_risk": -20, "divergence": 0, "support_resistance": 35, "historical_analog": 15,
+    }, "MEDIUM")
+    scenarios = build_scenarios_v0(float(close[-1]), zones, probabilities, {"classification": "POSITIVE"}, timeframe_label="Daily")
+    confirmation = build_confirmation_matrix_v0(scenarios, zones, float(close[-1]), timeframe_label="Daily")
+    encoded = json.dumps(
+        {"zones": zones, "probabilities": probabilities, "scenarios": scenarios, "confirmation": confirmation},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert hashlib.sha256(encoded.encode("utf-8")).hexdigest() == golden_hash
+
+
+def test_sr_v1_repeated_daily_swings_count_once_in_confluence() -> None:
+    frame = weekly_frame([100.0] * 80, atr=1.0)
+    daily_pivots = [
+        {**pivot(99.8 + index * 0.1, index + 20, "LOW", degree="INTERMEDIATE"), "timeframe": "DAILY"}
+        for index in range(3)
+    ]
+    zones = build_support_resistance_v1(
+        frame,
+        daily_pivots,
+        {"status": "NOT_AVAILABLE"},
+        timeframe="DAILY",
+        max_pivots=None,
+        max_zones=20,
+    )
+    swing_zone = next(zone for zone in zones if "SWING_STRUCTURE" in zone["source_families"])
+    assert swing_zone["family_scores"]["SWING_STRUCTURE"] == 2.0
+    assert swing_zone["family_sources"]["SWING_STRUCTURE"] == ["daily_swing"]
+
+
+def test_sr_v1_moving_averages_are_one_family_with_capped_breadth() -> None:
+    frame = calculate_indicators(weekly_frame([100.0] * 260, atr=1.0))
+    zones = build_support_resistance_v1(
+        frame,
+        [],
+        {"status": "NOT_AVAILABLE"},
+        timeframe="DAILY",
+        max_pivots=None,
+        max_zones=20,
+    )
+    zone = next(zone for zone in zones if set(zone["family_sources"].get("MOVING_AVERAGE", [])) == {"sma50", "sma100", "sma200"})
+    assert zone["family_scores"]["MOVING_AVERAGE"] == 3.0
+    assert zone["independent_family_count"] == 2  # moving average + round number
+
+
+def test_sr_v1_clustering_is_input_order_invariant() -> None:
+    frame = weekly_frame([100.0] * 100, atr=1.0)
+    pivots = [
+        {**pivot(value, index + 30, "LOW", degree="INTERMEDIATE"), "timeframe": "DAILY"}
+        for index, value in enumerate([98.9, 99.2, 99.5, 100.1])
+    ]
+    first = build_support_resistance_v1(frame, pivots, {"status": "NOT_AVAILABLE"}, timeframe="DAILY", max_pivots=None, max_zones=20)
+    second = build_support_resistance_v1(frame, list(reversed(pivots)), {"status": "NOT_AVAILABLE"}, timeframe="DAILY", max_pivots=None, max_zones=20)
+    assert [(zone["zone_id"], zone["low"], zone["high"]) for zone in first] == [(zone["zone_id"], zone["low"], zone["high"]) for zone in second]
+
+
+def test_sr_v1_cross_timeframe_requires_same_role_and_does_not_mutate_parents() -> None:
+    frame = calculate_indicators(weekly_frame([100.0] * 100, atr=1.0))
+    base = {
+        "source_members": [], "source_families": [], "family_scores": {}, "sources": [],
+        "confluence_class": "MEDIUM", "confluence": "MEDIUM", "strength_class": "WEAK",
+        "strength_score": 0.0, "valid_from": frame.iloc[0]["timestamp"].isoformat(),
+    }
+    daily = [{**base, "zone_id": "d", "role": "SUPPORT", "low": 98.0, "high": 102.0, "center": 100.0, "width": 4.0, "timeframe": "DAILY"}]
+    weekly = [{**base, "zone_id": "w", "role": "SUPPORT", "low": 99.0, "high": 103.0, "center": 101.0, "width": 4.0, "timeframe": "WEEKLY"}]
+    original_daily = dict(daily[0])
+    derived = build_cross_timeframe_zones(daily, weekly, frame)
+    assert len(derived) == 1
+    assert derived[0]["low"] == 99.0 and derived[0]["high"] == 102.0
+    assert derived[0]["cross_timeframe_bonus"] == 1.0
+    assert daily[0] == original_daily
+    weekly[0]["role"] = "RESISTANCE"
+    assert build_cross_timeframe_zones(daily, weekly, frame) == []
+
+
+def test_scenario_v1_can_rank_near_strong_zone_above_distant_confluence() -> None:
+    frame = calculate_indicators(weekly_frame(np.linspace(100, 120, 100).tolist(), atr=2.0))
+    common = {
+        "timeframe": "DAILY", "role": "RESISTANCE", "cross_timeframe": False,
+        "source_families": [], "parent_daily_zone_ids": [], "parent_weekly_zone_ids": [],
+    }
+    zones = [
+        {**common, "zone_id": "near", "low": 122.0, "high": 123.0, "center": 122.5, "confluence_class": "MEDIUM", "strength_class": "VERY_STRONG", "strength_score": 8.0, "final_confluence_score": 3.0},
+        {**common, "zone_id": "far", "low": 170.0, "high": 172.0, "center": 171.0, "confluence_class": "VERY_HIGH", "strength_class": "WEAK", "strength_score": 0.0, "final_confluence_score": 9.0},
+    ]
+    enriched = apply_relevance(zones, 120.0, frame, is_crypto=False)
+    scenarios = build_scenarios_v1(120.0, enriched, {"BULLISH": 40, "NEUTRAL": 30, "BEARISH": 30}, {"classification": "POSITIVE"}, daily_atr=2.0, weekly_atr=5.0)
+    bullish = next(item for item in scenarios if item["scenario"] == "BULLISH")
+    assert bullish["primary_target"]["zone_id"] == "near"
+
+
+def test_sr_v1_component_uses_canonical_cross_timeframe_zone_once() -> None:
+    frame = calculate_indicators(weekly_frame(np.linspace(100, 120, 100).tolist(), atr=2.0))
+    zone = {
+        "zone_id": "d", "role": "SUPPORT", "low": 115.0, "high": 116.0, "center": 115.5,
+        "timeframe": "DAILY", "cross_timeframe": False, "confluence_class": "HIGH", "strength_class": "STRONG",
+        "parent_daily_zone_ids": [], "parent_weekly_zone_ids": [],
+    }
+    parent = apply_relevance([zone], 120.0, frame, is_crypto=False)[0]
+    cross = {
+        **parent, "zone_id": "x", "timeframe": "CROSS_TIMEFRAME", "cross_timeframe": True,
+        "parent_daily_zone_ids": ["d"], "parent_weekly_zone_ids": ["w"],
+    }
+    assert support_resistance_component_v1([parent, cross]) == support_resistance_component_v1([cross])
+
+
 def test_chart_has_no_pan_or_zoom_interaction() -> None:
     frame = calculate_indicators(weekly_frame(np.linspace(100, 160, 260).tolist()))
     chart = build_technical_chart(
@@ -300,6 +458,26 @@ def test_technical_outlook_v0_uses_only_pre_weekly_sr_outputs() -> None:
     assert content["zones"] == snapshot["support_resistance"]
     assert content["scenarios"] == snapshot["scenarios"]
     assert content["confirmation"] == snapshot["confirmation_matrix"]
+
+
+def test_engine_persists_separate_legacy_and_v1_stacks() -> None:
+    spec = CORE_ASSETS["SPY"]
+    dates = pd.date_range("2017-01-02", periods=2400, freq="B")
+    close = 100 + np.arange(len(dates)) * 0.05 + np.sin(np.arange(len(dates)) / 10) * 3
+    daily = _normalized_frame(
+        dates=dates,
+        opens=pd.Series(close - 0.2), highs=pd.Series(close + 1.0), lows=pd.Series(close - 1.0),
+        closes=pd.Series(close), volumes=pd.Series(1_000_000 + np.arange(len(dates))),
+        timeframe="1D", spec=spec, now=pd.Timestamp("2030-01-01"),
+    )
+    snapshot, _ = TechnicalOutlookEngine().analyze(daily, spec, created_at=datetime(2030, 1, 2, tzinfo=timezone.utc))
+    assert snapshot["sr_engine_version"] == "SR_ENGINE_V1"
+    assert snapshot["scenario_engine_version"] == "SCENARIO_ENGINE_V1"
+    assert snapshot["legacy_sr_engine_version"] == "SR_ENGINE_V0"
+    assert snapshot["legacy_scenario_engine_version"] == "SCENARIO_ENGINE_V0"
+    assert snapshot["support_resistance"] == snapshot["legacy_daily_support_resistance"]
+    assert snapshot["scenarios"] == snapshot["legacy_scenarios"]
+    assert snapshot["daily_support_resistance"] != snapshot["legacy_daily_support_resistance"]
 
 
 def test_llm_input_uses_weekly_and_daily_frames_only() -> None:

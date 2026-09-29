@@ -98,7 +98,9 @@ def render_technical_outlook_asset(
         del st.session_state[notice_key]
     if status and status.get("status") not in {None, "CURRENT"}:
         st.warning(f"{status.get('status')}: {status.get('stale_reason', 'using the last valid snapshot')}")
-    final = snapshot.get("final_state") or {}
+    final = dict(snapshot.get("final_state") or {})
+    if legacy and snapshot.get("legacy_scenario_probabilities"):
+        final["six_month_bias"] = max(snapshot["legacy_scenario_probabilities"], key=snapshot["legacy_scenario_probabilities"].get)
     elliott = _llm_elliott(snapshot)
     elliott_primary = elliott.get("primary") or {}
     top = st.columns(5)
@@ -115,7 +117,9 @@ def render_technical_outlook_asset(
     st.caption(
         f"Quantitative Analysis Updated: {snapshot.get('quant_updated_at', 'N/A')}  |  "
         f"LLM Interpretation Updated: {snapshot.get('llm_updated_at') or 'N/A'}  |  "
-        f"Model: {snapshot.get('model_version', 'N/A')}"
+        f"Model: {snapshot.get('model_version', 'N/A')}  |  "
+        f"S/R: {snapshot.get('legacy_sr_engine_version' if legacy else 'sr_engine_version', 'N/A')}  |  "
+        f"Scenario: {snapshot.get('legacy_scenario_engine_version' if legacy else 'scenario_engine_version', 'N/A')}"
     )
     if st.button("Run LLM", key=run_llm_key, type="primary"):
         try:
@@ -271,7 +275,11 @@ def _visible_support_resistance(snapshot: dict[str, Any], *, level_set: str = "d
     zones = pd.DataFrame(snapshot.get(key) or fallback or [])
     if zones.empty or "confluence" not in zones or "role" not in zones:
         return pd.DataFrame()
-    zones = zones.loc[zones["confluence"].isin(["HIGH", "VERY_HIGH"])].copy()
+    strength = zones["strength_class"] if "strength_class" in zones else pd.Series("WEAK", index=zones.index)
+    zones = zones.loc[
+        zones["confluence"].isin(["HIGH", "VERY_HIGH"])
+        | strength.isin(["STRONG", "VERY_STRONG"])
+    ].copy()
     if zones.empty:
         return zones
     if weekly:
@@ -332,31 +340,53 @@ def _render_analysis(snapshot: dict[str, Any], *, legacy: bool = False) -> None:
     }]), hide_index=True, use_container_width=True)
 
     st.markdown("#### Key Levels")
-    use_weekly = False
-    if not legacy:
-        level_timeframe = st.radio(
-            "S/R analysis timeframe",
-            ("Weekly", "Daily"),
-            horizontal=True,
-            key=f"technical_outlook_level_timeframe_{snapshot.get('ticker', 'asset')}",
+    if legacy:
+        content = _analysis_content(snapshot, legacy=True, use_weekly=False)
+        _render_zone_table(content["zones"], snapshot.get("price"), empty_message="No legacy levels are available.")
+    else:
+        filter_cols = st.columns(3)
+        confluence_filter = filter_cols[0].multiselect(
+            "Confluence",
+            ["LOW", "MEDIUM", "HIGH", "VERY_HIGH"],
+            default=["HIGH", "VERY_HIGH"],
+            key=f"to_confluence_filter_{snapshot.get('ticker', 'asset')}",
         )
-        use_weekly = level_timeframe == "Weekly"
-    content = _analysis_content(snapshot, legacy=legacy, use_weekly=use_weekly)
-    zones = content["zones"]
-    if zones:
-        st.dataframe(pd.DataFrame([{
-            "Role": zone.get("role"), "Zone": f"{zone.get('low', 0):,.2f}–{zone.get('high', 0):,.2f}",
-            "Distance from Price %": _zone_distance_from_price(snapshot.get("price"), zone), "Confluence": zone.get("confluence"),
-            "Sources": ", ".join(zone.get("sources") or []), "Timeframes": ", ".join(zone.get("timeframes") or []),
-        } for zone in zones]), hide_index=True, use_container_width=True)
-    elif not legacy:
-        st.info(f"No HIGH or VERY_HIGH {level_timeframe.lower()} confluence zones are available.")
+        strength_filter = filter_cols[1].multiselect(
+            "Strength",
+            ["WEAK", "MODERATE", "STRONG", "VERY_STRONG"],
+            default=["STRONG", "VERY_STRONG"],
+            key=f"to_strength_filter_{snapshot.get('ticker', 'asset')}",
+        )
+        role_filter = filter_cols[2].multiselect(
+            "Role",
+            ["SUPPORT", "RESISTANCE", "TESTING"],
+            default=["SUPPORT", "RESISTANCE", "TESTING"],
+            key=f"to_role_filter_{snapshot.get('ticker', 'asset')}",
+        )
+        sections = (
+            ("Weekly Structural Levels", snapshot.get("weekly_support_resistance") or []),
+            ("Daily Tactical Levels", snapshot.get("daily_support_resistance") or []),
+            ("Cross-Timeframe Zones", snapshot.get("cross_timeframe_support_resistance") or []),
+        )
+        for title, section_zones in sections:
+            st.markdown(f"**{title}**")
+            visible = [
+                zone for zone in section_zones
+                if zone.get("role") in role_filter
+                and (zone.get("confluence_class") in confluence_filter or zone.get("strength_class") in strength_filter)
+            ][:20]
+            _render_zone_table(visible, snapshot.get("price"), empty_message="No zones match the active Confluence / Strength filters.")
+        content = _analysis_content(snapshot, legacy=False, use_weekly=False)
 
     st.markdown("#### Scenario Matrix")
     scenarios = content["scenarios"]
     st.dataframe(pd.DataFrame([{
         "Scenario": item.get("scenario"), "Probability": f"{item.get('probability')}%", "Trigger": item.get("trigger"),
-        "Expected Path": " → ".join(_price(value) for value in item.get("expected_path", [])), "Target": _range_list(item.get("target_zone")), "Invalidation": item.get("invalidation"),
+        "Expected Path": " → ".join(_price(value) for value in item.get("expected_path", [])),
+        "Primary Target": _target_range(item.get("primary_target")) or _range_list(item.get("target_zone")),
+        "Extended Target": _target_range(item.get("extended_target")),
+        "Structural Target": _target_range(item.get("structural_target")),
+        "Invalidation": item.get("invalidation"),
     } for item in scenarios]), hide_index=True, use_container_width=True)
 
     st.markdown("#### Forecast Horizons")
@@ -392,9 +422,9 @@ def _analysis_content(
 ) -> dict[str, list[dict[str, Any]]]:
     if legacy:
         return {
-            "zones": list(snapshot.get("support_resistance") or []),
-            "scenarios": list(snapshot.get("scenarios") or []),
-            "confirmation": list(snapshot.get("confirmation_matrix") or []),
+            "zones": list(snapshot.get("legacy_daily_support_resistance") or snapshot.get("support_resistance") or []),
+            "scenarios": list(snapshot.get("legacy_scenarios") or snapshot.get("scenarios") or []),
+            "confirmation": list(snapshot.get("legacy_confirmation_matrix") or snapshot.get("confirmation_matrix") or []),
         }
     zones = (
         snapshot.get("weekly_support_resistance")
@@ -412,10 +442,31 @@ def _analysis_content(
         else snapshot.get("daily_confirmation_matrix") or snapshot.get("confirmation_matrix")
     ) or []
     return {
-        "zones": [zone for zone in zones if zone.get("confluence") in {"HIGH", "VERY_HIGH"}][:20],
+        "zones": [zone for zone in zones if zone.get("confluence") in {"HIGH", "VERY_HIGH"} or zone.get("strength_class") in {"STRONG", "VERY_STRONG"}][:20],
         "scenarios": list(scenarios),
         "confirmation": list(confirmation),
     }
+
+
+def _render_zone_table(zones: list[dict[str, Any]], current_price: Any, *, empty_message: str) -> None:
+    if not zones:
+        st.caption(empty_message)
+        return
+    st.dataframe(
+        pd.DataFrame([{
+            "Role": zone.get("role"),
+            "Zone": f"{zone.get('low', 0):,.2f}–{zone.get('high', 0):,.2f}",
+            "Distance from Price %": _zone_distance_from_price(current_price, zone),
+            "Timeframe": zone.get("timeframe") or ", ".join(zone.get("timeframes") or []),
+            "Degree": zone.get("structural_degree"),
+            "Confluence": zone.get("confluence_class") or zone.get("confluence"),
+            "Strength": zone.get("strength_class") or "N/A",
+            "Touches": zone.get("confirmed_touch_count", 0),
+            "Sources": ", ".join(zone.get("sources") or []),
+        } for zone in zones]),
+        hide_index=True,
+        use_container_width=True,
+    )
 
 
 def _render_elliott_candidate(title: str, candidate: dict[str, Any], confidence: Any) -> None:
@@ -498,6 +549,10 @@ def _range(value: Any) -> str:
 
 def _range_list(value: Any) -> str:
     return f"{_price(value[0])}–{_price(value[1])}" if isinstance(value, list) and len(value) >= 2 else "N/A"
+
+
+def _target_range(value: Any) -> str:
+    return _range_list(value.get("range")) if isinstance(value, dict) else ""
 
 
 def _zone_distance_from_price(current_price: Any, zone: dict[str, Any]) -> str:

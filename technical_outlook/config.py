@@ -5,8 +5,12 @@ from typing import Any
 from elliott_waves.config import AssetSpec
 
 
-MODEL_VERSION = "TECHNICAL_OUTLOOK_V2"
-CONFIG_VERSION = "TECHNICAL_OUTLOOK_CONFIG_V2"
+MODEL_VERSION = "TECHNICAL_OUTLOOK_V3"
+CONFIG_VERSION = "TECHNICAL_OUTLOOK_CONFIG_V3"
+SR_ENGINE_VERSION = "SR_ENGINE_V1"
+SCENARIO_ENGINE_VERSION = "SCENARIO_ENGINE_V1"
+LEGACY_SR_ENGINE_VERSION = "SR_ENGINE_V0"
+LEGACY_SCENARIO_ENGINE_VERSION = "SCENARIO_ENGINE_V0"
 
 CORE_ASSETS: dict[str, AssetSpec] = {
     "SPY": AssetSpec(
@@ -62,6 +66,79 @@ CONFIG: dict[str, Any] = {
             "fibonacci": 1.6,
             "round_number": 0.7,
         },
+    },
+    "support_resistance_v1": {
+        "member_weights": {
+            "structural_swing": 4.0,
+            "weekly_swing": 3.0,
+            "daily_swing": 2.0,
+            "minor_swing": 1.0,
+            "poc": 3.0,
+            "hvn": 2.5,
+            "sma200": 2.5,
+            "sma100": 2.0,
+            "sma50": 1.5,
+            "fibonacci": 1.75,
+            "round_number": 0.5,
+            "channel_boundary": 2.0,
+            "lvn": 0.0,
+        },
+        "family_breadth_increment": 0.25,
+        "family_breadth_cap": 0.50,
+        "confluence_thresholds": {"medium": 2.5, "high": 5.0, "very_high": 8.0},
+        "daily": {
+            "base_price_fraction": 0.004,
+            "atr_multiplier": 0.35,
+            "radius_cap_fraction": 0.006,
+            "min_width_fraction": 0.002,
+            "min_width_atr_multiplier": 0.15,
+            "max_total_width_fraction": 0.012,
+            "minimum_touch_separation": 5,
+            "reaction_window": 10,
+            "recency_bars": [63, 126, 252, 504],
+        },
+        "weekly": {
+            "base_price_fraction": 0.009,
+            "atr_multiplier": 0.55,
+            "radius_cap_fraction": 0.0125,
+            "min_width_fraction": 0.004,
+            "min_width_atr_multiplier": 0.20,
+            "max_total_width_fraction": 0.025,
+            "minimum_touch_separation": 3,
+            "reaction_window": 4,
+            "recency_bars": [13, 26, 52, 104],
+        },
+        "mad_multiplier": 2.0,
+        "episode_exit_atr": 0.5,
+        "minimum_reaction_atr": 0.5,
+        "minimum_hold_episodes": 3,
+        "cross_timeframe_overlap": 0.30,
+        "cross_timeframe_duplicate_overlap": 0.70,
+        "cross_timeframe_bonus": 1.0,
+        "cross_timeframe_bonus_cap": 1.0,
+    },
+    "scenario_v1": {
+        "component_weights": {
+            "confluence": {"LOW": 0.5, "MEDIUM": 1.25, "HIGH": 2.25, "VERY_HIGH": 3.0},
+            "strength": {"WEAK": 0.0, "MODERATE": 0.75, "STRONG": 1.5, "VERY_STRONG": 2.0},
+        },
+        "timeframe_component": {
+            "SHORT": {"DAILY": 1.0, "WEEKLY": 0.5, "CROSS_TIMEFRAME": 1.0},
+            "MEDIUM": {"DAILY": 0.75, "WEEKLY": 1.0, "CROSS_TIMEFRAME": 1.0},
+            "6M": {"DAILY": 0.25, "WEEKLY": 1.0, "CROSS_TIMEFRAME": 1.0},
+        },
+        "cross_timeframe_component": 0.5,
+        "horizon_bars": {
+            "market": {"SHORT": 20, "MEDIUM": 63, "6M": 126},
+            "crypto": {"SHORT": 28, "MEDIUM": 91, "6M": 182},
+        },
+        "primary_min_relevance": 5.0,
+        "primary_max_reachability": 1.25,
+        "extended_min_relevance": 4.5,
+        "extended_max_reachability": 2.0,
+        "structural_min_relevance": 4.0,
+        "structural_max_reachability": 3.0,
+        "break_buffer_atr": 0.10,
     },
     "elliott_weights": {
         "fibonacci": 0.15,

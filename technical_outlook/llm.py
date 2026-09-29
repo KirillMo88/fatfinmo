@@ -97,8 +97,9 @@ def structured_llm_input(snapshot: dict[str, Any]) -> dict[str, Any]:
             "minor_pivots": _compact_pivots(snapshot.get("minor_pivots"), 24),
         },
         "support_resistance": {
-            "weekly": _compact_zones(snapshot.get("weekly_support_resistance"), 16),
-            "daily": _compact_zones(snapshot.get("daily_support_resistance") or snapshot.get("support_resistance"), 10),
+            "weekly": _compact_zones(snapshot.get("weekly_support_resistance"), 5),
+            "daily": _compact_zones(snapshot.get("daily_support_resistance") or snapshot.get("support_resistance"), 5),
+            "cross_timeframe": _compact_zones(snapshot.get("cross_timeframe_support_resistance"), 3),
         },
         "volume_profile": {
             "weekly": _compact_profile(snapshot.get("weekly_volume_profile")),
@@ -172,9 +173,24 @@ def _compact_pivots(value: Any, limit: int) -> list[dict[str, Any]]:
 
 
 def _compact_zones(value: Any, limit: int) -> list[dict[str, Any]]:
-    fields = ("low", "high", "center", "role", "sources", "timeframes", "confluence_score", "confluence")
+    fields = (
+        "zone_id", "low", "high", "center", "role", "timeframe", "source_families",
+        "confluence_class", "strength_class", "confirmed_touch_count", "distance_pct",
+        "relevance_by_horizon",
+    )
     zones = value if isinstance(value, list) else []
-    return [{field: zone.get(field) for field in fields} for zone in zones[:limit] if isinstance(zone, dict)]
+    candidates = [zone for zone in zones if isinstance(zone, dict)]
+    candidates.sort(key=lambda zone: (-_zone_relevance(zone), abs(float(zone.get("distance_pct") or 0.0)), str(zone.get("zone_id") or "")))
+    return [{field: zone.get(field) for field in fields} for zone in candidates[:limit]]
+
+
+def _zone_relevance(zone: dict[str, Any]) -> float:
+    values = [float(value) for value in (zone.get("relevance_by_horizon") or {}).values() if isinstance(value, (int, float))]
+    if values:
+        return max(values)
+    confluence = {"LOW": 0.0, "MEDIUM": 1.0, "HIGH": 2.0, "VERY_HIGH": 3.0}.get(str(zone.get("confluence_class") or zone.get("confluence")), 0.0)
+    strength = {"WEAK": 0.0, "MODERATE": 1.0, "STRONG": 2.0, "VERY_STRONG": 3.0}.get(str(zone.get("strength_class")), 0.0)
+    return confluence + strength
 
 
 def _compact_profile(value: Any) -> dict[str, Any]:
