@@ -9,12 +9,9 @@ import pandas as pd
 from elliott_waves.config import AssetSpec
 
 from .analytics import (
-    build_scenarios,
-    build_support_resistance,
     build_timeframe_bars,
     calculate_indicators,
     classify_structure,
-    confirmation_matrix,
     data_version,
     detect_divergences,
     detect_pivots,
@@ -31,6 +28,20 @@ from .analytics import (
     volume_state,
 )
 from .config import CONFIG, CONFIG_VERSION, MODEL_VERSION
+from .config import (
+    LEGACY_SCENARIO_ENGINE_VERSION,
+    LEGACY_SR_ENGINE_VERSION,
+    SCENARIO_ENGINE_VERSION,
+    SR_ENGINE_VERSION,
+)
+from .scenario_v1 import (
+    apply_relevance,
+    build_scenarios_v1,
+    confirmation_matrix_v1,
+    support_resistance_component_v1,
+)
+from .legacy_v0 import build_confirmation_matrix_v0, build_scenarios_v0, build_support_resistance_v0
+from .sr_v1 import build_cross_timeframe_zones, build_support_resistance_v1
 
 
 class TechnicalOutlookEngine:
@@ -71,7 +82,7 @@ class TechnicalOutlookEngine:
             if weekly_window_start <= pd.Timestamp(pivot["pivot_time"]) <= weekly_window_end
         ]
         weekly_profile = volume_profile(weekly_window)
-        daily_zones = build_support_resistance(
+        legacy_daily_zones = build_support_resistance_v0(
             daily,
             intermediate_pivots,
             daily_profile,
@@ -79,7 +90,7 @@ class TechnicalOutlookEngine:
             max_pivots=10,
             max_zones=10,
         )
-        weekly_zones = build_support_resistance(
+        legacy_weekly_zones = build_support_resistance_v0(
             weekly_window,
             weekly_level_pivots,
             weekly_profile,
@@ -87,6 +98,35 @@ class TechnicalOutlookEngine:
             max_pivots=None,
             max_zones=20,
         )
+        daily_zones = build_support_resistance_v1(
+            daily,
+            intermediate_pivots + minor_pivots,
+            daily_profile,
+            timeframe="DAILY",
+            max_pivots=24,
+            max_zones=20,
+        )
+        weekly_zones = build_support_resistance_v1(
+            weekly_window,
+            weekly_level_pivots,
+            weekly_profile,
+            timeframe="WEEKLY",
+            max_pivots=None,
+            max_zones=20,
+        )
+        cross_timeframe_zones = build_cross_timeframe_zones(daily_zones, weekly_zones, daily, max_zones=12)
+        all_v1_zones = apply_relevance(
+            daily_zones + weekly_zones + cross_timeframe_zones,
+            float(daily.iloc[-1]["close"]),
+            daily,
+            is_crypto=spec.instrument_type == "crypto",
+        )
+        daily_ids = {zone["zone_id"] for zone in daily_zones}
+        weekly_ids = {zone["zone_id"] for zone in weekly_zones}
+        cross_ids = {zone["zone_id"] for zone in cross_timeframe_zones}
+        daily_zones = [zone for zone in all_v1_zones if zone["zone_id"] in daily_ids]
+        weekly_zones = [zone for zone in all_v1_zones if zone["zone_id"] in weekly_ids]
+        cross_timeframe_zones = [zone for zone in all_v1_zones if zone["zone_id"] in cross_ids]
         analogs = historical_analogs(weekly)
         confidence = final_confidence(weekly_structure, daily_structure, daily_momentum, volume, analogs)
         price = float(daily.iloc[-1]["close"])
@@ -98,18 +138,33 @@ class TechnicalOutlookEngine:
             daily_momentum,
             volume,
             divergences,
-            daily_zones,
+            legacy_daily_zones,
             analogs,
             extension,
             price,
         )
+        legacy_components = dict(components)
+        legacy_probabilities = scenario_probabilities(legacy_components, confidence)
+        legacy_scenarios = build_scenarios_v0(
+            price, legacy_daily_zones, legacy_probabilities, daily_momentum, timeframe_label="Daily"
+        )
+        legacy_confirmation = build_confirmation_matrix_v0(
+            legacy_scenarios, legacy_daily_zones, price, timeframe_label="Daily"
+        )
+        components["support_resistance"] = support_resistance_component_v1(all_v1_zones)
         probabilities = scenario_probabilities(components, confidence)
-        daily_scenarios = build_scenarios(
-            price, daily_zones, probabilities, daily_momentum, timeframe_label="Daily"
+        daily_atr = finite(daily.iloc[-1].get("atr14")) or price * 0.02
+        weekly_atr = finite(weekly.iloc[-1].get("atr14")) or price * 0.04
+        v1_scenarios = build_scenarios_v1(
+            price,
+            all_v1_zones,
+            probabilities,
+            daily_momentum,
+            daily_atr=daily_atr,
+            weekly_atr=weekly_atr,
         )
-        weekly_scenarios = build_scenarios(
-            price, weekly_zones, probabilities, weekly_momentum, timeframe_label="Weekly"
-        )
+        daily_scenarios = v1_scenarios
+        weekly_scenarios = v1_scenarios
         horizons = _horizon_states(weekly_structure, daily_structure, daily_momentum, probabilities, daily_zones, price)
         multi_timeframe = _multi_timeframe_state(weekly_structure["state"], daily_structure["state"])
         final_state = {
@@ -151,20 +206,26 @@ class TechnicalOutlookEngine:
             "volume_profile": daily_profile,
             "daily_volume_profile": daily_profile,
             "weekly_volume_profile": weekly_profile,
-            "support_resistance": daily_zones,
+            "support_resistance": legacy_daily_zones,
+            "legacy_daily_support_resistance": legacy_daily_zones,
+            "legacy_weekly_support_resistance": legacy_weekly_zones,
             "daily_support_resistance": daily_zones,
             "weekly_support_resistance": weekly_zones,
+            "cross_timeframe_support_resistance": cross_timeframe_zones,
             "elliott_source": "LLM",
             "elliott_primary": None,
             "elliott_alternative": None,
             "elliott_confidence": None,
             "elliott_current_wave_state": "AWAITING_LLM",
+            "legacy_scenario_components": legacy_components,
+            "legacy_scenario_probabilities": legacy_probabilities,
             "scenario_components": components,
             "scenario_probabilities": probabilities,
             "bull_probability": probabilities["BULLISH"],
             "neutral_probability": probabilities["NEUTRAL"],
             "bear_probability": probabilities["BEARISH"],
-            "scenarios": daily_scenarios,
+            "scenarios": legacy_scenarios,
+            "legacy_scenarios": legacy_scenarios,
             "daily_scenarios": daily_scenarios,
             "weekly_scenarios": weekly_scenarios,
             "short_term_bias": horizons["short_term"]["state"],
@@ -172,15 +233,10 @@ class TechnicalOutlookEngine:
             "six_month_bias": horizons["six_month"]["state"],
             "horizons": horizons,
             "expected_path": next(item["expected_path"] for item in daily_scenarios if item["scenario"] == final_state["six_month_bias"]),
-            "confirmation_matrix": confirmation_matrix(
-                daily_scenarios, daily_zones, price, timeframe_label="Daily"
-            ),
-            "daily_confirmation_matrix": confirmation_matrix(
-                daily_scenarios, daily_zones, price, timeframe_label="Daily"
-            ),
-            "weekly_confirmation_matrix": confirmation_matrix(
-                weekly_scenarios, weekly_zones, price, timeframe_label="Weekly"
-            ),
+            "confirmation_matrix": legacy_confirmation,
+            "legacy_confirmation_matrix": legacy_confirmation,
+            "daily_confirmation_matrix": confirmation_matrix_v1(v1_scenarios),
+            "weekly_confirmation_matrix": confirmation_matrix_v1(v1_scenarios),
             "historical_analogs": analogs,
             "final_state": final_state,
             "confidence": confidence,
@@ -195,6 +251,10 @@ class TechnicalOutlookEngine:
             "deterministic_narrative": "",
             "model_version": MODEL_VERSION,
             "config_version": CONFIG_VERSION,
+            "sr_engine_version": SR_ENGINE_VERSION,
+            "scenario_engine_version": SCENARIO_ENGINE_VERSION,
+            "legacy_sr_engine_version": LEGACY_SR_ENGINE_VERSION,
+            "legacy_scenario_engine_version": LEGACY_SCENARIO_ENGINE_VERSION,
             "model_parameters": CONFIG,
             "data_version": version,
             "data_status": "CURRENT",

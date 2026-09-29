@@ -123,7 +123,7 @@ def run_llm_now(
     if not previous:
         raise ValueError(f"{symbol}: no Quant snapshot is available")
     if previous.get("model_version") != MODEL_VERSION:
-        raise ValueError(f"{symbol}: Quant snapshot is stale; wait for the V2 weekly/daily refresh")
+        raise ValueError(f"{symbol}: Quant snapshot is stale; wait for the current weekly/daily refresh")
     when = run_at or datetime.now(timezone.utc)
     interpretation, model = llm_caller(previous)
     snapshot = deepcopy(previous)
