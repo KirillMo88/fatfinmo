@@ -9,6 +9,7 @@ from gold_regime.aisc import (
     build_gold_aisc_valuation,
     build_quarterly_aisc,
 )
+from gold_regime.aisc_view import filter_aisc_range
 
 
 def test_quarterly_aisc_forecast_compounds_from_last_actual() -> None:
@@ -51,3 +52,11 @@ def test_new_actual_quarter_replaces_estimate_and_state_thresholds_are_dynamic()
     assert aisc_valuation_state(1.20) == "Very compressed producer economics"
     assert aisc_valuation_state(1.625) == "Normal historical range"
     assert aisc_valuation_state(2.50) == "Extreme / unusual"
+
+
+def test_aisc_range_uses_the_shared_global_range_anchor() -> None:
+    frame = pd.DataFrame({"date": pd.date_range("2022-01-01", "2026-12-31", freq="MS")})
+    filtered = filter_aisc_range(frame, "1Y", pd.Timestamp("2026-06-30"))
+
+    assert filtered["date"].min() == pd.Timestamp("2025-07-01")
+    assert filtered["date"].max() == pd.Timestamp("2026-06-01")
