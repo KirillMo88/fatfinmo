@@ -29,7 +29,7 @@ from technical_outlook.engine import TechnicalOutlookEngine, _chart_frame
 from technical_outlook.llm import LLM_TEXT_FIELDS, structured_llm_input, validate_llm_output
 from technical_outlook.service import apply_llm_schedule
 from technical_outlook import storage
-from technical_outlook_tab import build_technical_chart
+from technical_outlook_tab import _visible_support_resistance, build_technical_chart
 
 
 def pivot(price: float, index: int, kind: str, status: str = "CONFIRMED", degree: str = "INTERMEDIATE") -> dict:
@@ -240,6 +240,17 @@ def test_chart_has_no_pan_or_zoom_interaction() -> None:
         show_profile=False,
     )
     assert "params" not in chart.to_dict()
+
+
+def test_support_resistance_overlay_keeps_only_bright_high_confluence_zones() -> None:
+    zones = _visible_support_resistance({"support_resistance": [
+        {"role": "SUPPORT", "confluence": "LOW", "low": 90, "high": 91},
+        {"role": "SUPPORT", "confluence": "HIGH", "low": 95, "high": 96},
+        {"role": "RESISTANCE", "confluence": "VERY_HIGH", "low": 105, "high": 106},
+    ]})
+    assert list(zones["confluence"]) == ["HIGH", "VERY_HIGH"]
+    assert list(zones["color"]) == ["#00ff88", "#ff4d5a"]
+    assert zones.loc[zones["confluence"] == "VERY_HIGH", "zone_opacity"].iloc[0] > zones.loc[zones["confluence"] == "HIGH", "zone_opacity"].iloc[0]
 
 
 def test_llm_input_uses_weekly_and_daily_frames_only() -> None:
