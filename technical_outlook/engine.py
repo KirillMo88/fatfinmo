@@ -31,7 +31,6 @@ from .analytics import (
     volume_state,
 )
 from .config import CONFIG, CONFIG_VERSION, MODEL_VERSION
-from .elliott import analyze_elliott_hierarchy
 
 
 class TechnicalOutlookEngine:
@@ -47,47 +46,33 @@ class TechnicalOutlookEngine:
         daily = daily_bars.loc[daily_bars["is_closed"].fillna(False)].copy().reset_index(drop=True)
         if daily.empty:
             raise ValueError(f"{spec.display_name}: no closed daily bars")
-        monthly = calculate_indicators(build_timeframe_bars(daily, "1M", spec))
         weekly = calculate_indicators(build_timeframe_bars(daily, "1W", spec))
-        if monthly.empty or weekly.empty:
-            raise ValueError(f"{spec.display_name}: insufficient aggregated history")
+        daily = calculate_indicators(daily)
+        if weekly.empty or daily.empty:
+            raise ValueError(f"{spec.display_name}: insufficient weekly/daily history")
 
-        major_pivots = detect_pivots(monthly, "MONTHLY", "MAJOR")
-        intermediate_pivots = detect_pivots(weekly, "WEEKLY", "INTERMEDIATE")
-        minor_pivots = detect_pivots(weekly, "WEEKLY", "MINOR")
-        monthly_structure = classify_structure(monthly, major_pivots)
-        weekly_structure = classify_structure(weekly, intermediate_pivots)
-        monthly_ma = moving_average_state(monthly)
+        major_pivots = detect_pivots(weekly, "WEEKLY", "MAJOR")
+        intermediate_pivots = detect_pivots(daily, "DAILY", "INTERMEDIATE")
+        minor_pivots = detect_pivots(daily, "DAILY", "MINOR")
+        weekly_structure = classify_structure(weekly, major_pivots)
+        daily_structure = classify_structure(daily, intermediate_pivots)
         weekly_ma = moving_average_state(weekly)
-        monthly_momentum = momentum_state(monthly)
+        daily_ma = moving_average_state(daily)
         weekly_momentum = momentum_state(weekly)
-        divergences = detect_divergences(monthly, major_pivots, "MONTHLY") + detect_divergences(weekly, intermediate_pivots, "WEEKLY")
-        volume = volume_state(weekly)
-        profile = volume_profile(weekly)
-        zones = build_support_resistance(weekly, intermediate_pivots, profile)
-        elliott = analyze_elliott_hierarchy(
-            major_pivots,
-            intermediate_pivots,
-            minor_pivots,
-            monthly_momentum,
-            weekly_momentum,
-            divergences,
-            volume,
-            previous,
-        )
-        primary = elliott["primary"]
-        alternative = elliott["alternative"]
-        elliott_confidence = elliott["confidence"]
+        daily_momentum = momentum_state(daily)
+        divergences = detect_divergences(weekly, major_pivots, "WEEKLY") + detect_divergences(daily, intermediate_pivots, "DAILY")
+        volume = volume_state(daily)
+        profile = volume_profile(daily)
+        zones = build_support_resistance(daily, intermediate_pivots, profile)
         analogs = historical_analogs(weekly)
-        confidence = final_confidence(monthly_structure, weekly_structure, weekly_momentum, elliott_confidence, volume, analogs)
-        price = float(weekly.iloc[-1]["close"])
-        extension = weekly_momentum["extension200"]
+        confidence = final_confidence(weekly_structure, daily_structure, daily_momentum, volume, analogs)
+        price = float(daily.iloc[-1]["close"])
+        extension = daily_momentum["extension200"]
         components = _scenario_components(
-            monthly_structure,
             weekly_structure,
-            monthly_momentum,
+            daily_structure,
             weekly_momentum,
-            primary,
+            daily_momentum,
             volume,
             divergences,
             zones,
@@ -96,16 +81,16 @@ class TechnicalOutlookEngine:
             price,
         )
         probabilities = scenario_probabilities(components, confidence)
-        scenarios = build_scenarios(price, zones, probabilities, weekly_momentum)
-        horizons = _horizon_states(monthly_structure, weekly_structure, weekly_momentum, probabilities, zones, price)
-        multi_timeframe = _multi_timeframe_state(monthly_structure["state"], weekly_structure["state"])
+        scenarios = build_scenarios(price, zones, probabilities, daily_momentum)
+        horizons = _horizon_states(weekly_structure, daily_structure, daily_momentum, probabilities, zones, price)
+        multi_timeframe = _multi_timeframe_state(weekly_structure["state"], daily_structure["state"])
         final_state = {
-            "structural_trend": _direction(monthly_structure["state"]),
-            "medium_term_trend": _direction(weekly_structure["state"]),
-            "momentum": _compact_momentum(weekly_momentum["classification"]),
-            "momentum_trajectory": weekly_momentum["trajectory"],
-            "elliott_phase": primary["label"],
-            "elliott_wave_state": elliott["current_wave_state"],
+            "structural_trend": _direction(weekly_structure["state"]),
+            "medium_term_trend": _direction(daily_structure["state"]),
+            "momentum": _compact_momentum(daily_momentum["classification"]),
+            "momentum_trajectory": daily_momentum["trajectory"],
+            "elliott_phase": "AWAITING_LLM",
+            "elliott_wave_state": "AWAITING_LLM",
             "extension": extension_state(extension),
             "six_month_bias": max(probabilities, key=probabilities.get),
             "confidence": confidence,
@@ -123,34 +108,25 @@ class TechnicalOutlookEngine:
             "source_id": spec.source_id,
             "source_metadata": spec.to_dict(),
             "price": price,
-            "monthly_structure": monthly_structure,
             "weekly_structure": weekly_structure,
-            "monthly_moving_averages": monthly_ma,
+            "daily_structure": daily_structure,
             "weekly_moving_averages": weekly_ma,
-            "monthly_indicators": monthly_momentum,
+            "daily_moving_averages": daily_ma,
             "weekly_indicators": weekly_momentum,
-            "pivots": {"monthly": major_pivots, "weekly": intermediate_pivots, "minor": minor_pivots},
-            "monthly_pivots": major_pivots,
-            "weekly_pivots": intermediate_pivots,
+            "daily_indicators": daily_momentum,
+            "pivots": {"weekly": major_pivots, "daily": intermediate_pivots, "minor": minor_pivots},
+            "weekly_pivots": major_pivots,
+            "daily_pivots": intermediate_pivots,
             "minor_pivots": minor_pivots,
             "divergences": divergences,
             "volume_state": volume,
             "volume_profile": profile,
             "support_resistance": zones,
-            "elliott_primary": primary,
-            "elliott_primary_score": primary["score"],
-            "elliott_alternative": alternative,
-            "elliott_alternative_score": alternative["score"],
-            "elliott_confidence": elliott_confidence,
-            "elliott_current_wave_state": elliott["current_wave_state"],
-            "elliott_candidate_universe_summary": elliott["candidate_universe_summary"],
-            "elliott_candidate_universe": elliott["candidate_universe"],
-            "elliott_major_primary": elliott["major_primary"],
-            "elliott_major_alternative": elliott["major_alternative"],
-            "elliott_major_confidence": elliott["major_confidence"],
-            "elliott_parent_child_map": elliott["parent_child_map"],
-            "elliott_complexity_penalties": elliott["complexity_penalties"],
-            "elliott_change_from_prior_snapshot": elliott["change_from_prior_snapshot"],
+            "elliott_source": "LLM",
+            "elliott_primary": None,
+            "elliott_alternative": None,
+            "elliott_confidence": None,
+            "elliott_current_wave_state": "AWAITING_LLM",
             "scenario_components": components,
             "scenario_probabilities": probabilities,
             "bull_probability": probabilities["BULLISH"],
@@ -184,7 +160,7 @@ class TechnicalOutlookEngine:
             "backtest_outcomes": None,
         }
         payload["deterministic_narrative"] = deterministic_narrative(payload)
-        charts = {"1M": _chart_frame(monthly), "1W": _chart_frame(weekly)}
+        charts = {"1W": _chart_frame(weekly), "1D": _chart_frame(daily)}
         return payload, charts
 
 
@@ -193,15 +169,14 @@ def _chart_frame(frame: pd.DataFrame) -> pd.DataFrame:
         "timestamp", "open", "high", "low", "close", "volume", "sma50", "sma100", "sma200",
         "rsi14", "macd", "macd_signal", "macd_hist", "roc12", "extension200",
     ]
-    return frame[[column for column in columns if column in frame]].copy()
+    return frame[[column for column in columns if column in frame]].tail(500).copy()
 
 
 def _scenario_components(
-    monthly_structure: dict[str, Any],
     weekly_structure: dict[str, Any],
-    monthly_momentum: dict[str, Any],
+    daily_structure: dict[str, Any],
     weekly_momentum: dict[str, Any],
-    primary: dict[str, Any],
+    daily_momentum: dict[str, Any],
     volume: dict[str, Any],
     divergences: list[dict[str, Any]],
     zones: list[dict[str, Any]],
@@ -210,10 +185,8 @@ def _scenario_components(
     price: float,
 ) -> dict[str, float | None]:
     direction = {"BULL": 100.0, "BEAR": -100.0, "RANGE": 0.0, "TRANSITION": 0.0}
-    trend = direction.get(monthly_structure["state"], 0.0) * 0.65 + direction.get(weekly_structure["state"], 0.0) * 0.35
-    momentum = float(monthly_momentum["score"]) * 0.35 + float(weekly_momentum["score"]) * 0.65
-    elliott_direction = 1.0 if primary.get("direction") == "UP" else -1.0 if primary.get("direction") == "DOWN" else 0.0
-    elliott = elliott_direction * float(primary.get("score") or 0.0)
+    trend = direction.get(weekly_structure["state"], 0.0) * 0.65 + direction.get(daily_structure["state"], 0.0) * 0.35
+    momentum = float(weekly_momentum["score"]) * 0.35 + float(daily_momentum["score"]) * 0.65
     volume_component = None if volume.get("status") != "AVAILABLE" else (float(volume.get("score") or 50.0) - 50.0) * 2.0
     extension_risk = None if extension is None else float(np.clip(-np.sign(extension) * max(0.0, abs(extension) - 10.0) * 3.0, -100.0, 100.0))
     divergence = 0.0
@@ -230,7 +203,7 @@ def _scenario_components(
     analog_return = ((analogs.get("returns") or {}).get("6M") or {}).get("median")
     analog = None if analog_return is None else float(np.clip(float(analog_return) * 6.0, -100.0, 100.0))
     return {
-        "trend": round(trend, 2), "momentum": round(momentum, 2), "elliott": round(elliott, 2),
+        "trend": round(trend, 2), "momentum": round(momentum, 2), "elliott": None,
         "volume": finite(volume_component), "extension_risk": finite(extension_risk),
         "divergence": round(divergence, 2), "support_resistance": round(sr, 2),
         "historical_analog": finite(analog),
@@ -238,35 +211,35 @@ def _scenario_components(
 
 
 def _horizon_states(
-    monthly: dict[str, Any],
     weekly: dict[str, Any],
+    daily: dict[str, Any],
     momentum: dict[str, Any],
     probabilities: dict[str, int],
     zones: list[dict[str, Any]],
     price: float,
 ) -> dict[str, dict[str, str]]:
     short = "BULLISH" if momentum["score"] >= 20 else "BEARISH" if momentum["score"] <= -20 else "NEUTRAL"
-    if momentum["trajectory"] == "DECELERATING" and short == "BEARISH" and weekly["state"] != "BEAR":
+    if momentum["trajectory"] == "DECELERATING" and short == "BEARISH" and daily["state"] != "BEAR":
         short = "BOTTOMING"
-    medium = "BULLISH" if weekly["state"] == "BULL" else "BEARISH" if weekly["state"] == "BEAR" else "NEUTRAL"
+    medium = "BULLISH" if daily["state"] == "BULL" else "BEARISH" if daily["state"] == "BEAR" else "NEUTRAL"
     six_month = max(probabilities, key=probabilities.get)
     nearest = zones[0] if zones else None
     zone_text = f"Nearest {nearest['role'].lower()} is {nearest['low']:.2f}–{nearest['high']:.2f}." if nearest else "No reliable zone is available."
     return {
-        "short_term": {"range": "1–4 weeks", "state": short, "explanation": f"Weekly momentum is {momentum['classification']} and {momentum['trajectory']}. {zone_text}"},
-        "medium_term": {"range": "1–3 months", "state": medium, "explanation": f"Weekly market structure is {weekly['state']} ({weekly['sequence']})."},
-        "six_month": {"range": "3–6 months", "state": six_month, "explanation": f"Monthly priority state is {monthly['state']}; quantitative scenario probability is {probabilities[six_month]}%."},
+        "short_term": {"range": "1–4 weeks", "state": short, "explanation": f"Daily momentum is {momentum['classification']} and {momentum['trajectory']}. {zone_text}"},
+        "medium_term": {"range": "1–3 months", "state": medium, "explanation": f"Daily market structure is {daily['state']} ({daily['sequence']})."},
+        "six_month": {"range": "3–6 months", "state": six_month, "explanation": f"Weekly priority state is {weekly['state']}; quantitative scenario probability is {probabilities[six_month]}%."},
     }
 
 
-def _multi_timeframe_state(monthly: str, weekly: str) -> str:
+def _multi_timeframe_state(weekly: str, daily: str) -> str:
     mapping = {
         ("BULL", "BULL"): "STRONG_BULL",
         ("BULL", "BEAR"): "CORRECTION_WITHIN_BULL_TREND",
         ("BEAR", "BULL"): "COUNTERTREND_BEAR_MARKET_RALLY",
         ("BEAR", "BEAR"): "STRONG_BEAR",
     }
-    return mapping.get((monthly, weekly), "TRANSITION")
+    return mapping.get((weekly, daily), "TRANSITION")
 
 
 def _direction(state: str) -> str:

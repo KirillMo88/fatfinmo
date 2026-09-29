@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from technical_outlook.config import CORE_ASSETS
-from technical_outlook.service import analyze_requested_asset
+from technical_outlook.service import analyze_requested_asset, run_llm_now
 from technical_outlook.storage import (
     read_chart_bars,
     read_latest_snapshot,
@@ -22,15 +22,15 @@ def render_technical_outlook_tab(available_tickers: list[str] | None = None) -> 
     st.markdown("## Technical Outlook")
     settings = read_settings()
     enabled = st.toggle(
-        "Use LLM Interpretation",
+        "Enable Scheduled LLM",
         value=bool(settings.get("use_llm_interpretation", False)),
-        help="Quant updates nightly. When enabled, LLM interpretation updates only during the Friday-night overnight run.",
+        help="When enabled, the scheduled LLM interpretation refresh runs on Friday night. Run LLM remains available at any time.",
         key="technical_outlook_llm_enabled",
     )
     if enabled != bool(settings.get("use_llm_interpretation", False)):
         write_settings({"use_llm_interpretation": enabled})
         st.caption("Setting saved. The next canonical LLM refresh is the Friday-night overnight update.")
-    st.caption("Quant Engine is the source of truth. Scenario probabilities and all displayed levels are deterministic model outputs.")
+    st.caption("Quant calculations use Weekly + Daily bars. Elliott Structure is assigned by the LLM; prices, levels and probabilities remain deterministic outputs.")
 
     manifest = read_manifest()
     statuses = {item.get("ticker"): item for item in manifest.get("assets", [])}
@@ -69,25 +69,38 @@ def render_technical_outlook_asset(
 ) -> None:
     ticker = str(snapshot.get("ticker", "Asset"))
     st.markdown(f"{'#' * heading_level} {ticker}")
+    if st.session_state.get("technical_outlook_llm_notice") == ticker:
+        st.success(f"LLM analysis updated for {ticker}.")
+        del st.session_state["technical_outlook_llm_notice"]
     if status and status.get("status") not in {None, "CURRENT"}:
         st.warning(f"{status.get('status')}: {status.get('stale_reason', 'using the last valid snapshot')}")
     final = snapshot.get("final_state") or {}
+    elliott = _llm_elliott(snapshot)
+    elliott_primary = elliott.get("primary") or {}
     top = st.columns(5)
     top[0].metric("Current Price", _price(snapshot.get("price")))
     top[1].metric("Structural Trend", final.get("structural_trend", "N/A"))
     top[2].metric("Momentum", final.get("momentum", "N/A"))
-    top[3].metric("Elliott Phase", final.get("elliott_phase", "UNRESOLVED"))
+    top[3].metric("Elliott Phase (LLM)", elliott_primary.get("label", "AWAITING LLM"))
     top[4].metric("6M Bias", final.get("six_month_bias", "N/A"))
     detail = st.columns(4)
-    detail[0].metric("Elliott Wave State", final.get("elliott_wave_state", snapshot.get("elliott_current_wave_state", "N/A")))
+    detail[0].metric("Elliott Wave State", elliott.get("current_wave_state", "AWAITING LLM"))
     detail[1].metric("Extension", final.get("extension", "N/A"))
-    detail[2].metric("Confidence", final.get("confidence", "N/A"))
+    detail[2].metric("Quant Confidence", final.get("confidence", "N/A"))
     detail[3].metric("MTF Regime", final.get("multi_timeframe_regime", "N/A"))
     st.caption(
         f"Quantitative Analysis Updated: {snapshot.get('quant_updated_at', 'N/A')}  |  "
         f"LLM Interpretation Updated: {snapshot.get('llm_updated_at') or 'N/A'}  |  "
         f"Model: {snapshot.get('model_version', 'N/A')}"
     )
+    if st.button("Run LLM", key=f"technical_outlook_run_llm_{ticker}", type="primary"):
+        try:
+            with st.spinner(f"Running LLM Technical Outlook for {ticker}..."):
+                run_llm_now(ticker)
+            st.session_state["technical_outlook_llm_notice"] = ticker
+            st.rerun()
+        except Exception as exc:
+            st.error(f"{ticker}: LLM analysis failed — {type(exc).__name__}: {exc}")
 
     overlay_cols = st.columns(4)
     show_primary = overlay_cols[0].checkbox("Elliott Primary", value=True, key=f"to_primary_{ticker}")
@@ -98,20 +111,18 @@ def render_technical_outlook_asset(
         st.caption("Primary and Alternative are both visible by explicit selection.")
 
     chart_cols = st.columns(2)
-    for column, timeframe, label in ((chart_cols[0], "1M", "MONTHLY"), (chart_cols[1], "1W", "WEEKLY")):
+    for column, timeframe, label in ((chart_cols[0], "1W", "WEEKLY"), (chart_cols[1], "1D", "DAILY")):
         bars = read_chart_bars(ticker, str(snapshot["snapshot_id"]), timeframe)
         with column:
             st.markdown(f"#### {label}")
             if bars.empty:
                 st.info("Chart data unavailable.")
             else:
-                candidate_key = "elliott_major_primary" if timeframe == "1M" else "elliott_primary"
-                alternative_key = "elliott_major_alternative" if timeframe == "1M" else "elliott_alternative"
                 chart = build_technical_chart(
                     bars,
                     snapshot,
-                    primary=snapshot.get(candidate_key) if show_primary else None,
-                    alternative=snapshot.get(alternative_key) if show_alternative else None,
+                    primary=elliott.get("primary") if show_primary else None,
+                    alternative=elliott.get("alternative") if show_alternative else None,
                     show_levels=show_levels,
                     show_profile=show_profile,
                 )
@@ -130,8 +141,9 @@ def build_technical_chart(
     show_levels: bool,
     show_profile: bool,
 ) -> alt.VConcatChart:
-    frame = bars.copy()
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    frame = bars.tail(500).copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True).dt.tz_convert(None)
+    frame = frame.dropna(subset=["timestamp"])
     frame["direction"] = np.where(frame["close"] >= frame["open"], "up", "down")
     base = alt.Chart(frame).encode(
         x=alt.X("timestamp:T", axis=alt.Axis(title=None, format="%b %Y", labelFontSize=8)),
@@ -171,9 +183,11 @@ def build_technical_chart(
                     y="price:Q", color=alt.Color("kind:N", scale=alt.Scale(domain=["POC", "HVN", "LVN"], range=["#facc15", "#a78bfa", "#64748b"]))
                 )
             )
-    layers.extend(_elliott_layers(primary, "#ffffff"))
-    layers.extend(_elliott_layers(alternative, "#f97316"))
-    price_chart = alt.layer(*layers).properties(height=320).interactive()
+    start = frame["timestamp"].min()
+    end = frame["timestamp"].max()
+    layers.extend(_elliott_layers(primary, "#ffffff", start, end))
+    layers.extend(_elliott_layers(alternative, "#f97316", start, end))
+    price_chart = alt.layer(*layers).properties(height=320)
 
     indicator_layers = []
     if "rsi14" in frame:
@@ -182,7 +196,7 @@ def build_technical_chart(
     return alt.vconcat(price_chart, indicator, spacing=3).resolve_scale(x="shared")
 
 
-def _elliott_layers(candidate: dict[str, Any] | None, color: str) -> list[Any]:
+def _elliott_layers(candidate: dict[str, Any] | None, color: str, start: pd.Timestamp, end: pd.Timestamp) -> list[Any]:
     if not candidate or not candidate.get("waves"):
         return []
     points = pd.DataFrame([
@@ -191,7 +205,10 @@ def _elliott_layers(candidate: dict[str, Any] | None, color: str) -> list[Any]:
     ])
     if points.empty:
         return []
-    points["date"] = pd.to_datetime(points["date"], errors="coerce")
+    points["date"] = pd.to_datetime(points["date"], errors="coerce", utc=True).dt.tz_convert(None)
+    points = points.loc[points["date"].between(start, end, inclusive="both")]
+    if points.empty:
+        return []
     line = alt.Chart(points).mark_line(color=color, strokeWidth=1.6).encode(x="date:T", y=alt.Y("price:Q", scale=alt.Scale(zero=False)))
     labels = alt.Chart(points).mark_text(color=color, dy=-10, fontWeight="bold").encode(x="date:T", y="price:Q", text="label:N")
     return [line, labels]
@@ -199,30 +216,33 @@ def _elliott_layers(candidate: dict[str, Any] | None, color: str) -> list[Any]:
 
 def _render_analysis(snapshot: dict[str, Any]) -> None:
     st.markdown("### Technical Analysis")
-    st.info(_interpretation_text(snapshot))
+    st.markdown("#### System Summary")
+    st.info(str(snapshot.get("deterministic_narrative") or "System summary is not available."))
+    st.markdown("#### LLM Summary")
+    _render_llm_summary(snapshot)
     st.markdown("#### Market Structure")
     st.dataframe(pd.DataFrame([
-        _structure_row("Monthly", snapshot.get("monthly_structure"), snapshot.get("monthly_moving_averages")),
         _structure_row("Weekly", snapshot.get("weekly_structure"), snapshot.get("weekly_moving_averages")),
+        _structure_row("Daily", snapshot.get("daily_structure"), snapshot.get("daily_moving_averages")),
     ]), hide_index=True, use_container_width=True)
 
-    st.markdown("#### Elliott Structure")
+    st.markdown("#### Elliott Structure — LLM")
+    elliott = _llm_elliott(snapshot)
     elliott_cols = st.columns(2)
     with elliott_cols[0]:
-        _render_elliott_candidate("PRIMARY COUNT", snapshot.get("elliott_primary") or {}, snapshot.get("elliott_confidence"))
+        _render_elliott_candidate("PRIMARY COUNT", elliott.get("primary") or {}, elliott.get("confidence"))
     with elliott_cols[1]:
-        _render_elliott_candidate("ALTERNATIVE COUNT", snapshot.get("elliott_alternative") or {}, snapshot.get("elliott_confidence"))
-    parent = snapshot.get("elliott_major_primary") or {}
-    st.caption(f"Major parent: {parent.get('label', 'UNRESOLVED')} | Parent/child: {(snapshot.get('elliott_parent_child_map') or {}).get('primary_compatibility', 'N/A')}")
+        _render_elliott_candidate("ALTERNATIVE COUNT", elliott.get("alternative") or {}, elliott.get("confidence"))
+    st.caption(f"Source: LLM | Current wave state: {elliott.get('current_wave_state', 'AWAITING LLM')}")
 
     st.markdown("#### Momentum")
-    monthly = snapshot.get("monthly_indicators") or {}
     weekly = snapshot.get("weekly_indicators") or {}
+    daily = snapshot.get("daily_indicators") or {}
     st.dataframe(pd.DataFrame([
-        {"Metric": "RSI14", "Monthly": _number(monthly.get("rsi14")), "Weekly": _number(weekly.get("rsi14")), "Interpretation": weekly.get("rsi_regime")},
-        {"Metric": "MACD", "Monthly": _number(monthly.get("macd")), "Weekly": _number(weekly.get("macd")), "Interpretation": f"{weekly.get('macd_zero_state')} / {weekly.get('macd_histogram')}"},
-        {"Metric": "ROC12", "Monthly": _number(monthly.get("roc12")), "Weekly": _number(weekly.get("roc12")), "Interpretation": weekly.get("roc_state")},
-        {"Metric": "PPO200 / Extension", "Monthly": _number(monthly.get("extension200")), "Weekly": _number(weekly.get("extension200")), "Interpretation": weekly.get("extension_state")},
+        {"Metric": "RSI14", "Weekly": _number(weekly.get("rsi14")), "Daily": _number(daily.get("rsi14")), "Interpretation": daily.get("rsi_regime")},
+        {"Metric": "MACD", "Weekly": _number(weekly.get("macd")), "Daily": _number(daily.get("macd")), "Interpretation": f"{daily.get('macd_zero_state')} / {daily.get('macd_histogram')}"},
+        {"Metric": "ROC12", "Weekly": _number(weekly.get("roc12")), "Daily": _number(daily.get("roc12")), "Interpretation": daily.get("roc_state")},
+        {"Metric": "PPO200 / Extension", "Weekly": _number(weekly.get("extension200")), "Daily": _number(daily.get("extension200")), "Interpretation": daily.get("extension_state")},
     ]), hide_index=True, use_container_width=True)
     divergences = snapshot.get("divergences") or []
     st.caption("Detected Divergences")
@@ -280,12 +300,14 @@ def _render_analysis(snapshot: dict[str, Any]) -> None:
 
 def _render_elliott_candidate(title: str, candidate: dict[str, Any], confidence: Any) -> None:
     st.markdown(f"**{title}**")
-    st.markdown(f"{candidate.get('label', 'UNRESOLVED')}")
+    st.markdown(f"{candidate.get('label', 'AWAITING LLM')}")
     st.caption(
-        f"Score {candidate.get('score', 0):.1f}/100 | Confidence {confidence or 'LOW'} | "
-        f"Current Wave {candidate.get('current_wave', 'N/A')} | {candidate.get('wave_state', 'POTENTIAL')}"
+        f"Confidence {confidence or 'N/A'} | Current Wave {candidate.get('current_wave', 'N/A')} | "
+        f"{candidate.get('wave_state', 'UNRESOLVED')}"
     )
-    st.caption(f"Targets: {candidate.get('fib_targets') or 'N/A'} | Invalidation: {candidate.get('invalidation') or 'N/A'}")
+    st.caption(f"Targets: {candidate.get('targets') or 'N/A'} | Invalidation: {candidate.get('invalidation') or 'N/A'}")
+    if candidate.get("rationale"):
+        st.caption(candidate["rationale"])
 
 
 def _structure_row(label: str, structure: Any, ma: Any) -> dict[str, Any]:
@@ -294,10 +316,38 @@ def _structure_row(label: str, structure: Any, ma: Any) -> dict[str, Any]:
     return {"Timeframe": label, "State": structure.get("state"), "Swings": structure.get("sequence"), "MA Structure": ma.get("ordering"), "Explanation": structure.get("explanation")}
 
 
-def _interpretation_text(snapshot: dict[str, Any]) -> str:
-    if snapshot.get("llm_enabled") and snapshot.get("llm_interpretation"):
-        return str((snapshot["llm_interpretation"] or {}).get("summary") or snapshot.get("deterministic_narrative"))
-    return str(snapshot.get("deterministic_narrative") or "")
+def _render_llm_summary(snapshot: dict[str, Any]) -> None:
+    interpretation = snapshot.get("llm_interpretation") or {}
+    if not interpretation:
+        st.warning("LLM summary is not available. Click Run LLM to generate Elliott Structure and block-by-block interpretation.")
+        return
+    st.success(str(interpretation.get("summary") or "LLM summary is empty."))
+    labels = (
+        ("Market Structure", "market_structure_summary"),
+        ("Elliott Structure", "elliott_summary"),
+        ("Momentum", "momentum_summary"),
+        ("Volume / Volume Profile", "volume_profile_summary"),
+        ("Key Levels", "key_levels_summary"),
+        ("Scenario Matrix", "scenario_summary"),
+        ("Forecast Horizons", "forecast_horizons_summary"),
+        ("Confirmation / Invalidation", "confirmation_invalidation_summary"),
+        ("Historical Analogs", "historical_analogs_summary"),
+    )
+    st.dataframe(
+        pd.DataFrame([{"Analysis Block": label, "LLM Summary": interpretation.get(field, "")} for label, field in labels]),
+        hide_index=True,
+        use_container_width=True,
+    )
+    if interpretation.get("risk_factors"):
+        st.caption("Risk Factors: " + " | ".join(interpretation["risk_factors"]))
+    if interpretation.get("key_confirmation_points"):
+        st.caption("Key Confirmation Points: " + " | ".join(interpretation["key_confirmation_points"]))
+
+
+def _llm_elliott(snapshot: dict[str, Any]) -> dict[str, Any]:
+    interpretation = snapshot.get("llm_interpretation") or {}
+    value = interpretation.get("elliott_structure")
+    return value if isinstance(value, dict) else {}
 
 
 def _price(value: Any) -> str:
