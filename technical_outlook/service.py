@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -9,10 +10,11 @@ import pandas as pd
 from elliott_waves.config import AssetSpec
 from elliott_waves.data import load_base_bars
 
+from .analytics import snapshot_id as build_snapshot_id
 from .config import CORE_ASSETS, MODEL_VERSION, yahoo_asset_spec
 from .engine import TechnicalOutlookEngine
-from .llm import call_llm_interpretation
-from .storage import read_latest_snapshot, read_manifest, read_settings, write_manifest, write_snapshot
+from .llm import call_llm_interpretation, validate_llm_output
+from .storage import read_chart_bars, read_latest_snapshot, read_manifest, read_settings, write_manifest, write_snapshot
 
 
 TickerLoader = Callable[[AssetSpec], pd.DataFrame]
@@ -102,14 +104,43 @@ def apply_llm_schedule(
         return snapshot
     try:
         interpretation, model = llm_caller(snapshot)
-        snapshot["llm_interpretation"] = interpretation
-        snapshot["llm_difference"] = interpretation.get("interpretation_difference") or None
-        snapshot["llm_model"] = model
-        snapshot["llm_updated_at"] = pd.Timestamp(run_at).isoformat()
-        snapshot["llm_status"] = "CURRENT"
+        _set_llm_output(snapshot, interpretation, model, run_at, "CURRENT")
     except Exception as exc:
         snapshot["llm_status"] = "UPDATE_FAILED_USING_PREVIOUS" if snapshot.get("llm_interpretation") else "FAILED"
         snapshot["llm_error"] = f"{type(exc).__name__}: {exc}"
+    return snapshot
+
+
+def run_llm_now(
+    ticker: str,
+    *,
+    run_at: datetime | None = None,
+    llm_caller: Callable[[dict[str, Any]], tuple[dict[str, Any], str]] = call_llm_interpretation,
+) -> dict[str, Any]:
+    """Run the LLM on the latest persisted Quant snapshot, bypassing the Friday schedule."""
+    symbol = validate_ticker(ticker)
+    previous = read_latest_snapshot(symbol)
+    if not previous:
+        raise ValueError(f"{symbol}: no Quant snapshot is available")
+    if previous.get("model_version") != MODEL_VERSION:
+        raise ValueError(f"{symbol}: Quant snapshot is stale; wait for the V2 weekly/daily refresh")
+    when = run_at or datetime.now(timezone.utc)
+    interpretation, model = llm_caller(previous)
+    snapshot = deepcopy(previous)
+    created_iso = pd.Timestamp(when).isoformat()
+    snapshot["snapshot_id"] = build_snapshot_id(
+        symbol,
+        str(snapshot.get("as_of_timestamp") or ""),
+        created_iso,
+        str(snapshot.get("data_version") or ""),
+    )
+    _set_llm_output(snapshot, interpretation, model, when, "MANUAL_CURRENT")
+    charts = {
+        timeframe: read_chart_bars(symbol, str(previous["snapshot_id"]), timeframe)
+        for timeframe in ("1W", "1D")
+    }
+    write_snapshot(snapshot, charts)
+    _update_manifest_for_snapshot(snapshot, when)
     return snapshot
 
 
@@ -129,8 +160,57 @@ def _load(spec: AssetSpec) -> pd.DataFrame:
 
 
 def _copy_previous_llm(snapshot: dict[str, Any], previous: dict[str, Any] | None) -> None:
-    if not previous:
+    if not previous or not previous.get("llm_interpretation"):
         return
-    for field in ("llm_interpretation", "llm_model", "llm_updated_at", "llm_difference"):
+    try:
+        interpretation = validate_llm_output(previous["llm_interpretation"], snapshot)
+    except (TypeError, ValueError):
+        return
+    snapshot["llm_interpretation"] = interpretation
+    for field in ("llm_model", "llm_updated_at", "llm_difference"):
         if previous.get(field) is not None:
             snapshot[field] = previous[field]
+
+
+def _set_llm_output(
+    snapshot: dict[str, Any],
+    interpretation: dict[str, Any],
+    model: str,
+    run_at: datetime,
+    status: str,
+) -> None:
+    validated = validate_llm_output(interpretation, snapshot)
+    snapshot["llm_enabled"] = True
+    snapshot["llm_interpretation"] = validated
+    snapshot["llm_difference"] = validated.get("interpretation_difference") or None
+    snapshot["llm_model"] = model
+    snapshot["llm_updated_at"] = pd.Timestamp(run_at).isoformat()
+    snapshot["llm_status"] = status
+
+
+def _update_manifest_for_snapshot(snapshot: dict[str, Any], run_at: datetime) -> None:
+    manifest = read_manifest()
+    entries = list(manifest.get("assets") or [])
+    updated = False
+    for index, item in enumerate(entries):
+        if item.get("ticker") == snapshot.get("ticker"):
+            entries[index] = {
+                **item,
+                "snapshot_id": snapshot.get("snapshot_id"),
+                "status": "CURRENT",
+                "as_of": snapshot.get("as_of_timestamp"),
+                "quant_updated_at": snapshot.get("quant_updated_at"),
+                "llm_updated_at": snapshot.get("llm_updated_at"),
+            }
+            updated = True
+            break
+    if not updated:
+        entries.append({
+            "ticker": snapshot.get("ticker"),
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "status": "CURRENT",
+            "as_of": snapshot.get("as_of_timestamp"),
+            "quant_updated_at": snapshot.get("quant_updated_at"),
+            "llm_updated_at": snapshot.get("llm_updated_at"),
+        })
+    write_manifest({"model_version": MODEL_VERSION, "updated_at": pd.Timestamp(run_at).isoformat(), "assets": entries})

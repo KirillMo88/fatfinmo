@@ -20,8 +20,9 @@ from rates_financial_conditions import SNAPSHOT_PATH as RATES_FC_SNAPSHOT_PATH, 
 from funding_conditions import WEEKLY_PATH as FUNDING_SNAPSHOT_PATH, refresh_snapshot as refresh_funding_snapshot
 from treasury_fiscal_regime import SNAPSHOT_PATH as TREASURY_FISCAL_SNAPSHOT_PATH, refresh_snapshot as refresh_treasury_fiscal_snapshot
 from treasury_funding_policy import refresh_snapshot as refresh_treasury_funding_policy_snapshot
+from technical_outlook.config import MODEL_VERSION as TECHNICAL_OUTLOOK_MODEL_VERSION
 from technical_outlook.service import refresh_all_core_assets as refresh_technical_outlook_assets
-from technical_outlook.storage import MANIFEST_PATH as TECHNICAL_OUTLOOK_MANIFEST_PATH
+from technical_outlook.storage import MANIFEST_PATH as TECHNICAL_OUTLOOK_MANIFEST_PATH, read_manifest as read_technical_outlook_manifest
 
 
 JOB_DIR = Path("persistent") / "job_status"
@@ -331,7 +332,10 @@ def run_scheduler() -> None:
             run_job_safely("nightly_analytics_startup", run_nightly_analytics)
         elif not ELLIOTT_MANIFEST_PATH.exists():
             run_job_safely("elliott_waves_startup", refresh_all_assets)
-        if not TECHNICAL_OUTLOOK_MANIFEST_PATH.exists():
+        if (
+            not TECHNICAL_OUTLOOK_MANIFEST_PATH.exists()
+            or read_technical_outlook_manifest().get("model_version") != TECHNICAL_OUTLOOK_MODEL_VERSION
+        ):
             run_job_safely("technical_outlook_startup", refresh_technical_outlook_assets)
         if not SNAPSHOT_PATH.exists():
             run_job_safely("liquidity_forecast_startup", run_liquidity_forecast)

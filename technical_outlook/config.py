@@ -5,8 +5,8 @@ from typing import Any
 from elliott_waves.config import AssetSpec
 
 
-MODEL_VERSION = "TECHNICAL_OUTLOOK_V1"
-CONFIG_VERSION = "TECHNICAL_OUTLOOK_CONFIG_V1"
+MODEL_VERSION = "TECHNICAL_OUTLOOK_V2"
+CONFIG_VERSION = "TECHNICAL_OUTLOOK_CONFIG_V2"
 
 CORE_ASSETS: dict[str, AssetSpec] = {
     "SPY": AssetSpec(
@@ -37,15 +37,15 @@ CONFIG: dict[str, Any] = {
     "pivot": {
         "atr_period": 14,
         "degrees": {
-            "MAJOR": {"timeframe": "MONTHLY", "atr_multiplier": 2.25, "minimum_reversal_pct": 6.0},
-            "INTERMEDIATE": {"timeframe": "WEEKLY", "atr_multiplier": 1.75, "minimum_reversal_pct": 3.5},
-            "MINOR": {"timeframe": "WEEKLY", "atr_multiplier": 0.90, "minimum_reversal_pct": 1.5},
+            "MAJOR": {"timeframe": "WEEKLY", "atr_multiplier": 1.75, "minimum_reversal_pct": 3.5},
+            "INTERMEDIATE": {"timeframe": "DAILY", "atr_multiplier": 1.35, "minimum_reversal_pct": 1.75},
+            "MINOR": {"timeframe": "DAILY", "atr_multiplier": 0.80, "minimum_reversal_pct": 0.75},
         },
     },
     "ma": {"windows": [50, 100, 200], "slope_window": 6},
     "extension_thresholds": {"low": 5.0, "normal": 15.0, "high": 30.0},
     "divergence": {"active_bars": 12, "minimum_indicator_delta": 0.25},
-    "volume_profile": {"bins": 30, "value_area": 0.70, "lookback_weekly_bars": 156},
+    "volume_profile": {"bins": 30, "value_area": 0.70, "lookback_bars": 500},
     "support_resistance": {
         "cluster_atr_multiplier": 0.75,
         "cluster_price_fraction": 0.012,

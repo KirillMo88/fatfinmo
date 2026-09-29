@@ -341,7 +341,7 @@ def volume_state(frame: pd.DataFrame) -> dict[str, Any]:
 
 def volume_profile(frame: pd.DataFrame) -> dict[str, Any]:
     cfg = CONFIG["volume_profile"]
-    values = frame.tail(int(cfg["lookback_weekly_bars"])).copy()
+    values = frame.tail(int(cfg["lookback_bars"])).copy()
     volume = pd.to_numeric(values.get("volume"), errors="coerce")
     price = (pd.to_numeric(values["high"], errors="coerce") + pd.to_numeric(values["low"], errors="coerce") + pd.to_numeric(values["close"], errors="coerce")) / 3.0
     valid = price.notna() & volume.notna() & volume.gt(0)
@@ -562,35 +562,32 @@ def confirmation_matrix(scenarios: list[dict[str, Any]], zones: list[dict[str, A
 def deterministic_narrative(snapshot: dict[str, Any]) -> str:
     final = snapshot["final_state"]
     weekly = snapshot["weekly_structure"]
-    monthly = snapshot["monthly_structure"]
+    daily = snapshot["daily_structure"]
     return (
-        f"{snapshot['ticker']} is {final['structural_trend'].lower()} on the monthly structural frame and "
-        f"{final['medium_term_trend'].lower()} on the weekly frame. Monthly structure is {monthly['state']} "
-        f"({monthly['sequence']}); weekly structure is {weekly['state']} ({weekly['sequence']}). "
+        f"{snapshot['ticker']} is {final['structural_trend'].lower()} on the weekly structural frame and "
+        f"{final['medium_term_trend'].lower()} on the daily frame. Weekly structure is {weekly['state']} "
+        f"({weekly['sequence']}); daily structure is {daily['state']} ({daily['sequence']}). "
         f"Momentum is {final['momentum'].lower()} and {final['momentum_trajectory'].lower()}. "
-        f"Extension200 is {final['extension'].lower()}, while the primary Elliott candidate is "
-        f"{final['elliott_phase']} with {snapshot['elliott_confidence'].lower()} confidence. "
+        f"Daily Extension200 is {final['extension'].lower()}. Elliott Structure is assigned separately by the LLM. "
         f"The deterministic six-month bias is {final['six_month_bias'].lower()}."
     )
 
 
-def final_confidence(monthly: dict[str, Any], weekly: dict[str, Any], momentum: dict[str, Any], elliott_confidence: str, volume: dict[str, Any], analogs: dict[str, Any]) -> str:
+def final_confidence(weekly: dict[str, Any], daily: dict[str, Any], momentum: dict[str, Any], volume: dict[str, Any], analogs: dict[str, Any]) -> str:
     agreements = 0
     comparable = 0
-    for state in (monthly["state"], weekly["state"]):
+    for state in (weekly["state"], daily["state"]):
         if state in {"BULL", "BEAR"}:
             comparable += 1
-    if monthly["state"] == weekly["state"] and monthly["state"] in {"BULL", "BEAR"}:
+    if weekly["state"] == daily["state"] and weekly["state"] in {"BULL", "BEAR"}:
         agreements += 2
-    if (weekly["state"] == "BULL" and momentum["score"] > 0) or (weekly["state"] == "BEAR" and momentum["score"] < 0):
-        agreements += 1
-    if elliott_confidence == "HIGH":
+    if (daily["state"] == "BULL" and momentum["score"] > 0) or (daily["state"] == "BEAR" and momentum["score"] < 0):
         agreements += 1
     if volume.get("status") == "AVAILABLE":
         agreements += 1
     if analogs.get("sample_size", 0) >= int(CONFIG["analogs"]["minimum_sample"]):
         agreements += 1
-    return "HIGH" if agreements >= 5 and comparable == 2 else "MEDIUM" if agreements >= 3 else "LOW"
+    return "HIGH" if agreements >= 4 and comparable == 2 else "MEDIUM" if agreements >= 2 else "LOW"
 
 
 def data_version(frame: pd.DataFrame) -> str:
