@@ -13,6 +13,7 @@ from fred_client import download_fred_series_batch
 from business_cycle import build_business_cycle_snapshot
 from global_liquidity import read_global_liquidity
 from tradingview_mcp import get_ohlcv_data
+from .aisc import aisc_config, build_gold_aisc_valuation
 
 from .config import GOLD_REGIME_CONFIG
 from .cot import calculate_cot_momentum_score, download_cftc_cot, extract_comex_gold_cot, load_comex_gold_cot_from_positioning
@@ -20,7 +21,7 @@ from .cycles import build_gold_cycle_history
 from .etf_flows import aggregate_gold_etf_flows, load_gold_etf_flows
 from .macro import calculate_gold_macro_from_fred
 from .macro2 import calculate_gold_structural_macro2_history
-from .models import Freshness, GoldRegimeSnapshot, GoldStructuralMacro2Snapshot
+from .models import Freshness, GoldAISCValuationSnapshot, GoldRegimeSnapshot, GoldStructuralMacro2Snapshot
 from .regime import (
     additional_structural_demand_context,
     apply_gold_regime_history,
@@ -91,6 +92,16 @@ def build_gold_regime_snapshot(
     history = apply_gold_regime_history(history, gold_alpha)
     history = history.loc[(history["date"] >= GOLD_HISTORY_START) & (history["date"] <= pd.Timestamp(today))]
     history = history.sort_values("date").reset_index(drop=True)
+    gold_daily = load_gold_mcp_daily()
+    aisc_cfg = cfg.get("aisc", aisc_config())
+    aisc_history = build_gold_aisc_valuation(
+        gold_daily,
+        actual_quarterly=aisc_cfg.get("actual_quarterly"),
+        qoq_growth=float(aisc_cfg.get("qoq_growth", 0.025)),
+        normal_multiple=float(aisc_cfg.get("normal_multiple", 1.625)),
+        regime_history=history,
+    )
+    aisc_current = aisc_history.iloc[-1].to_dict() if not aisc_history.empty else {}
     current = latest_gold_regime_row(history)
     enrich_current(current, cfg)
     freshness = calculate_freshness(current, history, cfg)
@@ -123,6 +134,7 @@ def build_gold_regime_snapshot(
         cot_contract_market_name=contract_name,
         freshness=freshness,
         structural_macro2=structural_macro2,
+        aisc_valuation=GoldAISCValuationSnapshot(current=aisc_current, history=aisc_history),
         gold_cycle_history=gold_cycle_history,
     )
 
@@ -198,6 +210,39 @@ def load_gold_mcp_weekly() -> pd.Series:
         .set_index("date")["close"]
         .rename("gold_price")
     )
+
+
+def load_gold_mcp_daily() -> pd.Series:
+    """Load the existing daily TVC:GOLD series used by the AISC valuation."""
+    try:
+        frame = get_ohlcv_data(GOLD_MCP_SYMBOL, interval="1D", count=5000)
+    except Exception:
+        frame = pd.DataFrame()
+    if frame is not None and not frame.empty and {"date", "close"}.issubset(frame.columns):
+        dates = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_localize(None)
+        closes = pd.to_numeric(frame["close"], errors="coerce")
+        values = pd.DataFrame({"date": dates, "close": closes}).dropna()
+        if not values.empty:
+            latest = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+            values = values.loc[(values["date"] >= GOLD_HISTORY_START) & (values["date"] <= latest)]
+        if not values.empty:
+            return (
+                values.sort_values("date")
+                .drop_duplicates("date", keep="last")
+                .set_index("date")["close"]
+                .rename("gold_price")
+            )
+
+    # Keep the module usable if TVC:GOLD is temporarily unavailable. GLD is
+    # the same fallback already used by the existing Gold Regime history.
+    try:
+        raw = yf.download("GLD", period="max", interval="1d", auto_adjust=False, progress=False, threads=False)
+        daily = drop_incomplete_daily_bar(extract_ohlcv(raw, "GLD"))
+        if not daily.empty:
+            return daily["Close"].rename("gold_price")
+    except Exception:
+        pass
+    return pd.Series(dtype="float64", name="gold_price")
 
 
 def _series_from_start(series: pd.Series | None, start: pd.Timestamp) -> pd.Series | None:
