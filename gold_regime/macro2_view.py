@@ -40,7 +40,6 @@ def render_gold_structural_macro2(
     render_formula_details()
     render_gold_aisc_valuation(aisc_snapshot, selected_range, range_end)
     render_demand_structure(selected_range, range_end)
-    render_current_term_structure(current)
     render_macro2_diagnostics(current)
     render_macro2_model_details(current)
 
@@ -111,37 +110,6 @@ def render_formula_details() -> None:
                 ["Business Cycle", "Canonical BusinessCycleState plus horizon modifier"],
             ],
             columns=["Block", "Formula"],
-        ),
-        hide_index=True,
-        use_container_width=True,
-    )
-
-
-def render_current_term_structure(current: dict[str, Any]) -> None:
-    st.markdown("#### Current Term Structure")
-    scores = [current.get(f"GLD_MACRO_{horizon}") for horizon in HORIZONS]
-    if not any(np.isfinite(float(value)) for value in scores if _is_number(value)):
-        st.info("Current term structure is unavailable.")
-        return
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=list(HORIZONS),
-            y=[_number(value) for value in scores],
-            mode="lines+markers+text",
-            text=[_fmt_score(value) for value in scores],
-            textposition="top center",
-            line={"color": "#f8fafc", "width": 2},
-            marker={"color": "#38bdf8", "size": 8},
-            hovertemplate="%{x}<br>Score: %{y:.1f}<extra></extra>",
-        )
-    )
-    fig.update_yaxes(range=[0, 100], title="Score")
-    fig.update_layout(height=250, margin={"l": 45, "r": 20, "t": 15, "b": 35}, template="plotly_dark", paper_bgcolor="#0b0e14", plot_bgcolor="#11161f")
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
-    st.dataframe(
-        pd.DataFrame(
-            {"Horizon": list(HORIZONS), "Score": [_fmt_score(value) for value in scores], "State": [current.get(f"GLD_MACRO_{horizon}_State", "DATA_INCOMPLETE") for horizon in HORIZONS]}
         ),
         hide_index=True,
         use_container_width=True,
@@ -334,6 +302,11 @@ def _fmt_score(value: Any) -> str:
 def _fmt_signed(value: Any) -> str:
     number = _number(value)
     return "n/a" if not np.isfinite(number) else f"{number:+.1f}"
+
+
+def _fmt_percent(value: Any) -> str:
+    number = _number(value)
+    return "n/a" if not np.isfinite(number) else f"{number:.1f}%"
 
 
 def _fmt_date(value: Any) -> str:
