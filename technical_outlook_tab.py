@@ -19,18 +19,38 @@ from technical_outlook.storage import (
 
 
 def render_technical_outlook_tab(available_tickers: list[str] | None = None) -> None:
-    st.markdown("## Technical Outlook")
+    _render_technical_outlook_tab(available_tickers, legacy=False)
+
+
+def render_technical_outlook_v0_tab(available_tickers: list[str] | None = None) -> None:
+    """Render the pre-Structural-Weekly-S/R view against the current persisted snapshot."""
+    _render_technical_outlook_tab(available_tickers, legacy=True)
+
+
+def _render_technical_outlook_tab(
+    available_tickers: list[str] | None,
+    *,
+    legacy: bool,
+) -> None:
+    variant = "technical_outlook_v0" if legacy else "technical_outlook"
+    st.markdown("## Technical Outlook v0" if legacy else "## Technical Outlook")
     settings = read_settings()
     enabled = st.toggle(
         "Enable Scheduled LLM",
         value=bool(settings.get("use_llm_interpretation", False)),
         help="When enabled, the scheduled LLM interpretation refresh runs on Friday night. Run LLM remains available at any time.",
-        key="technical_outlook_llm_enabled",
+        key=f"{variant}_llm_enabled",
     )
     if enabled != bool(settings.get("use_llm_interpretation", False)):
         write_settings({"use_llm_interpretation": enabled})
         st.caption("Setting saved. The next canonical LLM refresh is the Friday-night overnight update.")
-    st.caption("Quant calculations use Weekly + Daily bars. Elliott Structure is assigned by the LLM; prices, levels and probabilities remain deterministic outputs.")
+    if legacy:
+        st.caption(
+            "Frozen pre-Structural-Weekly-S/R view. Support / Resistance, Key Levels and scenarios use the original Daily S/R output only. "
+            "The compact LLM request fix is retained."
+        )
+    else:
+        st.caption("Quant calculations use Weekly + Daily bars. Elliott Structure is assigned by the LLM; prices, levels and probabilities remain deterministic outputs.")
 
     manifest = read_manifest()
     statuses = {item.get("ticker"): item for item in manifest.get("assets", [])}
@@ -41,24 +61,24 @@ def render_technical_outlook_tab(available_tickers: list[str] | None = None) -> 
             status = statuses.get(ticker, {})
             st.warning(status.get("stale_reason") or "No Technical Outlook snapshot yet. The overnight worker will create it.")
             continue
-        render_technical_outlook_asset(snapshot, status=statuses.get(ticker))
+        render_technical_outlook_asset(snapshot, status=statuses.get(ticker), legacy=legacy)
 
     st.divider()
     st.markdown("## Additional Asset Analysis")
     choices = sorted({str(ticker).strip().upper() for ticker in (available_tickers or []) if str(ticker).strip()})
-    ticker = st.selectbox("Ticker", [""] + choices, index=0, key="technical_outlook_additional_ticker")
-    if st.button("Analyze", key="technical_outlook_analyze", disabled=not ticker):
+    ticker = st.selectbox("Ticker", [""] + choices, index=0, key=f"{variant}_additional_ticker")
+    if st.button("Analyze", key=f"{variant}_analyze", disabled=not ticker):
         try:
             with st.spinner(f"Running the full Technical Outlook model for {ticker}..."):
                 snapshot = analyze_requested_asset(ticker, allow_scheduled_llm=False)
-            st.session_state["technical_outlook_additional_result"] = snapshot["ticker"]
+            st.session_state[f"{variant}_additional_result"] = snapshot["ticker"]
         except Exception as exc:
             st.error(f"{ticker}: analysis failed — {type(exc).__name__}: {exc}")
-    selected = st.session_state.get("technical_outlook_additional_result")
+    selected = st.session_state.get(f"{variant}_additional_result")
     if selected:
         snapshot = read_latest_snapshot(str(selected))
         if snapshot:
-            render_technical_outlook_asset(snapshot, heading_level=3)
+            render_technical_outlook_asset(snapshot, heading_level=3, legacy=legacy)
 
 
 def render_technical_outlook_asset(
@@ -66,12 +86,16 @@ def render_technical_outlook_asset(
     *,
     status: dict[str, Any] | None = None,
     heading_level: int = 2,
+    legacy: bool = False,
 ) -> None:
     ticker = str(snapshot.get("ticker", "Asset"))
+    widget_prefix = "to_v0" if legacy else "to"
+    notice_key = "technical_outlook_llm_notice_v0" if legacy else "technical_outlook_llm_notice"
+    run_llm_key = f"technical_outlook_run_llm_v0_{ticker}" if legacy else f"technical_outlook_run_llm_{ticker}"
     st.markdown(f"{'#' * heading_level} {ticker}")
-    if st.session_state.get("technical_outlook_llm_notice") == ticker:
+    if st.session_state.get(notice_key) == ticker:
         st.success(f"LLM analysis updated for {ticker}.")
-        del st.session_state["technical_outlook_llm_notice"]
+        del st.session_state[notice_key]
     if status and status.get("status") not in {None, "CURRENT"}:
         st.warning(f"{status.get('status')}: {status.get('stale_reason', 'using the last valid snapshot')}")
     final = snapshot.get("final_state") or {}
@@ -93,21 +117,29 @@ def render_technical_outlook_asset(
         f"LLM Interpretation Updated: {snapshot.get('llm_updated_at') or 'N/A'}  |  "
         f"Model: {snapshot.get('model_version', 'N/A')}"
     )
-    if st.button("Run LLM", key=f"technical_outlook_run_llm_{ticker}", type="primary"):
+    if st.button("Run LLM", key=run_llm_key, type="primary"):
         try:
             with st.spinner(f"Running LLM Technical Outlook for {ticker}..."):
                 run_llm_now(ticker)
-            st.session_state["technical_outlook_llm_notice"] = ticker
+            st.session_state[notice_key] = ticker
             st.rerun()
         except Exception as exc:
             st.error(f"{ticker}: LLM analysis failed — {type(exc).__name__}: {exc}")
 
-    overlay_cols = st.columns(5)
-    show_primary = overlay_cols[0].checkbox("Elliott Primary", value=True, key=f"to_primary_{ticker}")
-    show_alternative = overlay_cols[1].checkbox("Elliott Alternative", value=False, key=f"to_alt_{ticker}")
-    show_levels = overlay_cols[2].checkbox("Daily Support / Resistance", value=True, key=f"to_levels_{ticker}")
-    show_weekly_levels = overlay_cols[3].checkbox("Weekly Support / Resistance", value=True, key=f"to_weekly_levels_{ticker}")
-    show_profile = overlay_cols[4].checkbox("Volume Profile", value=False, key=f"to_profile_{ticker}")
+    overlay_cols = st.columns(4 if legacy else 5)
+    show_primary = overlay_cols[0].checkbox("Elliott Primary", value=True, key=f"{widget_prefix}_primary_{ticker}")
+    show_alternative = overlay_cols[1].checkbox("Elliott Alternative", value=False, key=f"{widget_prefix}_alt_{ticker}")
+    show_levels = overlay_cols[2].checkbox(
+        "Support / Resistance" if legacy else "Daily Support / Resistance",
+        value=True,
+        key=f"{widget_prefix}_levels_{ticker}",
+    )
+    if legacy:
+        show_weekly_levels = False
+        show_profile = overlay_cols[3].checkbox("Volume Profile", value=False, key=f"{widget_prefix}_profile_{ticker}")
+    else:
+        show_weekly_levels = overlay_cols[3].checkbox("Weekly Support / Resistance", value=True, key=f"{widget_prefix}_weekly_levels_{ticker}")
+        show_profile = overlay_cols[4].checkbox("Volume Profile", value=False, key=f"{widget_prefix}_profile_{ticker}")
     if show_primary and show_alternative:
         st.caption("Primary and Alternative are both visible by explicit selection.")
 
@@ -130,7 +162,7 @@ def render_technical_outlook_asset(
                 )
                 st.altair_chart(chart, use_container_width=True)
 
-    _render_analysis(snapshot)
+    _render_analysis(snapshot, legacy=legacy)
     st.divider()
 
 
@@ -253,7 +285,7 @@ def _visible_support_resistance(snapshot: dict[str, Any], *, level_set: str = "d
     return zones
 
 
-def _render_analysis(snapshot: dict[str, Any]) -> None:
+def _render_analysis(snapshot: dict[str, Any], *, legacy: bool = False) -> None:
     st.markdown("### Technical Analysis")
     st.markdown("#### System Summary")
     st.info(str(snapshot.get("deterministic_narrative") or "System summary is not available."))
@@ -300,34 +332,28 @@ def _render_analysis(snapshot: dict[str, Any]) -> None:
     }]), hide_index=True, use_container_width=True)
 
     st.markdown("#### Key Levels")
-    level_timeframe = st.radio(
-        "S/R analysis timeframe",
-        ("Weekly", "Daily"),
-        horizontal=True,
-        key=f"technical_outlook_level_timeframe_{snapshot.get('ticker', 'asset')}",
-    )
-    use_weekly = level_timeframe == "Weekly"
-    zones = (
-        snapshot.get("weekly_support_resistance")
-        if use_weekly
-        else snapshot.get("daily_support_resistance") or snapshot.get("support_resistance")
-    ) or []
-    zones = [zone for zone in zones if zone.get("confluence") in {"HIGH", "VERY_HIGH"}][:20]
+    use_weekly = False
+    if not legacy:
+        level_timeframe = st.radio(
+            "S/R analysis timeframe",
+            ("Weekly", "Daily"),
+            horizontal=True,
+            key=f"technical_outlook_level_timeframe_{snapshot.get('ticker', 'asset')}",
+        )
+        use_weekly = level_timeframe == "Weekly"
+    content = _analysis_content(snapshot, legacy=legacy, use_weekly=use_weekly)
+    zones = content["zones"]
     if zones:
         st.dataframe(pd.DataFrame([{
             "Role": zone.get("role"), "Zone": f"{zone.get('low', 0):,.2f}–{zone.get('high', 0):,.2f}",
             "Distance from Price %": _zone_distance_from_price(snapshot.get("price"), zone), "Confluence": zone.get("confluence"),
             "Sources": ", ".join(zone.get("sources") or []), "Timeframes": ", ".join(zone.get("timeframes") or []),
         } for zone in zones]), hide_index=True, use_container_width=True)
-    else:
+    elif not legacy:
         st.info(f"No HIGH or VERY_HIGH {level_timeframe.lower()} confluence zones are available.")
 
     st.markdown("#### Scenario Matrix")
-    scenarios = (
-        snapshot.get("weekly_scenarios")
-        if use_weekly
-        else snapshot.get("daily_scenarios") or snapshot.get("scenarios")
-    ) or []
+    scenarios = content["scenarios"]
     st.dataframe(pd.DataFrame([{
         "Scenario": item.get("scenario"), "Probability": f"{item.get('probability')}%", "Trigger": item.get("trigger"),
         "Expected Path": " → ".join(_price(value) for value in item.get("expected_path", [])), "Target": _range_list(item.get("target_zone")), "Invalidation": item.get("invalidation"),
@@ -343,11 +369,7 @@ def _render_analysis(snapshot: dict[str, Any]) -> None:
             st.caption(item.get("explanation", ""))
 
     st.markdown("#### Confirmation / Invalidation")
-    confirmation = (
-        snapshot.get("weekly_confirmation_matrix")
-        if use_weekly
-        else snapshot.get("daily_confirmation_matrix") or snapshot.get("confirmation_matrix")
-    ) or []
+    confirmation = content["confirmation"]
     st.dataframe(pd.DataFrame(confirmation), hide_index=True, use_container_width=True)
     with st.expander("Historical Analogs"):
         analogs = snapshot.get("historical_analogs") or {}
@@ -360,6 +382,40 @@ def _render_analysis(snapshot: dict[str, Any]) -> None:
             {"Statistic": "Median", **{horizon: _number((returns.get(horizon) or {}).get("median")) for horizon in ("3M", "6M", "12M")}},
         ]), hide_index=True, use_container_width=True)
         st.caption(f"Future Maximum Drawdown Probability: {analogs.get('drawdown_probabilities', {})}")
+
+
+def _analysis_content(
+    snapshot: dict[str, Any],
+    *,
+    legacy: bool,
+    use_weekly: bool,
+) -> dict[str, list[dict[str, Any]]]:
+    if legacy:
+        return {
+            "zones": list(snapshot.get("support_resistance") or []),
+            "scenarios": list(snapshot.get("scenarios") or []),
+            "confirmation": list(snapshot.get("confirmation_matrix") or []),
+        }
+    zones = (
+        snapshot.get("weekly_support_resistance")
+        if use_weekly
+        else snapshot.get("daily_support_resistance") or snapshot.get("support_resistance")
+    ) or []
+    scenarios = (
+        snapshot.get("weekly_scenarios")
+        if use_weekly
+        else snapshot.get("daily_scenarios") or snapshot.get("scenarios")
+    ) or []
+    confirmation = (
+        snapshot.get("weekly_confirmation_matrix")
+        if use_weekly
+        else snapshot.get("daily_confirmation_matrix") or snapshot.get("confirmation_matrix")
+    ) or []
+    return {
+        "zones": [zone for zone in zones if zone.get("confluence") in {"HIGH", "VERY_HIGH"}][:20],
+        "scenarios": list(scenarios),
+        "confirmation": list(confirmation),
+    }
 
 
 def _render_elliott_candidate(title: str, candidate: dict[str, Any], confidence: Any) -> None:
