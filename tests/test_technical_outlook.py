@@ -8,6 +8,7 @@ import pytest
 
 from elliott_waves.data import _normalized_frame
 from technical_outlook.analytics import (
+    build_support_resistance,
     calculate_indicators,
     classify_structure,
     detect_pivots,
@@ -26,7 +27,7 @@ from technical_outlook.elliott import (
 )
 from technical_outlook.config import CORE_ASSETS
 from technical_outlook.engine import TechnicalOutlookEngine, _chart_frame
-from technical_outlook.llm import LLM_TEXT_FIELDS, structured_llm_input, validate_llm_output
+from technical_outlook.llm import LLM_INPUT_MAX_CHARS, LLM_TEXT_FIELDS, serialize_llm_input, structured_llm_input, validate_llm_output
 from technical_outlook.service import apply_llm_schedule
 from technical_outlook import storage
 from technical_outlook_tab import _visible_support_resistance, _zone_distance_from_price, build_technical_chart
@@ -227,6 +228,30 @@ def test_engine_builds_weekly_and_daily_frames_without_quant_elliott() -> None:
     assert "monthly_structure" not in snapshot
     assert snapshot["elliott_source"] == "LLM"
     assert snapshot["scenario_components"]["elliott"] is None
+    assert snapshot["weekly_volume_profile"]["lookback_bars"] == len(charts["1W"])
+    assert snapshot["weekly_volume_profile"]["lookback_bars"] <= 500
+    assert all(
+        zone["timeframes"] == ["WEEKLY"]
+        for zone in snapshot["weekly_support_resistance"]
+    )
+
+
+def test_structural_weekly_levels_use_weekly_smas_and_all_window_pivots() -> None:
+    prices = np.linspace(100, 600, 500)
+    frame = calculate_indicators(weekly_frame(prices.tolist(), atr=8.0))
+    pivots = [pivot(float(price), index, "LOW" if index % 2 == 0 else "HIGH") for index, price in enumerate(np.linspace(120, 580, 24))]
+    zones = build_support_resistance(
+        frame,
+        pivots,
+        {"status": "NOT_AVAILABLE"},
+        timeframe="WEEKLY",
+        max_pivots=None,
+        max_zones=20,
+    )
+    assert len(zones) <= 20
+    assert all(zone["timeframes"] == ["WEEKLY"] for zone in zones)
+    sources = {source for zone in zones for source in zone["sources"]}
+    assert {"sma50", "sma100", "sma200"}.issubset(sources)
 
 
 def test_chart_has_no_pan_or_zoom_interaction() -> None:
@@ -264,6 +289,25 @@ def test_llm_input_uses_weekly_and_daily_frames_only() -> None:
     assert "weekly" in value
     assert "daily" in value
     assert "monthly" not in value
+
+
+def test_llm_request_is_compact_and_bounded() -> None:
+    many_pivots = [pivot(float(100 + index), index, "LOW" if index % 2 == 0 else "HIGH") for index in range(200)]
+    snapshot = {
+        "ticker": "QQQ",
+        "weekly_pivots": many_pivots,
+        "daily_pivots": many_pivots,
+        "minor_pivots": many_pivots,
+        "divergences": [{"type": "BULLISH_RSI", "start_pivot": item, "end_pivot": item} for item in many_pivots],
+        "weekly_support_resistance": [{"low": index, "high": index + 1, "center": index + 0.5, "role": "SUPPORT", "sources": ["major_swing"], "timeframes": ["WEEKLY"], "confluence_score": 8, "confluence": "VERY_HIGH"} for index in range(200)],
+        "daily_support_resistance": [],
+    }
+    encoded = serialize_llm_input(snapshot)
+    assert len(encoded) < LLM_INPUT_MAX_CHARS
+    decoded = __import__("json").loads(encoded)
+    assert len(decoded["weekly"]["pivots"]) == 18
+    assert len(decoded["daily"]["pivots"]) == 24
+    assert len(decoded["divergences"]) == 12
 
 
 def test_llm_elliott_points_must_match_supplied_pivots() -> None:
