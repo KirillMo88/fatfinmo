@@ -39,7 +39,10 @@ def calculate_indicators(bars: pd.DataFrame) -> pd.DataFrame:
     gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
     relative_strength = gain / loss.replace(0.0, np.nan)
-    frame["rsi14"] = 100.0 - 100.0 / (1.0 + relative_strength)
+    rsi = 100.0 - 100.0 / (1.0 + relative_strength)
+    rsi = rsi.mask(loss.eq(0.0) & gain.gt(0.0), 100.0)
+    rsi = rsi.mask(loss.eq(0.0) & gain.eq(0.0), 50.0)
+    frame["rsi14"] = rsi
 
     ema12 = close.ewm(span=12, adjust=False, min_periods=12).mean()
     ema26 = close.ewm(span=26, adjust=False, min_periods=26).mean()
