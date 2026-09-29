@@ -13,12 +13,12 @@ from .models import GoldAISCValuationSnapshot
 
 
 AISC_ZONE_COLORS = (
-    (0.0, 1.25, "#166534", "Very compressed producer economics"),
+    (0.0, 1.25, "#16a34a", "Very compressed producer economics"),
     (1.25, 1.45, "#86efac", "Below-normal margin environment"),
     (1.45, 1.80, "#2563eb", "Normal historical range"),
     (1.80, 2.10, "#f97316", "Strong producer-margin environment"),
-    (2.10, 2.40, "#fca5a5", "Historically elevated"),
-    (2.40, 5.0, "#991b1b", "Extreme / unusual"),
+    (2.10, 2.40, "#fb7185", "Historically elevated"),
+    (2.40, 5.0, "#dc2626", "Extreme / unusual"),
 )
 
 
@@ -138,7 +138,7 @@ def build_gold_aisc_valuation_fig(
             y=data["gold_aisc_ratio"],
             mode="lines",
             name="Gold / AISC",
-            line={"color": "#f8fafc", "width": 2.0},
+            line={"color": "#ffffff", "width": 2.8},
             customdata=custom,
             hovertemplate=(
                 "Date: %{x|%Y-%m-%d}<br>Gold Close: $%{customdata[0]:,.0f}<br>"
@@ -154,7 +154,7 @@ def build_gold_aisc_valuation_fig(
             y0=lower,
             y1=upper,
             fillcolor=color,
-            opacity=0.16,
+            opacity=0.30,
             line_width=0,
             row=1,
             col=1,
@@ -163,7 +163,7 @@ def build_gold_aisc_valuation_fig(
         fig.add_hline(y=level, line={"color": "#cbd5e1", "width": 1, "dash": "dot"}, row=1, col=1)
 
     premium = data["premium_discount_pct"]
-    premium_colors = np.where(premium.ge(0.0), "#ef4444", "#22c55e")
+    premium_colors = np.where(premium.ge(0.0), "#ff3b30", "#00e676")
     premium_custom = np.column_stack(
         [data["gold_close"].to_numpy(), (data["aisc"] * NORMAL_AISC_MULTIPLE).to_numpy()]
     )
@@ -172,7 +172,7 @@ def build_gold_aisc_valuation_fig(
             x=data["date"],
             y=premium,
             name="Premium / Discount",
-            marker={"color": premium_colors},
+            marker={"color": premium_colors, "opacity": 0.95, "line": {"color": premium_colors, "width": 0.5}},
             customdata=premium_custom,
             hovertemplate=(
                 "Date: %{x|%Y-%m-%d}<br>Gold Close: $%{customdata[0]:,.0f}<br>"
