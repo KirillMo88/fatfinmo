@@ -135,12 +135,12 @@ def render_simple_v3_asset(
     st.markdown("### Weekly Key Levels")
     _render_zone_table(snapshot.get("weekly_zones") or [], classes={"HIGH", "VERY_HIGH"})
     st.markdown("### Weekly Secondary Levels")
-    st.caption("MEDIUM confluence levels are informational only; they do not affect charts or the 6M Scenario Matrix.")
+    st.caption("MEDIUM confluence levels are informational overlays; they do not affect the 6M Scenario Matrix.")
     _render_zone_table(snapshot.get("weekly_zones") or [], classes={"MEDIUM"})
     st.markdown("### Daily Key Levels")
     _render_zone_table(snapshot.get("daily_zones") or [], classes={"HIGH", "VERY_HIGH"})
     st.markdown("### Daily Secondary Levels")
-    st.caption("MEDIUM confluence levels are informational only; they do not affect charts or the 6M Scenario Matrix.")
+    st.caption("MEDIUM confluence levels are informational overlays; they do not affect the 6M Scenario Matrix.")
     _render_zone_table(snapshot.get("daily_zones") or [], classes={"MEDIUM"})
     st.markdown("### Weekly 6M Scenario Matrix")
     scenarios = snapshot.get("weekly_scenario_matrix") or []
@@ -177,16 +177,28 @@ def render_simple_v3_asset(
 def visible_zone_frame(zones: list[dict[str, Any]], *, timeframe: str) -> pd.DataFrame:
     rows = [
         zone for zone in zones
-        if zone.get("confluence_class") in {"HIGH", "VERY_HIGH"}
+        if zone.get("confluence_class") in {"MEDIUM", "HIGH", "VERY_HIGH"}
         and not zone.get("hidden_by_60pct_filter")
-        and zone.get("visible_on_chart", True)
+        # Older snapshots were generated before MEDIUM overlays were enabled
+        # and therefore carry visible_on_chart=False.  The lower-price safety
+        # filter is handled separately by hidden_by_60pct_filter, so MEDIUM
+        # remains eligible here without requiring a snapshot refresh.
+        and (zone.get("visible_on_chart", True) or zone.get("confluence_class") == "MEDIUM")
     ]
     if not rows:
         return pd.DataFrame()
     frame = pd.DataFrame(rows)
     colors = {"SUPPORT": "#00e68a", "RESISTANCE": "#ff4d5a", "TESTING": "#ffd84d"}
     frame["color"] = frame["role"].map(colors).fillna("#94a3b8")
-    frame["zone_opacity"] = np.where(frame["confluence_class"] == "VERY_HIGH", 0.46, 0.30)
+    frame["zone_opacity"] = np.select(
+        [
+            frame["confluence_class"].eq("VERY_HIGH"),
+            frame["confluence_class"].eq("HIGH"),
+            frame["confluence_class"].eq("MEDIUM"),
+        ],
+        [0.46, 0.30, 0.18],
+        default=0.18,
+    )
     frame["level_set"] = timeframe
     return frame
 

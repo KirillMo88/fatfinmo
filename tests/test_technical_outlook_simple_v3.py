@@ -290,11 +290,17 @@ def test_extension_risk_cannot_independently_flip_bull_to_bear() -> None:
 def test_visibility_is_confluence_only_not_strength() -> None:
     zones = [
         {"zone_id": "low-strong", "confluence_class": "LOW", "strength_class": "VERY_STRONG", "hidden_by_60pct_filter": False, "visible_on_chart": False},
+        {"zone_id": "medium", "confluence_class": "MEDIUM", "strength_class": "WEAK", "hidden_by_60pct_filter": False, "visible_on_chart": False},
         {"zone_id": "high-weak", "confluence_class": "HIGH", "strength_class": "WEAK", "hidden_by_60pct_filter": False, "visible_on_chart": True},
     ]
-    assert [zone["zone_id"] for zone in visible_zones(zones)] == ["high-weak"]
-    rendered = visible_zone_frame([{**zones[0], "role": "SUPPORT", "low": 80, "high": 81}, {**zones[1], "role": "RESISTANCE", "low": 110, "high": 111}], timeframe="WEEKLY")
-    assert list(rendered["zone_id"]) == ["high-weak"]
+    assert [zone["zone_id"] for zone in visible_zones(zones)] == ["medium", "high-weak"]
+    rendered = visible_zone_frame([
+        {**zones[0], "role": "SUPPORT", "low": 80, "high": 81},
+        {**zones[1], "role": "SUPPORT", "low": 90, "high": 91},
+        {**zones[2], "role": "RESISTANCE", "low": 110, "high": 111},
+    ], timeframe="WEEKLY")
+    assert list(rendered["zone_id"]) == ["medium", "high-weak"]
+    assert rendered.loc[rendered["zone_id"] == "medium", "zone_opacity"].iloc[0] < rendered.loc[rendered["zone_id"] == "high-weak", "zone_opacity"].iloc[0]
 
 
 def test_60pct_filter_hides_but_does_not_delete_zone() -> None:
