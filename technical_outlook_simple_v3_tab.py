@@ -92,10 +92,19 @@ def render_simple_v3_asset(
 
     interpretation = snapshot.get("llm_interpretation") or {}
     elliott = interpretation.get("elliott_structure") or {}
-    controls = st.columns(3)
+    controls = st.columns(4)
     show_primary = controls[0].checkbox("Elliott Primary", value=False, key=f"simple_v3_primary_{ticker}")
     show_alternative = controls[1].checkbox("Elliott Alternative", value=False, key=f"simple_v3_alt_{ticker}")
     show_levels = controls[2].checkbox("Support / Resistance", value=True, key=f"simple_v3_sr_{ticker}")
+    st.markdown("**Zone sources**")
+    source_controls = st.columns(4)
+    source_filters = {
+        "SWING_STRUCTURE": source_controls[0].checkbox("Swing", value=True, key=f"simple_v3_swing_{ticker}"),
+        "VOLUME_ACCEPTANCE": source_controls[1].checkbox("Volume", value=True, key=f"simple_v3_volume_{ticker}"),
+        "FIBONACCI": source_controls[2].checkbox("Fibonacci", value=True, key=f"simple_v3_fibonacci_{ticker}"),
+        "MOVING_AVERAGE": source_controls[3].checkbox("Moving Average", value=True, key=f"simple_v3_ma_{ticker}"),
+    }
+    enabled_sources = {family for family, enabled_source in source_filters.items() if enabled_source}
     chart_cols = st.columns(2)
     for column, timeframe, title, zone_key in (
         (chart_cols[0], "1W", "WEEKLY", "weekly_zones"),
@@ -109,7 +118,7 @@ def render_simple_v3_asset(
             else:
                 chart = build_simple_v3_chart(
                     bars,
-                    (snapshot.get(zone_key) or []) if show_levels else [],
+                    filter_chart_zones(snapshot.get(zone_key) or [], enabled_sources) if show_levels else [],
                     primary=elliott.get("primary") if show_primary else None,
                     alternative=elliott.get("alternative") if show_alternative else None,
                     timeframe=title,
@@ -177,13 +186,9 @@ def render_simple_v3_asset(
 def visible_zone_frame(zones: list[dict[str, Any]], *, timeframe: str) -> pd.DataFrame:
     rows = [
         zone for zone in zones
-        if zone.get("confluence_class") in {"MEDIUM", "HIGH", "VERY_HIGH"}
-        and not zone.get("hidden_by_60pct_filter")
-        # Older snapshots were generated before MEDIUM overlays were enabled
-        # and therefore carry visible_on_chart=False.  The lower-price safety
-        # filter is handled separately by hidden_by_60pct_filter, so MEDIUM
-        # remains eligible here without requiring a snapshot refresh.
-        and (zone.get("visible_on_chart", True) or zone.get("confluence_class") == "MEDIUM")
+        # All confluence classes are eligible for chart overlays.  The
+        # lower-price safety filter remains independent from confluence.
+        if not zone.get("hidden_by_60pct_filter")
     ]
     if not rows:
         return pd.DataFrame()
@@ -201,6 +206,26 @@ def visible_zone_frame(zones: list[dict[str, Any]], *, timeframe: str) -> pd.Dat
     )
     frame["level_set"] = timeframe
     return frame
+
+
+def filter_chart_zones(
+    zones: list[dict[str, Any]],
+    enabled_sources: set[str],
+) -> list[dict[str, Any]]:
+    """Keep zones that contain at least one enabled source family.
+
+    A zone can contain multiple families; it remains on the chart when any of
+    those families is enabled.  This makes the source switches useful for
+    inspecting the contribution of each family without changing the stored
+    quant snapshot or scenario calculations.
+    """
+    if not enabled_sources:
+        return []
+    selected = {str(value).upper() for value in enabled_sources}
+    return [
+        zone for zone in zones
+        if selected.intersection({str(value).upper() for value in (zone.get("source_families") or [])})
+    ]
 
 
 def build_simple_v3_chart(

@@ -52,7 +52,10 @@ def build_support_resistance(
 
 
 def visible_zones(zones: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [zone for zone in zones if bool(zone.get("visible_on_chart"))]
+    # Chart visibility is controlled by the UI source switches.  Do not apply
+    # a confluence-class filter here; only the explicit lower-price cutoff is
+    # retained from the quant snapshot.
+    return [zone for zone in zones if not zone.get("hidden_by_60pct_filter")]
 
 
 def deterministic_clusters(
