@@ -104,6 +104,7 @@ def render_simple_v3_asset(
         "FIBONACCI": source_controls[2].checkbox("Fibonacci", value=True, key=f"simple_v3_fibonacci_{ticker}"),
         "MOVING_AVERAGE": source_controls[3].checkbox("Moving Average", value=True, key=f"simple_v3_ma_{ticker}"),
     }
+    st.caption("Chart colors: Swing = orange · Volume = cyan · Fibonacci = purple · Moving Average = yellow · Multi-source = white")
     enabled_sources = {family for family, enabled_source in source_filters.items() if enabled_source}
     chart_cols = st.columns(2)
     for column, timeframe, title, zone_key in (
@@ -183,6 +184,38 @@ def render_simple_v3_asset(
     st.divider()
 
 
+SOURCE_COLORS = {
+    "SWING_STRUCTURE": "#f97316",
+    "VOLUME_ACCEPTANCE": "#06b6d4",
+    "FIBONACCI": "#a855f7",
+    "MOVING_AVERAGE": "#facc15",
+    "MULTI_SOURCE": "#f8fafc",
+    "UNKNOWN": "#94a3b8",
+}
+
+SOURCE_LABELS = {
+    "SWING_STRUCTURE": "Swing",
+    "VOLUME_ACCEPTANCE": "Volume",
+    "FIBONACCI": "Fibonacci",
+    "MOVING_AVERAGE": "Moving Average",
+}
+
+
+def zone_source_color(zone: dict[str, Any]) -> str:
+    """Return a source-based overlay color for a chart zone."""
+    families = sorted({str(value).upper() for value in (zone.get("source_families") or []) if value})
+    if len(families) == 1:
+        return SOURCE_COLORS.get(families[0], SOURCE_COLORS["UNKNOWN"])
+    if len(families) > 1:
+        return SOURCE_COLORS["MULTI_SOURCE"]
+    return SOURCE_COLORS["UNKNOWN"]
+
+
+def _zone_source_label(zone: dict[str, Any]) -> str:
+    families = sorted({str(value).upper() for value in (zone.get("source_families") or []) if value})
+    return " + ".join(SOURCE_LABELS.get(family, family) for family in families) or "Unknown"
+
+
 def visible_zone_frame(zones: list[dict[str, Any]], *, timeframe: str) -> pd.DataFrame:
     rows = [
         zone for zone in zones
@@ -193,8 +226,8 @@ def visible_zone_frame(zones: list[dict[str, Any]], *, timeframe: str) -> pd.Dat
     if not rows:
         return pd.DataFrame()
     frame = pd.DataFrame(rows)
-    colors = {"SUPPORT": "#00e68a", "RESISTANCE": "#ff4d5a", "TESTING": "#ffd84d"}
-    frame["color"] = frame["role"].map(colors).fillna("#94a3b8")
+    frame["color"] = frame.apply(lambda row: zone_source_color(row.to_dict()), axis=1)
+    frame["source_label"] = frame.apply(lambda row: _zone_source_label(row.to_dict()), axis=1)
     frame["zone_opacity"] = np.select(
         [
             frame["confluence_class"].eq("VERY_HIGH"),
@@ -268,6 +301,7 @@ def build_simple_v3_chart(
             tooltip=[
                 alt.Tooltip("role:N", title="Role"), alt.Tooltip("confluence_class:N", title="Confluence"),
                 alt.Tooltip("strength_class:N", title="Strength"), alt.Tooltip("low:Q", format=",.2f"), alt.Tooltip("high:Q", format=",.2f"),
+                alt.Tooltip("source_label:N", title="Sources"),
             ],
         ))
     start, end = frame["timestamp"].min(), frame["timestamp"].max()

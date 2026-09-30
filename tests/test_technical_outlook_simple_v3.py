@@ -27,7 +27,7 @@ from technical_outlook_simple_v3.support_resistance import (
 )
 from technical_outlook_simple_v3.swings import detect_causal_swings
 from technical_outlook_simple_v3.volume_profile import build_volume_profile
-from technical_outlook_simple_v3_tab import build_simple_v3_chart, filter_chart_zones, visible_zone_frame
+from technical_outlook_simple_v3_tab import build_simple_v3_chart, filter_chart_zones, visible_zone_frame, zone_source_color
 
 
 def _frame(periods: int = 600, *, freq: str = "B", amplitude: float = 12.0) -> pd.DataFrame:
@@ -312,6 +312,14 @@ def test_chart_source_filter_keeps_multi_family_zone_when_one_source_is_enabled(
     assert [zone["zone_id"] for zone in filter_chart_zones(zones, {"VOLUME_ACCEPTANCE"})] == ["swing-volume"]
     assert [zone["zone_id"] for zone in filter_chart_zones(zones, {"FIBONACCI", "MOVING_AVERAGE"})] == ["fib", "ma"]
     assert filter_chart_zones(zones, set()) == []
+
+
+def test_chart_zone_colors_are_source_based() -> None:
+    assert zone_source_color({"source_families": ["SWING_STRUCTURE"]}) == "#f97316"
+    assert zone_source_color({"source_families": ["VOLUME_ACCEPTANCE"]}) == "#06b6d4"
+    assert zone_source_color({"source_families": ["FIBONACCI"]}) == "#a855f7"
+    assert zone_source_color({"source_families": ["MOVING_AVERAGE"]}) == "#facc15"
+    assert zone_source_color({"source_families": ["FIBONACCI", "SWING_STRUCTURE"]}) == "#f8fafc"
 
 
 def test_60pct_filter_hides_but_does_not_delete_zone() -> None:
