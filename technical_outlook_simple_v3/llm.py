@@ -161,7 +161,7 @@ def _validate_elliott_structure(value: Any, snapshot: dict[str, Any] | None) -> 
     expected = {"primary", "alternative", "confidence", "current_wave_state"}
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError("elliott_structure must contain exactly primary, alternative, confidence, current_wave_state")
-    confidence = value["confidence"]
+    confidence = str(value["confidence"]).strip().upper()
     if confidence not in {"HIGH", "MEDIUM", "LOW"}:
         raise ValueError("elliott_structure.confidence must be HIGH, MEDIUM, or LOW")
     if not isinstance(value["current_wave_state"], str):
@@ -192,15 +192,38 @@ def _validate_elliott_candidate(value: Any, snapshot: dict[str, Any] | None) -> 
             # list/object. Preserve the information while keeping the
             # persisted schema stable and display-friendly.
             result[field] = json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
-    if result["direction"] not in {"UP", "DOWN", "NEUTRAL"}:
+    result["direction"] = _normalize_direction(result["direction"])
+    result["wave_state"] = _normalize_wave_state(result["wave_state"])
+    if result["direction"] is None:
         raise ValueError("Elliott candidate direction must be UP, DOWN, or NEUTRAL")
-    if result["wave_state"] not in {"CONFIRMED", "DEVELOPING", "POTENTIAL", "UNRESOLVED"}:
+    if result["wave_state"] is None:
         raise ValueError("Invalid Elliott candidate wave_state")
     waves = value["waves"]
     if not isinstance(waves, list) or len(waves) > 12:
         raise ValueError("Elliott candidate waves must be an array with at most 12 points")
     result["waves"] = [_validate_wave_point(point, snapshot) for point in waves]
     return result
+
+
+def _normalize_direction(value: str) -> str | None:
+    normalized = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "UP": "UP", "UPWARD": "UP", "BULL": "UP", "BULLISH": "UP", "LONG": "UP", "POSITIVE": "UP", "1": "UP",
+        "DOWN": "DOWN", "DOWNWARD": "DOWN", "BEAR": "DOWN", "BEARISH": "DOWN", "SHORT": "DOWN", "NEGATIVE": "DOWN", "-1": "DOWN", "_1": "DOWN",
+        "NEUTRAL": "NEUTRAL", "SIDEWAYS": "NEUTRAL", "RANGE": "NEUTRAL", "FLAT": "NEUTRAL", "UNKNOWN": "NEUTRAL", "UNRESOLVED": "NEUTRAL",
+    }
+    return aliases.get(normalized)
+
+
+def _normalize_wave_state(value: str) -> str | None:
+    normalized = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "CONFIRMED": "CONFIRMED", "CONFIRM": "CONFIRMED",
+        "DEVELOPING": "DEVELOPING", "DEVELOPING_WAVE": "DEVELOPING",
+        "POTENTIAL": "POTENTIAL", "POSSIBLE": "POTENTIAL",
+        "UNRESOLVED": "UNRESOLVED", "UNKNOWN": "UNRESOLVED", "N_A": "UNRESOLVED",
+    }
+    return aliases.get(normalized)
 
 
 def _validate_wave_point(value: Any, snapshot: dict[str, Any] | None) -> dict[str, Any]:
