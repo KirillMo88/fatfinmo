@@ -1,4 +1,5 @@
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -30,6 +31,19 @@ from btc_cycle_tab import (
     _build_macro_score_figure,
     _build_structural_cycles_figure,
 )
+
+
+def test_legacy_btc_regime_tab_is_removed_and_cycle_uses_shared_data_loaders():
+    root = Path(__file__).resolve().parents[1]
+    app_source = (root / "app.py").read_text(encoding="utf-8")
+    data_source = (root / "btc_data.py").read_text(encoding="utf-8")
+
+    assert '"BTC Regime",' not in app_source
+    assert "render_btc_regime_tab" not in app_source
+    assert "btc_weekly = load_btc_weekly_price()" in app_source
+    assert "btc_etf_flow_history = load_btc_etf_flow_history()" in app_source
+    assert "def load_btc_weekly_price" in data_source
+    assert "def load_btc_etf_flow_history" in data_source
 
 
 def test_halving_phases_follow_specified_progress_bands():
