@@ -8,8 +8,8 @@ from elliott_waves.config import AssetSpec
 
 UI_NAME = "Technical Outlook v3"
 MODEL_VERSION = "TECHNICAL_OUTLOOK_SIMPLE_V3"
-CONFIG_VERSION = "TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG_V2"
-SR_ENGINE_VERSION = "SR_ENGINE_SIMPLE_V3_V2"
+CONFIG_VERSION = "TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG"
+SR_ENGINE_VERSION = "SR_ENGINE_SIMPLE_V3"
 SCENARIO_ENGINE_VERSION = "SCENARIO_ENGINE_SIMPLE_V3"
 
 CORE_ASSETS: dict[str, AssetSpec] = {
@@ -24,9 +24,9 @@ CORE_ASSETS: dict[str, AssetSpec] = {
         "Invesco QQQ Trust; OHLCV is not a total-return series.",
     ),
     "GLD": AssetSpec(
-        "GLD", "GLD", "yahoo_finance", "GLD", "etf", "USD", "USD_per_share",
-        "XNYS", "America/New_York", "raw_ohlc", "1D", "Yahoo Finance",
-        "SPDR Gold Shares ETF; SIMPLE v3 intentionally analyses GLD.",
+        "GLD", "GLD", "tradingview_mcp", "TVC:GOLD", "commodity", "USD", "USD_per_oz",
+        "TRADINGVIEW_TVC_GOLD", "Etc/UTC", "raw_ohlc", "1D", "TradingView MCP",
+        "TradingView TVC:GOLD; SIMPLE v3 uses GOLD rather than the GLD ETF.",
     ),
     "BTC-USD": AssetSpec(
         "BTC-USD", "BTC-USD", "yahoo_finance", "BTC-USD", "crypto", "USD", "USD_per_BTC",
@@ -64,25 +64,36 @@ CONFIG: dict[str, Any] = {
     "config_version": CONFIG_VERSION,
     "sr_engine_version": SR_ENGINE_VERSION,
     "scenario_engine_version": SCENARIO_ENGINE_VERSION,
-    "chart": {"bars": 500, "interactive": False},
+    "chart": {"bars": 300, "interactive": False},
     "moving_averages": {"windows": [50, 100, 200], "slope_window": 6},
     "volume_profile": {
-        "weekly_lookback_bars": 260,
-        "daily_lookback_bars": 252,
-        "profile_bins": 40,
-        "smoothing_method": "gaussian",
-        "gaussian_sigma": 1.0,
+        "weekly_lookback_bars": 300,
+        "daily_lookback_bars": 300,
+        "profile_bins": 24,
+        "smoothing_method": "none",
+        "gaussian_sigma": 0.0,
         "minimum_peak_separation_bins": 2,
-        "hvn_min_prominence_poc_fraction": 0.08,
-        "hvn_min_height_percentile": 0.60,
-        "max_hvn": 4,
+        "local_peak_min_poc_fraction": 0.25,
+        "max_local_peaks": 3,
         "value_area": 0.70,
     },
     "fibonacci": {
-        "retracements": [0.236, 0.382, 0.500, 0.618, 0.786],
-        "extensions": [1.0, 1.272, 1.618],
-        "developing_quality_multiplier": 0.75,
+        "retracements": [0.382, 0.500, 0.618],
+        "extensions": [1.272, 1.618],
     },
+    "key_point_scores": {
+        "swing_structure": {"one": 50.0, "two": 75.0, "three_plus": 100.0},
+        "moving_average": {"sma100": 50.0, "sma200": 100.0},
+        "volume_acceptance": {"poc": 100.0, "local_peak": 50.0},
+        "fibonacci": {
+            "strategic_0.382": 75.0,
+            "strategic_0.500_0.618": 100.0,
+            "tactical_0.382": 50.0,
+            "tactical_0.500_0.618": 75.0,
+        },
+    },
+    # Legacy quality weights are retained for snapshot compatibility only;
+    # SIMPLE v3 zone classes use key_point_scores above.
     "family_quality": {
         "breadth_increment": 0.25,
         "breadth_cap": 0.50,
@@ -105,12 +116,12 @@ CONFIG: dict[str, Any] = {
     "clustering": {
         "mad_multiplier": 2.0,
         "weekly": {
-            "base_price_fraction": 0.0135,
-            "atr_multiplier": 0.825,
-            "radius_cap_fraction": 0.01875,
+            "base_price_fraction": 0.009,
+            "atr_multiplier": 0.55,
+            "radius_cap_fraction": 0.020,
             "min_width_fraction": 0.004,
             "min_width_atr_multiplier": 0.20,
-            "max_total_width_fraction": 0.0375,
+            "max_total_width_fraction": 0.040,
         },
         "daily": {
             "base_price_fraction": 0.004,
@@ -137,9 +148,10 @@ CONFIG: dict[str, Any] = {
         },
         "class_thresholds": {"moderate": 2.5, "strong": 5.0, "very_strong": 7.5},
     },
-    # MEDIUM zones are now eligible for chart overlays.  They remain
-    # informational only and are not used as primary scenario targets.
-    "display": {"lower_cutoff_fraction": 0.40, "classes": ["MEDIUM", "HIGH", "VERY_HIGH"]},
+    "display": {
+        "lower_cutoff_fraction": 0.40,
+        "key_point_filter_options": ["OFF", "HIGH", "HIGH + MID", "ALL"],
+    },
     "scenario": {
         "weights": {
             "market_structure": 0.30,
