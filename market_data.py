@@ -1,13 +1,33 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta, timezone
-from typing import Callable
+from dataclasses import asdict, dataclass
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 
-from .config import AssetSpec
+
+@dataclass(frozen=True)
+class AssetSpec:
+    """Provider and normalization contract for a market data series."""
+
+    canonical_asset_id: str
+    display_name: str
+    source_id: str
+    provider_symbol: str
+    instrument_type: str
+    currency: str
+    price_unit: str
+    session_calendar: str
+    source_timezone: str
+    adjustment_mode: str
+    base_timeframe: str
+    provider_label: str
+    provenance_note: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 BAR_COLUMNS = [
@@ -30,7 +50,7 @@ BAR_COLUMNS = [
 ]
 
 
-class ElliottDataError(RuntimeError):
+class MarketDataError(RuntimeError):
     pass
 
 
@@ -51,11 +71,11 @@ def load_base_bars(
             loader=tradingview_loader,
         )
     else:
-        raise ElliottDataError(f"Unsupported source_id={spec.source_id!r}")
+        raise MarketDataError(f"Unsupported source_id={spec.source_id!r}")
     bars = validate_bars(bars, spec)
     bars = bars.loc[bars["is_closed"]].copy()
     if bars.empty:
-        raise ElliottDataError(f"{spec.canonical_asset_id} returned no closed {spec.base_timeframe} bars")
+        raise MarketDataError(f"{spec.canonical_asset_id} returned no closed {spec.base_timeframe} bars")
     return bars.reset_index(drop=True)
 
 
@@ -68,7 +88,7 @@ def load_display_bars(
     tradingview_loader: Callable[..., pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     if timeframe not in {"1D", "1W", "1M"}:
-        raise ElliottDataError(f"Unsupported chart timeframe={timeframe!r}")
+        raise MarketDataError(f"Unsupported chart timeframe={timeframe!r}")
     if spec.base_timeframe == "1D":
         if timeframe == "1D":
             return base_bars.copy()
@@ -93,7 +113,7 @@ def load_yahoo_daily(
         try:
             import yfinance as yf
         except Exception as exc:
-            raise ElliottDataError(f"Yahoo Finance adapter unavailable: {exc}") from exc
+            raise MarketDataError(f"Yahoo Finance adapter unavailable: {exc}") from exc
         loader = yf.download
     fetch = loader
     try:
@@ -107,10 +127,10 @@ def load_yahoo_daily(
             threads=False,
         )
     except Exception as exc:
-        raise ElliottDataError(f"Yahoo download failed for {spec.provider_symbol}: {exc}") from exc
+        raise MarketDataError(f"Yahoo download failed for {spec.provider_symbol}: {exc}") from exc
     frame = _extract_yahoo_ohlcv(raw, spec.provider_symbol)
     if frame.empty:
-        raise ElliottDataError(f"Yahoo returned no OHLC for {spec.provider_symbol}")
+        raise MarketDataError(f"Yahoo returned no OHLC for {spec.provider_symbol}")
     dates = pd.to_datetime(frame.index, errors="coerce", utc=True).tz_localize(None)
     now = pd.Timestamp.now(tz="UTC").tz_localize(None)
     out = _normalized_frame(
@@ -141,7 +161,7 @@ def load_tradingview_bars(
         try:
             from tradingview_mcp import get_ohlcv_data
         except Exception as exc:
-            raise ElliottDataError(f"TradingView adapter unavailable: {exc}") from exc
+            raise MarketDataError(f"TradingView adapter unavailable: {exc}") from exc
         loader = get_ohlcv_data
     interval = timeframe
     symbols = [spec.provider_symbol]
@@ -190,7 +210,7 @@ def load_tradingview_bars(
     if best is not None:
         return best
     detail = "; ".join(errors) or "no valid response"
-    raise ElliottDataError(f"TradingView download failed for {spec.provider_symbol}: {detail}")
+    raise MarketDataError(f"TradingView download failed for {spec.provider_symbol}: {detail}")
 
 
 def _normalized_frame(
@@ -248,12 +268,12 @@ def _period_end(timestamp: pd.Timestamp, timeframe: str, spec: AssetSpec) -> pd.
         return value.normalize() + pd.Timedelta(days=7)
     if timeframe == "1M":
         return value.normalize() + pd.offsets.MonthBegin(1)
-    raise ElliottDataError(f"Unsupported timeframe={timeframe!r}")
+    raise MarketDataError(f"Unsupported timeframe={timeframe!r}")
 
 
 def aggregate_daily_bars(daily: pd.DataFrame, timeframe: str, spec: AssetSpec) -> pd.DataFrame:
     if timeframe not in {"1W", "1M"}:
-        raise ElliottDataError("Daily bars can only be aggregated to 1W or 1M")
+        raise MarketDataError("Daily bars can only be aggregated to 1W or 1M")
     if daily.empty:
         return pd.DataFrame(columns=BAR_COLUMNS)
     values = daily.copy()
@@ -302,15 +322,15 @@ def aggregate_daily_bars(daily: pd.DataFrame, timeframe: str, spec: AssetSpec) -
 
 def validate_bars(frame: pd.DataFrame, spec: AssetSpec) -> pd.DataFrame:
     if frame is None or frame.empty:
-        raise ElliottDataError(f"{spec.canonical_asset_id}: empty OHLC history")
+        raise MarketDataError(f"{spec.canonical_asset_id}: empty OHLC history")
     missing = [column for column in BAR_COLUMNS if column not in frame.columns]
     if missing:
-        raise ElliottDataError(f"{spec.canonical_asset_id}: missing normalized columns {missing}")
+        raise MarketDataError(f"{spec.canonical_asset_id}: missing normalized columns {missing}")
     out = frame.copy()
     out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
     out = out.dropna(subset=["timestamp", "open", "high", "low", "close"])
     if out["timestamp"].duplicated().any():
-        raise ElliottDataError(f"{spec.canonical_asset_id}: duplicate bar timestamps")
+        raise MarketDataError(f"{spec.canonical_asset_id}: duplicate bar timestamps")
     if not out["timestamp"].is_monotonic_increasing:
         out = out.sort_values("timestamp").reset_index(drop=True)
     numeric = out[["open", "high", "low", "close"]].apply(pd.to_numeric, errors="coerce")
@@ -320,7 +340,7 @@ def validate_bars(frame: pd.DataFrame, spec: AssetSpec) -> pd.DataFrame:
         | numeric["low"].gt(numeric[["open", "close", "high"]].min(axis=1))
     )
     if invalid.any():
-        raise ElliottDataError(f"{spec.canonical_asset_id}: {int(invalid.sum())} invalid OHLC bars")
+        raise MarketDataError(f"{spec.canonical_asset_id}: {int(invalid.sum())} invalid OHLC bars")
     return out.reset_index(drop=True)
 
 

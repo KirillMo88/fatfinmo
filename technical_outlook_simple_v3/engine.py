@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from elliott_waves.config import AssetSpec
+from market_data import AssetSpec
 from technical_outlook.analytics import (
     build_timeframe_bars,
     calculate_indicators,

@@ -7,8 +7,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from elliott_waves.config import AssetSpec
-from elliott_waves.data import load_base_bars
+from market_data import AssetSpec, load_base_bars
 
 from .analytics import snapshot_id as build_snapshot_id
 from .config import CORE_ASSETS, MODEL_VERSION, yahoo_asset_spec

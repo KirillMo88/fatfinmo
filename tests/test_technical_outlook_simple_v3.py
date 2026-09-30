@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from elliott_waves.data import ElliottDataError, _normalized_frame
+from market_data import MarketDataError, _normalized_frame
 from technical_outlook.analytics import calculate_indicators
 from technical_outlook.engine import TechnicalOutlookEngine
 from technical_outlook_simple_v3.config import CONFIG, CORE_ASSETS, swing_config
@@ -159,7 +159,7 @@ def test_unfinished_invalid_yahoo_bar_is_removed_before_validation() -> None:
     assert pd.Timestamp(validated.iloc[0]["timestamp"]) == pd.Timestamp("2026-09-28")
 
     frame.loc[1, "is_closed"] = True
-    with pytest.raises(ElliottDataError):
+    with pytest.raises(MarketDataError):
         _validate_completed_bars(frame, spec)
 
 

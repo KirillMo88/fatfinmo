@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from elliott_waves.config import AssetSpec
+from market_data import AssetSpec
 
 
 UI_NAME = "Technical Outlook v3"
