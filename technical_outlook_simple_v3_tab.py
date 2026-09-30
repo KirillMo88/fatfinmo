@@ -96,9 +96,10 @@ def render_simple_v3_asset(
 
     st.markdown("### System Summary")
     st.info(_format_numeric_text(str(snapshot.get("deterministic_narrative") or "System summary unavailable.")))
-    st.markdown("### LLM Commentary")
+    st.markdown("### Technical Synthesis")
     if interpretation:
         st.success(_format_numeric_text(str(interpretation.get("summary") or "LLM summary is empty.")))
+        st.markdown("#### LLM Interpretation by Block")
         commentary_frame = pd.DataFrame([
             {"Block": "Market Structure", "Commentary": _format_numeric_text(interpretation.get("market_structure_summary", ""))},
             {"Block": "Elliott", "Commentary": _format_numeric_text(interpretation.get("elliott_summary", ""))},
