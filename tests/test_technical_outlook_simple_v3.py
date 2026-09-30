@@ -9,13 +9,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from elliott_waves.data import _normalized_frame
+from elliott_waves.data import ElliottDataError, _normalized_frame
 from technical_outlook.analytics import calculate_indicators
 from technical_outlook.engine import TechnicalOutlookEngine
 from technical_outlook_simple_v3.config import CONFIG, CORE_ASSETS, swing_config
 from technical_outlook_simple_v3.engine import TechnicalOutlookSimpleV3Engine
 from technical_outlook_simple_v3.fibonacci import active_fibonacci_framework
 from technical_outlook_simple_v3.scenario import build_weekly_scenario_matrix, scenario_probabilities
+from technical_outlook_simple_v3.service import _validate_completed_bars
 from technical_outlook_simple_v3.strength import classify_strength
 from technical_outlook_simple_v3.support_resistance import (
     _family_scores,
@@ -141,6 +142,25 @@ def test_interval_aware_weekly_radius_is_bounded_by_zone_width() -> None:
     assert weekly["base_price_fraction"] == pytest.approx(0.0135)
     assert weekly["atr_multiplier"] == pytest.approx(0.825)
     assert weekly["radius_cap_fraction"] == pytest.approx(weekly["max_total_width_fraction"] / 2.0)
+
+
+def test_unfinished_invalid_yahoo_bar_is_removed_before_validation() -> None:
+    spec = CORE_ASSETS["BTC-USD"]
+    frame = _normalized_frame(
+        dates=pd.Series(pd.to_datetime(["2026-09-28", "2026-09-30"])),
+        opens=pd.Series([100.0, 105.0]), highs=pd.Series([110.0, 106.0]),
+        lows=pd.Series([95.0, 104.0]), closes=pd.Series([105.0, 103.0]),
+        volumes=pd.Series([1_000.0, 1_100.0]), timeframe="1D", spec=spec,
+        now=pd.Timestamp("2026-09-30 12:00:00"),
+    )
+    assert frame["is_closed"].tolist() == [True, False]
+    validated = _validate_completed_bars(frame, spec)
+    assert len(validated) == 1
+    assert pd.Timestamp(validated.iloc[0]["timestamp"]) == pd.Timestamp("2026-09-28")
+
+    frame.loc[1, "is_closed"] = True
+    with pytest.raises(ElliottDataError):
+        _validate_completed_bars(frame, spec)
 
 
 def test_asset_specific_and_default_swing_configs() -> None:
