@@ -111,9 +111,7 @@ def render_simple_v3_asset(
         st.dataframe(
             commentary_frame,
             column_config={
-                # None means content-sized in Streamlit: the Block column
-                # follows its longest label instead of taking a fixed share.
-                "Block": st.column_config.TextColumn(width=None),
+                "Block": st.column_config.TextColumn(width=150),
                 "Commentary": st.column_config.TextColumn(width=None),
             },
             hide_index=True,
