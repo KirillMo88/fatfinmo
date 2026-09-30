@@ -407,6 +407,18 @@ def get_ohlcv_data(
     ).dropna(subset=["date", "close"]).sort_values("date").drop_duplicates("date", keep="last")
     if out.empty:
         raise TradingViewMcpError(f"{symbol} returned no valid OHLCV observations.")
+    # A forced refresh can occasionally return only a handful of recent bars.
+    # Never replace a healthy long cache with that truncated response; merge
+    # the new observations instead so fixed-window analysis remains available.
+    if cache_path.exists():
+        try:
+            cached = pd.read_csv(cache_path)
+            cached["date"] = pd.to_datetime(cached["date"], errors="coerce")
+            cached = cached.dropna(subset=["date", "close"])
+            if len(cached) > len(out):
+                out = pd.concat([cached, out], ignore_index=True).sort_values("date").drop_duplicates("date", keep="last")
+        except Exception:
+            pass
     OHLCV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     out.to_csv(cache_path, index=False)
     return out.reset_index(drop=True)

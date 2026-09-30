@@ -10,7 +10,7 @@ import pandas as pd
 from elliott_waves.config import AssetSpec
 from elliott_waves.data import load_base_bars, load_yahoo_daily, validate_bars
 
-from .config import CONFIG_VERSION, CORE_ASSETS, MODEL_VERSION, SR_ENGINE_VERSION, yahoo_asset_spec
+from .config import CONFIG_VERSION, CORE_ASSETS, CORE_ASSET_KEYS, MODEL_VERSION, SR_ENGINE_VERSION, yahoo_asset_spec
 from .engine import TechnicalOutlookSimpleV3Engine
 from .llm import call_llm_interpretation, validate_llm_output
 from .storage import read_chart_bars, read_latest_snapshot, read_manifest, read_settings, write_manifest, write_snapshot
@@ -27,6 +27,10 @@ def analyze_requested_asset(
     allow_scheduled_llm: bool = False,
 ) -> dict[str, Any]:
     symbol = validate_ticker(ticker)
+    # GLD was the pre-v3 ETF identifier. Keep accepting it in forms/URLs, but
+    # route SIMPLE v3 analysis to the canonical TradingView GOLD asset.
+    if symbol == "GLD":
+        symbol = "GOLD"
     spec = CORE_ASSETS.get(symbol) or yahoo_asset_spec(symbol)
     previous = read_latest_snapshot(symbol)
     bars = (loader or _load)(spec)
@@ -48,7 +52,7 @@ def refresh_all_core_assets(
     when = run_at or datetime.now(timezone.utc)
     previous_entries = {item.get("ticker"): item for item in read_manifest().get("assets", [])}
     entries: list[dict[str, Any]] = []
-    for ticker in CORE_ASSETS:
+    for ticker in CORE_ASSET_KEYS:
         try:
             snapshot = analyze_requested_asset(ticker, run_at=when, loader=loader, allow_scheduled_llm=True)
             entries.append({
@@ -116,6 +120,8 @@ def run_llm_now(
     llm_caller: Callable[[dict[str, Any]], tuple[dict[str, Any], str]] = call_llm_interpretation,
 ) -> dict[str, Any]:
     symbol = validate_ticker(ticker)
+    if symbol == "GLD":
+        symbol = "GOLD"
     previous = read_latest_snapshot(symbol)
     if not previous:
         raise ValueError(f"{symbol}: no SIMPLE v3 Quant snapshot is available")

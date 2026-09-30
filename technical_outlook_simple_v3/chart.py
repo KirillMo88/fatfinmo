@@ -90,12 +90,26 @@ def build_reference_chart(
                          name=f"{key.title()} Fibonacci Zone 0.500–0.618", legend=True, opacity=0.25, across_profile=True)
 
     for zone in zones:
-        score = float(zone.get("key_point_score", zone.get("quality_score", 0)) or 0)
+        score_value = zone.get("key_point_score")
+        if score_value is None or not np.isfinite(float(score_value or 0)) or float(score_value or 0) <= 0:
+            score_value = zone.get("total_score", zone.get("quality_score", 0))
+        score = float(score_value or 0)
+        zone_class = str(zone.get("key_point_class") or zone.get("confluence_class") or "").upper()
         selected = key_point_filter.upper().replace(" ", "")
         if selected == "OFF" or zone.get("hidden_by_60pct_filter"):
             continue
-        if (selected == "HIGH" and score <= 150) or (selected == "HIGH+MID" and score < 75):
-            continue
+        if selected == "HIGH":
+            if zone_class:
+                if zone_class not in {"HIGH", "VERY_HIGH"}:
+                    continue
+            elif score <= 150:
+                continue
+        elif selected == "HIGH+MID":
+            if zone_class:
+                if zone_class not in {"MID", "MEDIUM", "HIGH", "VERY_HIGH"}:
+                    continue
+            elif score < 75:
+                continue
         families = set(zone.get("source_families") or [])
         if not families.intersection(enabled):
             continue

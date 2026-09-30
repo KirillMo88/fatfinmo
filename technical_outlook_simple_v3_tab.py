@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from technical_outlook_simple_v3.config import CONFIG, CORE_ASSETS
+from technical_outlook_simple_v3.config import CONFIG, CORE_ASSETS, CORE_ASSET_KEYS
 from technical_outlook_simple_v3.service import analyze_requested_asset, run_llm_now
 from technical_outlook_simple_v3.chart import CHART_CONFIG, build_reference_chart
 from technical_outlook_simple_v3.storage import (
@@ -36,7 +36,7 @@ def render_technical_outlook_simple_v3_tab(available_tickers: list[str] | None =
         st.caption("SIMPLE v3 LLM setting saved.")
     manifest = read_manifest()
     statuses = {item.get("ticker"): item for item in manifest.get("assets", [])}
-    for ticker in CORE_ASSETS:
+    for ticker in CORE_ASSET_KEYS:
         snapshot = read_latest_snapshot(ticker)
         if snapshot:
             render_simple_v3_asset(snapshot, status=statuses.get(ticker))
@@ -239,7 +239,10 @@ def visible_zone_frame(zones: list[dict[str, Any]], *, timeframe: str, key_point
     frame = pd.DataFrame(rows)
     frame["color"] = frame.apply(lambda row: zone_source_color(row.to_dict()), axis=1)
     frame["source_label"] = frame.apply(lambda row: _zone_source_label(row.to_dict()), axis=1)
-    frame["key_point_class"] = frame.get("key_point_class", frame.get("confluence_class", "LOW"))
+    if "key_point_class" not in frame:
+        frame["key_point_class"] = frame.get("confluence_class", "LOW")
+    else:
+        frame["key_point_class"] = frame["key_point_class"].fillna(frame.get("confluence_class", "LOW"))
     frame["zone_opacity"] = np.select(
         [
             frame["key_point_class"].eq("HIGH"),
@@ -256,12 +259,16 @@ def visible_zone_frame(zones: list[dict[str, Any]], *, timeframe: str, key_point
 def _key_point_zone_visible(zone: dict[str, Any], key_point_filter: str) -> bool:
     if str(key_point_filter).upper() == "OFF":
         return False
-    score = float(zone.get("key_point_score", zone.get("total_score", zone.get("quality_score", 0.0))) or 0.0)
+    score_value = zone.get("key_point_score")
+    if score_value is None or not np.isfinite(float(score_value or 0)) or float(score_value or 0) <= 0:
+        score_value = zone.get("total_score", zone.get("quality_score", 0.0))
+    score = float(score_value or 0.0)
+    zone_class = str(zone.get("key_point_class") or zone.get("confluence_class") or "").upper()
     selected = str(key_point_filter).upper()
     if selected == "HIGH":
-        return score > 150.0
+        return zone_class in {"HIGH", "VERY_HIGH"} if zone_class else score > 150.0
     if selected in {"HIGH + MID", "HIGH+MID"}:
-        return score >= 75.0
+        return zone_class in {"MID", "MEDIUM", "HIGH", "VERY_HIGH"} if zone_class else score >= 75.0
     return True
 
 

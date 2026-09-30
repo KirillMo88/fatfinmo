@@ -23,10 +23,17 @@ CORE_ASSETS: dict[str, AssetSpec] = {
         "XNAS", "America/New_York", "raw_ohlc", "1D", "Yahoo Finance",
         "Invesco QQQ Trust; OHLCV is not a total-return series.",
     ),
-    "GLD": AssetSpec(
-        "GLD", "GLD", "tradingview_mcp", "TVC:GOLD", "commodity", "USD", "USD_per_oz",
+    "GOLD": AssetSpec(
+        "GOLD", "GOLD", "tradingview_mcp", "TVC:GOLD", "commodity", "USD", "USD_per_oz",
         "TRADINGVIEW_TVC_GOLD", "Etc/UTC", "raw_ohlc", "1D", "TradingView MCP",
         "TradingView TVC:GOLD; SIMPLE v3 uses GOLD rather than the GLD ETF.",
+    ),
+    # Compatibility entry for existing callers. Canonical SIMPLE v3 refreshes
+    # use GOLD via CORE_ASSET_KEYS and normalize GLD in the service layer.
+    "GLD": AssetSpec(
+        "GLD", "GLD", "yahoo_finance", "GLD", "etf", "USD", "USD_per_share",
+        "XNYS", "America/New_York", "raw_ohlc", "1D", "Yahoo Finance",
+        "Compatibility alias only; SIMPLE v3 no longer refreshes the GLD ETF.",
     ),
     "BTC-USD": AssetSpec(
         "BTC-USD", "BTC-USD", "yahoo_finance", "BTC-USD", "crypto", "USD", "USD_per_BTC",
@@ -34,6 +41,8 @@ CORE_ASSETS: dict[str, AssetSpec] = {
         "Yahoo Finance BTC-USD spot history with reported volume.",
     ),
 }
+
+CORE_ASSET_KEYS = ("SPY", "QQQ", "GOLD", "BTC-USD")
 
 SWING_CONFIGS: dict[str, dict[str, Any]] = {
     "SPY": {
@@ -178,6 +187,8 @@ CONFIG: dict[str, Any] = {
 
 def swing_config(ticker: str) -> dict[str, Any]:
     symbol = str(ticker).strip().upper()
+    if symbol == "GOLD":
+        symbol = "GLD"
     if symbol in SWING_CONFIGS:
         return deepcopy(SWING_CONFIGS[symbol])
     value = deepcopy(SWING_CONFIGS["SPY"])
