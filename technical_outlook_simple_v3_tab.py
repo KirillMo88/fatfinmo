@@ -133,9 +133,15 @@ def render_simple_v3_asset(
         st.caption("Optional LLM commentary is not available. Quant levels and scenarios are complete without it.")
 
     st.markdown("### Weekly Key Levels")
-    _render_zone_table(snapshot.get("weekly_zones") or [])
+    _render_zone_table(snapshot.get("weekly_zones") or [], classes={"HIGH", "VERY_HIGH"})
+    st.markdown("### Weekly Secondary Levels")
+    st.caption("MEDIUM confluence levels are informational only; they do not affect charts or the 6M Scenario Matrix.")
+    _render_zone_table(snapshot.get("weekly_zones") or [], classes={"MEDIUM"})
     st.markdown("### Daily Key Levels")
-    _render_zone_table(snapshot.get("daily_zones") or [])
+    _render_zone_table(snapshot.get("daily_zones") or [], classes={"HIGH", "VERY_HIGH"})
+    st.markdown("### Daily Secondary Levels")
+    st.caption("MEDIUM confluence levels are informational only; they do not affect charts or the 6M Scenario Matrix.")
+    _render_zone_table(snapshot.get("daily_zones") or [], classes={"MEDIUM"})
     st.markdown("### Weekly 6M Scenario Matrix")
     scenarios = snapshot.get("weekly_scenario_matrix") or []
     st.dataframe(pd.DataFrame([{
@@ -257,10 +263,11 @@ def _elliott_layers(candidate: dict[str, Any] | None, color: str, start: pd.Time
     ]
 
 
-def _render_zone_table(zones: list[dict[str, Any]]) -> None:
-    visible = [zone for zone in zones if zone.get("confluence_class") in {"HIGH", "VERY_HIGH"} and not zone.get("hidden_by_60pct_filter")]
+def _render_zone_table(zones: list[dict[str, Any]], *, classes: set[str]) -> None:
+    visible = [zone for zone in zones if zone.get("confluence_class") in classes and not zone.get("hidden_by_60pct_filter")]
     if not visible:
-        st.caption("No HIGH / VERY_HIGH zones currently qualify.")
+        class_label = " / ".join(sorted(classes))
+        st.caption(f"No {class_label} zones currently qualify.")
         return
     family_names = {
         "SWING_STRUCTURE": "Swing", "VOLUME_ACCEPTANCE": "Volume",
