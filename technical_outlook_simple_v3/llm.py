@@ -45,6 +45,8 @@ def call_llm_interpretation(snapshot: dict[str, Any]) -> tuple[dict[str, Any], s
             "The summary field is Technical Synthesis: write 3 to 5 concise sentences covering the dominant condition, strongest confirmation, "
             "most important contradiction/divergence, nearest structural inflection point, and what would change the view. "
             "Each block summary should be approximately 2 to 4 analytical sentences. Use exact numbers only when they materially support a conclusion. "
+            "Write all human-readable narrative content in Russian: summary fields, risk factors, confirmation points, Elliott rationale, targets, and invalidation commentary. "
+            "Keep JSON field names and required enum values such as UP/DOWN/NEUTRAL, HIGH/MEDIUM/LOW, and CONFIRMED/DEVELOPING/POTENTIAL/UNRESOLVED unchanged. "
             "Market Structure: interpret whether Daily confirms, stabilizes, or contradicts Weekly and what structural event matters. "
             "Elliott: give primary and alternative interpretations, confirmation/invalidation, and relation to key levels and Fibonacci; commentary only. "
             "Momentum: decide whether momentum is accelerating, exhausting, stabilizing, or reversing; distinguish loss of bearish momentum from bullish confirmation. "
