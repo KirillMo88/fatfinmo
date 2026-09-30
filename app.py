@@ -72,7 +72,6 @@ from gold_regime_tab import render_gold_regime_tab
 from elliott_waves_tab import render_elliott_waves_tab
 from btc_cycle_tab import render_btc_cycle_tab
 from market_cycle_tab import load_market_cycle_snapshot_cached, render_market_cycle_tab
-from technical_outlook_tab import render_technical_outlook_tab, render_technical_outlook_v0_tab
 from technical_outlook_simple_v3_tab import render_technical_outlook_simple_v3_tab
 from global_m2_cycle import (
     build_global_m2_cycle_fig,
@@ -6945,8 +6944,6 @@ def main():
         "Table",
         "Charts",
         "Graphs",
-        "Technical Outlook",
-        "Technical Outlook v0",
         "Technical Outlook v3",
         "AI Dashboard",
         "Market Cycle",
@@ -6971,6 +6968,9 @@ def main():
         "Description",
         "Tester",
     ]
+    # Migrate sessions that were left on a retired Technical Outlook tab.
+    if st.session_state.get("active_main_view") in {"Technical Outlook", "Technical Outlook v0"}:
+        st.session_state["active_main_view"] = "Technical Outlook v3"
     active_view = st.radio(
         "View",
         options=view_options,
@@ -7188,10 +7188,6 @@ def main():
         else:
             graph_ordered_df = base_df
         render_graphs_tab(graph_ordered_df.drop(columns=["__row_id__"], errors="ignore"), selected_universe, selected_universe_name)
-    elif active_view == "Technical Outlook":
-        render_technical_outlook_tab(table_df.get("Ticker", pd.Series(dtype="object")).dropna().astype(str).tolist())
-    elif active_view == "Technical Outlook v0":
-        render_technical_outlook_v0_tab(table_df.get("Ticker", pd.Series(dtype="object")).dropna().astype(str).tolist())
     elif active_view == "Technical Outlook v3":
         render_technical_outlook_simple_v3_tab(table_df.get("Ticker", pd.Series(dtype="object")).dropna().astype(str).tolist())
     elif active_view == "AI Dashboard":

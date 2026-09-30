@@ -13,6 +13,7 @@ from technical_outlook.analytics import (
     build_timeframe_bars,
     calculate_indicators,
     classify_structure,
+    detect_divergences,
     data_version,
     historical_analogs,
     momentum_state,
@@ -80,6 +81,10 @@ class TechnicalOutlookSimpleV3Engine:
         daily_momentum = momentum_state(daily)
         weekly_volume_state = volume_state(weekly)
         daily_volume_state = volume_state(daily)
+        divergences = (
+            detect_divergences(weekly, weekly_pivots, "WEEKLY")
+            + detect_divergences(daily, daily_pivots, "DAILY")
+        )
         weekly_profile = build_volume_profile(weekly, timeframe="WEEKLY")
         daily_profile = build_volume_profile(daily, timeframe="DAILY")
         weekly_fibonacci = active_fibonacci_framework(weekly_pivots, timeframe="WEEKLY", frame=weekly)
@@ -134,6 +139,7 @@ class TechnicalOutlookSimpleV3Engine:
             "btc_calibration_start": configured.get("calibration_start"),
             "weekly_pivots": weekly_pivots,
             "daily_pivots": daily_pivots,
+            "divergences": divergences,
             "weekly_structure": weekly_structure,
             "daily_structure": daily_structure,
             "weekly_moving_averages": weekly_ma,

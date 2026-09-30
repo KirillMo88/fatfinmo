@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
 
-from technical_outlook.llm import ELLIOTT_CANDIDATE_FIELDS, LLM_FIELDS, validate_llm_output
+import pandas as pd
 
 from .config import CONFIG
 
 
 LLM_SCHEMA_VERSION = "TECHNICAL_OUTLOOK_SIMPLE_V3_LLM_V2"
+
+LLM_TEXT_FIELDS = (
+    "summary", "market_structure_summary", "elliott_summary", "momentum_summary",
+    "volume_profile_summary", "key_levels_summary", "scenario_summary",
+    "forecast_horizons_summary", "confirmation_invalidation_summary",
+    "historical_analogs_summary", "interpretation_difference",
+)
+LLM_FIELDS = LLM_TEXT_FIELDS + ("risk_factors", "key_confirmation_points", "elliott_structure")
+ELLIOTT_CANDIDATE_FIELDS = (
+    "label", "pattern", "direction", "current_wave", "wave_state", "completion_state",
+    "targets", "invalidation", "rationale", "waves",
+)
+ELLIOTT_WAVE_FIELDS = ("pivot_time", "price", "wave_label", "wave_status")
 
 
 def call_llm_interpretation(snapshot: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -21,9 +35,26 @@ def call_llm_interpretation(snapshot: dict[str, Any]) -> tuple[dict[str, Any], s
         model=model,
         reasoning={"effort": "medium"},
         instructions=(
-            "You are the optional interpretation layer for Technical Outlook SIMPLE v3. Quant output is immutable and authoritative. "
+            "You are the interpretation layer for Technical Outlook SIMPLE v3. The deterministic engine answers what was calculated; "
+            "you must explain what the combination of signals implies. Quant output is immutable and authoritative. "
+            "Do not paraphrase deterministic labels, dump raw metrics, list every zone, or repeat scenario percentages without explaining why. "
+            "For every block answer: what does the data imply, what is the strongest confirmation or contradiction, and what would materially change the interpretation. "
+            "Explicitly connect Weekly versus Daily structure, structure versus momentum, momentum versus volume, price versus key levels, "
+            "moving-average regime versus Fibonacci positioning, and scenario probabilities versus the structural map. "
+            "Identify at least one meaningful cross-signal agreement or disagreement when evidence supports it. "
+            "The summary field is Technical Synthesis: write 3 to 5 concise sentences covering the dominant condition, strongest confirmation, "
+            "most important contradiction/divergence, nearest structural inflection point, and what would change the view. "
+            "Each block summary should be approximately 2 to 4 analytical sentences. Use exact numbers only when they materially support a conclusion. "
+            "Write all human-readable narrative content in Russian: summary fields, risk factors, confirmation points, Elliott rationale, targets, and invalidation commentary. "
+            "Keep JSON field names and required enum values such as UP/DOWN/NEUTRAL, HIGH/MEDIUM/LOW, and CONFIRMED/DEVELOPING/POTENTIAL/UNRESOLVED unchanged. "
+            "Market Structure: interpret whether Daily confirms, stabilizes, or contradicts Weekly and what structural event matters. "
+            "Elliott: give primary and alternative interpretations, confirmation/invalidation, and relation to key levels and Fibonacci; commentary only. "
+            "Momentum: decide whether momentum is accelerating, exhausting, stabilizing, or reversing; distinguish loss of bearish momentum from bullish confirmation. "
+            "Volume Profile: explain acceptance versus low-volume travel and which node matters for the current setup. "
+            "Key Levels: select only the 1 or 2 most important zones and explain their confluence and implication of acceptance beyond them. "
+            "Scenario Matrix: explain the probability mix through conflicts between structure, momentum, moving averages, volume, key levels, and extension risk. "
             "Never change or invent prices, zones, probability, confidence, triggers, targets, invalidations, Fibonacci anchors, or expected paths. "
-            "Provide concise block summaries and an Elliott primary/alternative interpretation using only exact supplied pivot_time/price points. "
+            "Provide concise interpretation summaries and an Elliott primary/alternative interpretation using only exact supplied pivot_time/price points. "
             "If evidence is insufficient, return UNRESOLVED with an empty waves array. "
             "Return the exact Technical Outlook JSON schema with these top-level fields: " + ", ".join(LLM_FIELDS) + ". "
             "risk_factors and key_confirmation_points are arrays of strings; all *_summary fields and interpretation_difference are strings. "
@@ -118,3 +149,129 @@ def _analogs(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return {field: value.get(field) for field in ("sample_size", "warning", "returns", "drawdown_probabilities")}
+
+
+def validate_llm_output(payload: dict[str, Any], snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Validate the v3 commentary contract without importing the retired tab/model."""
+    if not isinstance(payload, dict):
+        raise ValueError("SIMPLE v3 LLM response must be an object")
+    extra = set(payload).difference(LLM_FIELDS)
+    missing = set(LLM_FIELDS).difference(payload)
+    if extra or missing:
+        raise ValueError(f"Invalid SIMPLE v3 LLM schema; missing={sorted(missing)}, extra={sorted(extra)}")
+    result: dict[str, Any] = {}
+    for field in LLM_TEXT_FIELDS:
+        value = payload[field]
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a string")
+        result[field] = value.strip()
+    for field in ("risk_factors", "key_confirmation_points"):
+        value = payload[field]
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"{field} must be an array of strings")
+        result[field] = [item.strip() for item in value]
+    result["elliott_structure"] = _validate_elliott_structure(payload["elliott_structure"], snapshot)
+    return result
+
+
+def _validate_elliott_structure(value: Any, snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    expected = {"primary", "alternative", "confidence", "current_wave_state"}
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ValueError("elliott_structure must contain exactly primary, alternative, confidence, current_wave_state")
+    confidence = str(value["confidence"]).strip().upper()
+    if confidence not in {"HIGH", "MEDIUM", "LOW"}:
+        confidence = "LOW"
+    if not isinstance(value["current_wave_state"], str):
+        raise ValueError("elliott_structure.current_wave_state must be a string")
+    return {
+        "primary": _validate_elliott_candidate(value["primary"], snapshot),
+        "alternative": _validate_elliott_candidate(value["alternative"], snapshot),
+        "confidence": confidence,
+        "current_wave_state": value["current_wave_state"].strip(),
+    }
+
+
+def _validate_elliott_candidate(value: Any, snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    expected = set(ELLIOTT_CANDIDATE_FIELDS)
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ValueError(f"Elliott candidate must contain exactly {sorted(expected)}")
+    result: dict[str, Any] = {}
+    for field in ELLIOTT_CANDIDATE_FIELDS:
+        if field == "waves":
+            continue
+        raw = value[field]
+        if isinstance(raw, str):
+            result[field] = raw.strip()
+        elif raw is None:
+            result[field] = ""
+        else:
+            # Models occasionally return targets/invalidation as a compact
+            # list/object. Preserve the information while keeping the
+            # persisted schema stable and display-friendly.
+            result[field] = json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+    result["direction"] = _normalize_direction(result["direction"]) or "NEUTRAL"
+    result["wave_state"] = _normalize_wave_state(result["wave_state"]) or "UNRESOLVED"
+    waves = value["waves"]
+    if not isinstance(waves, list) or len(waves) > 12:
+        raise ValueError("Elliott candidate waves must be an array with at most 12 points")
+    result["waves"] = [_validate_wave_point(point, snapshot) for point in waves]
+    return result
+
+
+def _normalize_direction(value: str) -> str | None:
+    normalized = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "UP": "UP", "UPWARD": "UP", "BULL": "UP", "BULLISH": "UP", "LONG": "UP", "POSITIVE": "UP", "1": "UP",
+        "DOWN": "DOWN", "DOWNWARD": "DOWN", "BEAR": "DOWN", "BEARISH": "DOWN", "SHORT": "DOWN", "NEGATIVE": "DOWN", "-1": "DOWN", "_1": "DOWN",
+        "NEUTRAL": "NEUTRAL", "SIDEWAYS": "NEUTRAL", "RANGE": "NEUTRAL", "FLAT": "NEUTRAL", "UNKNOWN": "NEUTRAL", "UNRESOLVED": "NEUTRAL",
+    }
+    return aliases.get(normalized) or "NEUTRAL"
+
+
+def _normalize_wave_state(value: str) -> str | None:
+    normalized = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "CONFIRMED": "CONFIRMED", "CONFIRM": "CONFIRMED",
+        "DEVELOPING": "DEVELOPING", "DEVELOPING_WAVE": "DEVELOPING",
+        "POTENTIAL": "POTENTIAL", "POSSIBLE": "POTENTIAL",
+        "UNRESOLVED": "UNRESOLVED", "UNKNOWN": "UNRESOLVED", "N_A": "UNRESOLVED",
+    }
+    return aliases.get(normalized) or "UNRESOLVED"
+
+
+def _validate_wave_point(value: Any, snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != set(ELLIOTT_WAVE_FIELDS):
+        raise ValueError(f"Elliott wave point must contain exactly {list(ELLIOTT_WAVE_FIELDS)}")
+    if not all(isinstance(value[field], str) for field in ("pivot_time", "wave_label", "wave_status")):
+        raise ValueError("Elliott wave point labels and timestamp must be strings")
+    try:
+        price = float(value["price"])
+    except Exception as exc:
+        raise ValueError("Elliott wave point price must be numeric") from exc
+    if not math.isfinite(price):
+        raise ValueError("Elliott wave point price must be finite")
+    point = {
+        "pivot_time": value["pivot_time"].strip(),
+        "price": price,
+        "wave_label": value["wave_label"].strip(),
+        "wave_status": value["wave_status"].strip(),
+    }
+    if snapshot is not None and not _matches_supplied_pivot(point, snapshot):
+        raise ValueError("Every Elliott wave point must exactly match a supplied weekly/daily pivot")
+    return point
+
+
+def _matches_supplied_pivot(point: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+    target_time = pd.to_datetime(point["pivot_time"], errors="coerce", utc=True)
+    if pd.isna(target_time):
+        return False
+    for key in ("weekly_pivots", "daily_pivots"):
+        for pivot in snapshot.get(key) or []:
+            pivot_time = pd.to_datetime(pivot.get("pivot_time"), errors="coerce", utc=True)
+            try:
+                pivot_price = float(pivot.get("price"))
+            except Exception:
+                continue
+            if pd.notna(pivot_time) and pivot_time == target_time and math.isclose(pivot_price, point["price"], rel_tol=1e-6, abs_tol=1e-6):
+                return True
+    return False
