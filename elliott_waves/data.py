@@ -144,30 +144,52 @@ def load_tradingview_bars(
             raise ElliottDataError(f"TradingView adapter unavailable: {exc}") from exc
         loader = get_ohlcv_data
     interval = timeframe
-    try:
-        frame = loader(spec.provider_symbol, interval=interval, count=5000, force=force)
-    except TypeError:
-        frame = loader(spec.provider_symbol, interval=interval, count=5000)
-    except Exception as exc:
-        raise ElliottDataError(f"TradingView download failed for {spec.provider_symbol}: {exc}") from exc
-    if frame is None or frame.empty:
-        raise ElliottDataError(f"TradingView returned no OHLC for {spec.provider_symbol}")
-    required = {"date", "open", "high", "low", "close"}
-    if not required.issubset(frame.columns):
-        missing = sorted(required.difference(frame.columns))
-        raise ElliottDataError(f"TradingView OHLC missing fields: {missing}")
-    dates = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_localize(None)
-    return _normalized_frame(
-        dates=dates,
-        opens=frame["open"],
-        highs=frame["high"],
-        lows=frame["low"],
-        closes=frame["close"],
-        volumes=frame.get("volume"),
-        timeframe=timeframe,
-        spec=spec,
-        now=pd.Timestamp.now(tz="UTC").tz_localize(None),
-    )
+    symbols = [spec.provider_symbol]
+    # TradingView intermittently returns only the latest few daily candles for
+    # the fully-qualified TVC:GOLD symbol. GOLD is the same TradingView series
+    # and is used only as a data fallback; normalized provenance remains
+    # TVC:GOLD.
+    if spec.provider_symbol == "TVC:GOLD":
+        symbols.append("GOLD")
+    best: pd.DataFrame | None = None
+    errors: list[str] = []
+    minimum = 300 if timeframe == "1D" else 200
+    for symbol in symbols:
+        try:
+            try:
+                frame = loader(symbol, interval=interval, count=5000, force=force)
+            except TypeError:
+                frame = loader(symbol, interval=interval, count=5000)
+        except Exception as exc:
+            errors.append(f"{symbol}: {exc}")
+            continue
+        if frame is None or frame.empty:
+            errors.append(f"{symbol}: empty response")
+            continue
+        required = {"date", "open", "high", "low", "close"}
+        if not required.issubset(frame.columns):
+            errors.append(f"{symbol}: missing {sorted(required.difference(frame.columns))}")
+            continue
+        dates = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_localize(None)
+        normalized = _normalized_frame(
+            dates=dates,
+            opens=frame["open"],
+            highs=frame["high"],
+            lows=frame["low"],
+            closes=frame["close"],
+            volumes=frame.get("volume"),
+            timeframe=timeframe,
+            spec=spec,
+            now=pd.Timestamp.now(tz="UTC").tz_localize(None),
+        )
+        if best is None or len(normalized) > len(best):
+            best = normalized
+        if len(normalized) >= minimum:
+            return normalized
+    if best is not None:
+        return best
+    detail = "; ".join(errors) or "no valid response"
+    raise ElliottDataError(f"TradingView download failed for {spec.provider_symbol}: {detail}")
 
 
 def _normalized_frame(
