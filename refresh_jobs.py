@@ -23,7 +23,11 @@ from treasury_funding_policy import refresh_snapshot as refresh_treasury_funding
 from technical_outlook.config import MODEL_VERSION as TECHNICAL_OUTLOOK_MODEL_VERSION
 from technical_outlook.service import refresh_all_core_assets as refresh_technical_outlook_assets
 from technical_outlook.storage import MANIFEST_PATH as TECHNICAL_OUTLOOK_MANIFEST_PATH, read_manifest as read_technical_outlook_manifest
-from technical_outlook_simple_v3.config import MODEL_VERSION as TECHNICAL_OUTLOOK_SIMPLE_V3_MODEL_VERSION
+from technical_outlook_simple_v3.config import (
+    CONFIG_VERSION as TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG_VERSION,
+    MODEL_VERSION as TECHNICAL_OUTLOOK_SIMPLE_V3_MODEL_VERSION,
+    SR_ENGINE_VERSION as TECHNICAL_OUTLOOK_SIMPLE_V3_SR_ENGINE_VERSION,
+)
 from technical_outlook_simple_v3.service import refresh_all_core_assets as refresh_technical_outlook_simple_v3_assets
 from technical_outlook_simple_v3.storage import (
     MANIFEST_PATH as TECHNICAL_OUTLOOK_SIMPLE_V3_MANIFEST_PATH,
@@ -348,6 +352,8 @@ def run_scheduler() -> None:
         if (
             not TECHNICAL_OUTLOOK_SIMPLE_V3_MANIFEST_PATH.exists()
             or read_technical_outlook_simple_v3_manifest().get("model_version") != TECHNICAL_OUTLOOK_SIMPLE_V3_MODEL_VERSION
+            or read_technical_outlook_simple_v3_manifest().get("config_version") != TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG_VERSION
+            or read_technical_outlook_simple_v3_manifest().get("sr_engine_version") != TECHNICAL_OUTLOOK_SIMPLE_V3_SR_ENGINE_VERSION
         ):
             run_job_safely("technical_outlook_simple_v3_startup", refresh_technical_outlook_simple_v3_assets)
         if not SNAPSHOT_PATH.exists():

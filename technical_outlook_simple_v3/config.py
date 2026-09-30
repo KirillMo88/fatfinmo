@@ -8,8 +8,8 @@ from elliott_waves.config import AssetSpec
 
 UI_NAME = "Technical Outlook v3"
 MODEL_VERSION = "TECHNICAL_OUTLOOK_SIMPLE_V3"
-CONFIG_VERSION = "TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG"
-SR_ENGINE_VERSION = "SR_ENGINE_SIMPLE_V3"
+CONFIG_VERSION = "TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG_V2"
+SR_ENGINE_VERSION = "SR_ENGINE_SIMPLE_V3_V2"
 SCENARIO_ENGINE_VERSION = "SCENARIO_ENGINE_SIMPLE_V3"
 
 CORE_ASSETS: dict[str, AssetSpec] = {
@@ -105,12 +105,12 @@ CONFIG: dict[str, Any] = {
     "clustering": {
         "mad_multiplier": 2.0,
         "weekly": {
-            "base_price_fraction": 0.009,
-            "atr_multiplier": 0.55,
-            "radius_cap_fraction": 0.0125,
+            "base_price_fraction": 0.0135,
+            "atr_multiplier": 0.825,
+            "radius_cap_fraction": 0.01875,
             "min_width_fraction": 0.004,
             "min_width_atr_multiplier": 0.20,
-            "max_total_width_fraction": 0.025,
+            "max_total_width_fraction": 0.0375,
         },
         "daily": {
             "base_price_fraction": 0.004,

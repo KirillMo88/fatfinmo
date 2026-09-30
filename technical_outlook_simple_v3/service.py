@@ -10,7 +10,7 @@ import pandas as pd
 from elliott_waves.config import AssetSpec
 from elliott_waves.data import load_base_bars
 
-from .config import CORE_ASSETS, MODEL_VERSION, yahoo_asset_spec
+from .config import CONFIG_VERSION, CORE_ASSETS, MODEL_VERSION, SR_ENGINE_VERSION, yahoo_asset_spec
 from .engine import TechnicalOutlookSimpleV3Engine
 from .llm import call_llm_interpretation, validate_llm_output
 from .storage import read_chart_bars, read_latest_snapshot, read_manifest, read_settings, write_manifest, write_snapshot
@@ -67,7 +67,13 @@ def refresh_all_core_assets(
                 "stale_reason": f"{type(exc).__name__}: {exc}",
                 "failed_at": pd.Timestamp(when).isoformat(),
             })
-    manifest = {"model_version": MODEL_VERSION, "updated_at": pd.Timestamp(when).isoformat(), "assets": entries}
+    manifest = {
+        "model_version": MODEL_VERSION,
+        "config_version": CONFIG_VERSION,
+        "sr_engine_version": SR_ENGINE_VERSION,
+        "updated_at": pd.Timestamp(when).isoformat(),
+        "assets": entries,
+    }
     write_manifest(manifest)
     return manifest
 
@@ -174,7 +180,13 @@ def _update_manifest(snapshot: dict[str, Any], when: datetime) -> None:
             break
     else:
         entries.append(item)
-    write_manifest({"model_version": MODEL_VERSION, "updated_at": pd.Timestamp(when).isoformat(), "assets": entries})
+    write_manifest({
+        "model_version": MODEL_VERSION,
+        "config_version": CONFIG_VERSION,
+        "sr_engine_version": SR_ENGINE_VERSION,
+        "updated_at": pd.Timestamp(when).isoformat(),
+        "assets": entries,
+    })
 
 
 def _llm_snapshot_id(snapshot: dict[str, Any], when: datetime) -> str:
