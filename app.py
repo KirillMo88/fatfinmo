@@ -35,8 +35,8 @@ from finance_core import (
     extract_ohlcv_frame,
     is_krw_quoted_ticker,
 )
-from fund_flows import FundFlowCache, default_fund_flow_cache_path, get_fund_flow_metrics
-from btc_cycle import merge_btc_mcp_weekly_history
+from fund_flows import get_fund_flow_metrics
+from btc_data import load_btc_etf_flow_history, load_btc_weekly_price
 from market_model import (
     YAHOO_MARKET_TICKERS,
     calculate_confirmations_history,
@@ -2954,7 +2954,6 @@ def _build_liquidity_regime_quality_summary(frame: pd.DataFrame) -> pd.DataFrame
     return pd.DataFrame(rows)
 
 
-BTC_SPOT_ETF_FLOW_TICKERS = ("IBIT", "FBTC", "GBTC", "ARKB", "BITB", "BTCO", "EZBC", "HODL", "BRRR", "BTCW")
 BTC_HALVING_EVENTS = [
     {"date": pd.Timestamp("2016-07-09"), "label": "2016 Halving", "price": 650.0},
     {"date": pd.Timestamp("2020-05-11"), "label": "2020 Halving", "price": 8600.0},
@@ -2972,87 +2971,6 @@ BTC_CYCLE_BOTTOMS = [
 ]
 BTC_CURRENT_CYCLE_TOP_DATE = pd.Timestamp("2025-10-01")
 BTC_CURRENT_CYCLE_TOP_PRICE = 126000.0
-
-
-def render_btc_regime_tab(table_df: pd.DataFrame, market_snapshot: dict) -> None:
-    st.subheader("BTC Regime")
-    btc_price = load_btc_weekly_price()
-    raw, monthly, weekly = read_global_liquidity()
-    liquidity = _build_global_liquidity_regime_frame(_liquidity_prepare_dates(monthly), _liquidity_prepare_dates(weekly))
-    liquidity_latest = _liquidity_latest_row_with_value(liquidity, "global_liquidity_score")
-    btc_row = _btc_alpha_row(table_df)
-    bybit = _btc_bybit_history()
-    etf = _btc_etf_flow_history()
-    snapshot = _build_btc_regime_snapshot(btc_price, liquidity_latest, btc_row, bybit, etf, market_snapshot)
-
-    st.markdown("### BTC Regime Summary")
-    summary_cols = st.columns(4)
-    with summary_cols[0]:
-        render_market_metric("Halving Phase", snapshot["halving_phase"], f"{snapshot['months_since_halving']:.1f}M since halving")
-    with summary_cols[1]:
-        render_market_metric("Cycle Status", snapshot["cycle_bottom_status"], snapshot["bottom_note"])
-    with summary_cols[2]:
-        render_market_metric("Global Liquidity Regime", snapshot["global_liquidity_label"], f"{snapshot['liquidity_direction']} | {snapshot['long_cycle_phase']}")
-    with summary_cols[3]:
-        render_market_metric("Tactical Flow State", snapshot["tactical_flow_state"], snapshot["tactical_note"])
-
-    summary_cols = st.columns(4)
-    with summary_cols[0]:
-        render_market_metric("BTC REGIME", snapshot["final_state"], snapshot["final_note"])
-    with summary_cols[1]:
-        render_market_metric("BTC Structural Macro", _liquidity_fmt_score_state(snapshot["structural_macro"]), "Global M2 13W 40% + DXY 40% + US2Y 20%")
-    with summary_cols[2]:
-        render_market_metric("BTC Forward Macro Risk", f"{_liquidity_fmt_number(snapshot['forward_macro_risk'], 1)} / {snapshot['forward_macro_risk_state']}", "M2 35% + DXY 30% + US2Y 20% + Credit 15%")
-    with summary_cols[3]:
-        render_market_metric("BTC Alpha", _liquidity_fmt_score_state(snapshot["btc_alpha"]), "existing Alpha Engine")
-
-    st.markdown("### BTC Regime Interpretation")
-    render_market_formula("Current interpretation", _btc_interpretation_text(snapshot))
-
-    st.markdown("### BTC Price - Halving Cycle")
-    btc_range = st.radio("BTC chart range", ["3Y", "5Y", "10Y", "MAX"], index=1, horizontal=True, key="btc_regime_price_range")
-    btc_price_chart = _filter_date_range(btc_price, btc_range)
-    btc_x_range = _btc_x_range(btc_price_chart)
-    _render_btc_price_halving_chart(btc_price_chart, liquidity, btc_x_range)
-    _render_btc_etf_flow_intensity_chart(etf, btc_x_range)
-
-    st.markdown("### Structural Matrix")
-    st.dataframe(_btc_halving_liquidity_matrix(snapshot), use_container_width=True, hide_index=True)
-
-    st.markdown("### BTC Macro Regime")
-    market_history = load_market_transition_history("btc-regime-market-transition-history")
-    btc_macro_frame = _build_btc_macro_frame(liquidity, market_snapshot, market_history, btc_x_range)
-    _render_btc_macro_score_chart(btc_macro_frame, "BTCStructuralMacro", "BTC Structural Macro", "#22c55e")
-    _render_btc_macro_score_chart(btc_macro_frame, "BTCForwardMacroRisk", "BTC Forward Macro Risk", "#ef4444")
-    st.markdown("### BTC Trend / Alpha")
-    st.dataframe(_btc_alpha_table(btc_row), use_container_width=True, hide_index=True)
-
-    st.markdown("### BTC Tactical Flows")
-    st.dataframe(_btc_tactical_table(snapshot, etf, bybit), use_container_width=True, hide_index=True)
-
-    st.markdown("### BTC Cycle Bottom Monitor")
-    st.dataframe(_btc_bottom_monitor(snapshot), use_container_width=True, hide_index=True)
-
-    st.markdown("### BTC Mature Cycle Multiples")
-    _render_btc_cycle_multiples_chart()
-    st.markdown("### BTC Cycle Valuation")
-    st.dataframe(_btc_valuation_table(snapshot), use_container_width=True, hide_index=True)
-    st.markdown("### Historical Cycle Table")
-    st.dataframe(_btc_cycle_table(), use_container_width=True, hide_index=True)
-    st.markdown("### Data Quality")
-    st.dataframe(_btc_data_quality_table(btc_price, etf, bybit, liquidity_latest), use_container_width=True, hide_index=True)
-
-
-@st.cache_data(show_spinner=False, ttl=SLOW_REFRESH_SECONDS)
-def load_btc_weekly_price() -> pd.DataFrame:
-    daily = download_completed_ohlcv("BTC-USD", period="max")
-    try:
-        from tradingview_mcp import get_ohlcv_data
-
-        tradingview_weekly = get_ohlcv_data("INDEX:BTCUSD", interval="1W", count=5000)
-    except Exception:
-        tradingview_weekly = pd.DataFrame()
-    return merge_btc_mcp_weekly_history(daily, tradingview_weekly)
 
 
 def _btc_alpha_row(table_df: pd.DataFrame) -> dict[str, Any]:
@@ -3084,72 +3002,6 @@ def _btc_bybit_history() -> pd.DataFrame:
         else:
             out["oi_change_4w_percentile"] = pd.to_numeric(out["oi_change_4w_percentile"], errors="coerce").fillna(computed_percentile)
     return out
-
-
-def _btc_etf_flow_history() -> pd.DataFrame:
-    cache = FundFlowCache(default_fund_flow_cache_path())
-    frames = []
-    for ticker in BTC_SPOT_ETF_FLOW_TICKERS:
-        observations = cache.load_observations(ticker, pd.Timestamp("2024-01-01").date())
-        if not observations:
-            continue
-        frames.append(
-            pd.DataFrame(
-                {
-                    "date": pd.to_datetime([obs.date for obs in observations]),
-                    "ticker": ticker,
-                    "net_flow": [obs.net_flow for obs in observations],
-                    "aum": [obs.aum for obs in observations],
-                }
-            )
-        )
-    if not frames:
-        return pd.DataFrame(
-            columns=[
-                "date",
-                "ETF_Flow_1W",
-                "ETF_Flow_4W",
-                "ETF_Flow_13W",
-                "ETF_Flow_Intensity_4W",
-                "ETF_Flow_3Y_Pctl",
-                "ETF_Flow_13W_Pctl",
-                "ETF_Total_AUM",
-                "ETF_Coverage_Count",
-            ]
-        )
-    daily = pd.concat(frames, ignore_index=True)
-    daily["net_flow"] = pd.to_numeric(daily["net_flow"], errors="coerce")
-    daily["aum"] = pd.to_numeric(daily["aum"], errors="coerce")
-    weekly_by_ticker = (
-        daily.dropna(subset=["date", "net_flow"])
-        .set_index("date")
-        .groupby("ticker")
-        .resample("W-FRI")
-        .agg(net_flow=("net_flow", "sum"), aum=("aum", "last"))
-        .dropna(subset=["net_flow"])
-        .reset_index()
-    )
-    weekly = (
-        weekly_by_ticker.groupby("date")
-        .agg(
-            ETF_Flow_1W=("net_flow", "sum"),
-            ETF_Total_AUM=("aum", "sum"),
-            ETF_Coverage_Count=("ticker", "nunique"),
-        )
-        .sort_index()
-    )
-    weekly["ETF_Flow_4W"] = weekly["ETF_Flow_1W"].rolling(4, min_periods=1).sum()
-    weekly["ETF_Flow_13W"] = weekly["ETF_Flow_1W"].rolling(13, min_periods=1).sum()
-    aum_ref = pd.to_numeric(weekly["ETF_Total_AUM"], errors="coerce").replace(0.0, np.nan)
-    weekly["ETF_Flow_Intensity_4W"] = (weekly["ETF_Flow_4W"] / aum_ref) * 100.0
-    fallback_scale = weekly["ETF_Flow_1W"].abs().rolling(156, min_periods=52).median()
-    fallback_intensity = weekly["ETF_Flow_4W"] / (4.0 * fallback_scale.replace(0.0, np.nan))
-    weekly["ETF_Flow_Intensity_4W"] = weekly["ETF_Flow_Intensity_4W"].where(weekly["ETF_Flow_Intensity_4W"].notna(), fallback_intensity)
-    weekly["ETF_Flow_3Y_Pctl"] = _liquidity_trailing_percentile(weekly["ETF_Flow_Intensity_4W"], 156, 52)
-    weekly["ETF_Flow_13W_Pctl"] = _liquidity_trailing_percentile(weekly["ETF_Flow_13W"], 156, 104)
-    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
-    weekly = weekly[weekly.index <= today]
-    return weekly.reset_index()
 
 
 def _build_btc_regime_snapshot(
@@ -6956,7 +6808,6 @@ def main():
         "Global Macro",
         "CFTC COT",
         "Gold Regime",
-        "BTC Regime",
         "BTC Cycle",
         "Crypto Derivatives",
         "Alpha Engine",
@@ -7239,8 +7090,6 @@ def main():
         render_treasury_fiscal_regime_tab(get_fred_api_key_for_app())
     elif active_view == "Gold Regime":
         render_gold_regime_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), get_fred_api_key_for_app())
-    elif active_view == "BTC Regime":
-        render_btc_regime_tab(table_df.drop(columns=["__row_id__"], errors="ignore"), market_snapshot)
     elif active_view == "BTC Cycle":
         btc_weekly = load_btc_weekly_price()
         try:
@@ -7257,7 +7106,7 @@ def main():
             btc_m2_cycle = pd.DataFrame()
             btc_global_liquidity = pd.DataFrame()
         btc_macro_history = load_market_transition_history("btc-cycle-shared-macro")
-        btc_etf_flow_history = _btc_etf_flow_history()
+        btc_etf_flow_history = load_btc_etf_flow_history()
         render_btc_cycle_tab(
             btc_weekly,
             btc_m2_cycle,
