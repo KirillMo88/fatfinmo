@@ -92,6 +92,23 @@ def render_simple_v3_asset(
 
     interpretation = snapshot.get("llm_interpretation") or {}
     elliott = interpretation.get("elliott_structure") or {}
+
+    st.markdown("### System Summary")
+    st.info(str(snapshot.get("deterministic_narrative") or "System summary unavailable."))
+    st.markdown("### LLM Commentary")
+    if interpretation:
+        st.success(str(interpretation.get("summary") or "LLM summary is empty."))
+        st.dataframe(pd.DataFrame([
+            {"Block": "Market Structure", "Commentary": interpretation.get("market_structure_summary", "")},
+            {"Block": "Elliott", "Commentary": interpretation.get("elliott_summary", "")},
+            {"Block": "Momentum", "Commentary": interpretation.get("momentum_summary", "")},
+            {"Block": "Volume Profile", "Commentary": interpretation.get("volume_profile_summary", "")},
+            {"Block": "Key Levels", "Commentary": interpretation.get("key_levels_summary", "")},
+            {"Block": "Scenario Matrix", "Commentary": interpretation.get("scenario_summary", "")},
+        ]), hide_index=True, use_container_width=True)
+    else:
+        st.caption("Optional LLM commentary is not available. Quant levels and scenarios are complete without it.")
+
     controls = st.columns(4)
     show_primary = controls[0].checkbox("Elliott Primary", value=False, key=f"simple_v3_primary_{ticker}")
     show_alternative = controls[1].checkbox("Elliott Alternative", value=False, key=f"simple_v3_alt_{ticker}")
@@ -147,22 +164,6 @@ def render_simple_v3_asset(
 
     _render_v3_analysis_modules(snapshot, interpretation)
 
-    st.markdown("### System Summary")
-    st.info(str(snapshot.get("deterministic_narrative") or "System summary unavailable."))
-    st.markdown("### LLM Commentary")
-    if interpretation:
-        st.success(str(interpretation.get("summary") or "LLM summary is empty."))
-        st.dataframe(pd.DataFrame([
-            {"Block": "Market Structure", "Commentary": interpretation.get("market_structure_summary", "")},
-            {"Block": "Elliott", "Commentary": interpretation.get("elliott_summary", "")},
-            {"Block": "Momentum", "Commentary": interpretation.get("momentum_summary", "")},
-            {"Block": "Volume Profile", "Commentary": interpretation.get("volume_profile_summary", "")},
-            {"Block": "Key Levels", "Commentary": interpretation.get("key_levels_summary", "")},
-            {"Block": "Scenario Matrix", "Commentary": interpretation.get("scenario_summary", "")},
-        ]), hide_index=True, use_container_width=True)
-    else:
-        st.caption("Optional LLM commentary is not available. Quant levels and scenarios are complete without it.")
-
     st.markdown("### Weekly Key Levels")
     _render_zone_table(snapshot.get("weekly_zones") or [], classes={"HIGH", "MID", "LOW"})
     st.markdown("### Daily Key Levels")
@@ -181,6 +182,7 @@ def render_simple_v3_asset(
     } for item in scenarios]), hide_index=True, use_container_width=True)
     st.markdown("### Expected 6M Path")
     st.markdown(" → ".join(_path_item(item) for item in snapshot.get("weekly_expected_path") or []))
+    _render_v3_forecast_and_confirmation(snapshot)
 
     st.markdown("### Weekly / Daily Momentum")
     weekly = snapshot.get("weekly_momentum_summary") or {}
@@ -260,6 +262,9 @@ def _render_v3_analysis_modules(snapshot: dict[str, Any], interpretation: dict[s
         })
     st.dataframe(pd.DataFrame(volume_rows), hide_index=True, use_container_width=True)
 
+
+
+def _render_v3_forecast_and_confirmation(snapshot: dict[str, Any]) -> None:
     st.markdown("### Forecast Horizons")
     horizons = _v3_horizons(snapshot)
     horizon_cols = st.columns(3)
@@ -271,8 +276,7 @@ def _render_v3_analysis_modules(snapshot: dict[str, Any], interpretation: dict[s
             st.caption(item["explanation"])
 
     st.markdown("### Confirmation / Invalidation")
-    confirmation = _v3_confirmation(snapshot)
-    st.dataframe(pd.DataFrame(confirmation), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(_v3_confirmation(snapshot)), hide_index=True, use_container_width=True)
 
 
 def _v3_structure_row(label: str, structure: Any, moving_average: Any) -> dict[str, Any]:

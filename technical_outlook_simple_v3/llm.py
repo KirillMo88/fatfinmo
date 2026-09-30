@@ -182,9 +182,16 @@ def _validate_elliott_candidate(value: Any, snapshot: dict[str, Any] | None) -> 
     for field in ELLIOTT_CANDIDATE_FIELDS:
         if field == "waves":
             continue
-        if not isinstance(value[field], str):
-            raise ValueError(f"Elliott candidate {field} must be a string")
-        result[field] = value[field].strip()
+        raw = value[field]
+        if isinstance(raw, str):
+            result[field] = raw.strip()
+        elif raw is None:
+            result[field] = ""
+        else:
+            # Models occasionally return targets/invalidation as a compact
+            # list/object. Preserve the information while keeping the
+            # persisted schema stable and display-friendly.
+            result[field] = json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
     if result["direction"] not in {"UP", "DOWN", "NEUTRAL"}:
         raise ValueError("Elliott candidate direction must be UP, DOWN, or NEUTRAL")
     if result["wave_state"] not in {"CONFIRMED", "DEVELOPING", "POTENTIAL", "UNRESOLVED"}:
