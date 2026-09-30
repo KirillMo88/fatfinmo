@@ -24,9 +24,9 @@ CORE_ASSETS: dict[str, AssetSpec] = {
         "Invesco QQQ Trust; OHLCV is not a total-return series.",
     ),
     "GOLD": AssetSpec(
-        "GOLD", "GOLD", "tradingview_mcp", "TVC:GOLD", "commodity", "USD", "USD_per_oz",
-        "TRADINGVIEW_TVC_GOLD", "Etc/UTC", "raw_ohlc", "1D", "TradingView MCP",
-        "TradingView TVC:GOLD; SIMPLE v3 uses GOLD rather than the GLD ETF.",
+        "GOLD", "GOLD", "tradingview_mcp", "OANDA:XAUUSD", "commodity", "USD", "USD_per_oz",
+        "TRADINGVIEW_OANDA_XAUUSD", "Etc/UTC", "raw_ohlc", "1D", "TradingView MCP",
+        "TradingView OANDA:XAUUSD; GOLD uses the OANDA feed with reported volume rather than the GLD ETF.",
     ),
     # Compatibility entry for existing callers. Canonical SIMPLE v3 refreshes
     # use GOLD via CORE_ASSET_KEYS and normalize GLD in the service layer.

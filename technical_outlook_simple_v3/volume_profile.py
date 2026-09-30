@@ -41,6 +41,14 @@ def build_volume_profile(frame: pd.DataFrame, *, timeframe: str) -> dict[str, An
     raw_volume = values["volume"] if "volume" in values.columns else pd.Series(np.nan, index=values.index)
     volumes = pd.to_numeric(raw_volume, errors="coerce")
     valid = lows.notna() & highs.notna() & closes.notna() & volumes.notna() & volumes.gt(0)
+    profile_basis = "reported_volume"
+    if not bool(valid.any()):
+        # TVC:GOLD is a price index and publishes zero volume.  Preserve a
+        # useful deterministic profile by weighting each valid bar equally;
+        # this is a bar-count/range-occupancy proxy, not exchange volume.
+        valid = lows.notna() & highs.notna() & closes.notna()
+        volumes = pd.Series(1.0, index=values.index)
+        profile_basis = "bar_count_proxy"
     if not bool(valid.any()):
         return {**metadata, "status": "NOT_AVAILABLE", "poc": None, "poc_zone": None, "local_peaks": [], "hvns": [], "bins": [], "range": None}
 
@@ -91,6 +99,7 @@ def build_volume_profile(frame: pd.DataFrame, *, timeframe: str) -> dict[str, An
     ]
     return {
         **metadata,
+        "profile_basis": profile_basis,
         "status": "AVAILABLE",
         "poc": float(centers[poc_index]),
         "poc_volume": poc_volume,

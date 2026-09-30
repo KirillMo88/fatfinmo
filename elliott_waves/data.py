@@ -145,11 +145,12 @@ def load_tradingview_bars(
         loader = get_ohlcv_data
     interval = timeframe
     symbols = [spec.provider_symbol]
-    # TradingView intermittently returns only the latest few daily candles for
-    # the fully-qualified TVC:GOLD symbol. GOLD is the same TradingView series
-    # and is used only as a data fallback; normalized provenance remains
-    # TVC:GOLD.
-    if spec.provider_symbol == "TVC:GOLD":
+    # Keep a provider fallback for transient symbol outages. The canonical
+    # GOLD source is OANDA:XAUUSD; TVC:GOLD is only a fallback and normalized
+    # provenance remains the configured OANDA symbol.
+    if spec.provider_symbol == "OANDA:XAUUSD":
+        symbols.append("TVC:GOLD")
+    elif spec.provider_symbol == "TVC:GOLD":
         symbols.append("GOLD")
     best: pd.DataFrame | None = None
     errors: list[str] = []
