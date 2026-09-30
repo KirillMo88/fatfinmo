@@ -9,7 +9,7 @@ from technical_outlook.llm import ELLIOTT_CANDIDATE_FIELDS, LLM_FIELDS, validate
 from .config import CONFIG
 
 
-LLM_SCHEMA_VERSION = "TECHNICAL_OUTLOOK_SIMPLE_V3_LLM_V1"
+LLM_SCHEMA_VERSION = "TECHNICAL_OUTLOOK_SIMPLE_V3_LLM_V2"
 
 
 def call_llm_interpretation(snapshot: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -87,19 +87,31 @@ def _pivots(value: Any, limit: int) -> list[dict[str, Any]]:
 
 def _zones(value: Any, limit: int) -> list[dict[str, Any]]:
     fields = (
-        "zone_id", "low", "high", "center", "role", "confluence_class", "quality_score",
-        "strength_class", "source_families", "distance_pct",
+        "zone_id", "low", "high", "center", "role", "key_point_class", "key_point_score",
+        "pivot_score", "sma_score", "volume_score", "fibonacci_score", "strength_class",
+        "source_families", "distance_pct",
     )
-    items = [item for item in (value if isinstance(value, list) else []) if isinstance(item, dict) and item.get("confluence_class") in {"HIGH", "VERY_HIGH"}]
-    rank = {"HIGH": 1, "VERY_HIGH": 2}
-    items.sort(key=lambda item: (-rank.get(str(item.get("confluence_class")), 0), -float(item.get("quality_score") or 0.0), abs(float(item.get("distance_pct") or 0.0))))
+    items = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        item_class = str(item.get("key_point_class", item.get("confluence_class", "LOW")))
+        if item_class not in {"HIGH", "MID"}:
+            continue
+        items.append(item)
+    rank = {"MID": 1, "HIGH": 2}
+    items.sort(key=lambda item: (
+        -rank.get(str(item.get("key_point_class", item.get("confluence_class"))), 0),
+        -float(item.get("key_point_score", item.get("quality_score") or 0.0) or 0.0),
+        abs(float(item.get("distance_pct") or 0.0)),
+    ))
     return [{field: item.get(field) for field in fields} for item in items[:limit]]
 
 
 def _profile(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    return {field: value.get(field) for field in ("status", "poc", "hvns", "value_area", "lookback_bars", "methodology")}
+    return {field: value.get(field) for field in ("status", "poc", "local_peaks", "lookback_bars", "methodology")}
 
 
 def _analogs(value: Any) -> dict[str, Any]:

@@ -21,11 +21,7 @@ def build_weekly_scenario_matrix(
     weekly_zones: list[dict[str, Any]],
     fibonacci: dict[str, Any],
 ) -> dict[str, Any]:
-    eligible = [
-        zone for zone in weekly_zones
-        if zone.get("confluence_class") in {"HIGH", "VERY_HIGH"}
-        and not zone.get("hidden_by_60pct_filter")
-    ]
+    eligible = [zone for zone in weekly_zones if zone.get("key_point_class", zone.get("confluence_class")) in {"HIGH", "MID"} and not zone.get("hidden_by_60pct_filter")]
     components = _scenario_components(
         current_price=current_price,
         structure=structure,
@@ -275,13 +271,16 @@ def _target_hierarchy(
         extended = targets[0] if targets else None
         structural = targets[1] if len(targets) > 1 else None
     else:
+        # Deterministic fallback order is the configured Weekly extension
+        # order: use 1.272 first, then 1.618 when each is directionally valid.
+        configured_order = {float(ratio): index for index, ratio in enumerate(CONFIG["fibonacci"]["extensions"])}
         valid_extensions = sorted(
             (
                 item for item in extensions
                 if (direction == "UP" and float(item["price"]) > current_price)
                 or (direction == "DOWN" and float(item["price"]) < current_price)
             ),
-            key=lambda item: abs(float(item["price"]) - current_price),
+            key=lambda item: (_extension_order(item.get("ratio"), configured_order), abs(float(item["price"]) - current_price)),
         )
         targets.extend({
             "range": [float(item["price"]), float(item["price"])],
@@ -298,13 +297,20 @@ def _target_hierarchy(
     }
 
 
+def _extension_order(ratio: Any, configured_order: dict[float, int]) -> int:
+    try:
+        return configured_order.get(float(ratio), 999)
+    except (TypeError, ValueError):
+        return 999
+
+
 def _ordered_zones(zones: list[dict[str, Any]], current: float, direction: str) -> list[dict[str, Any]]:
     valid = [zone for zone in zones if (direction == "UP" and float(zone["center"]) > current) or (direction == "DOWN" and float(zone["center"]) < current)]
     return sorted(valid, key=lambda zone: (-_class_rank(zone), abs(float(zone["center"]) - current), -float(zone.get("quality_score") or 0.0), -_strength_rank(zone)))
 
 
 def _class_rank(zone: dict[str, Any]) -> int:
-    return {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "VERY_HIGH": 4}.get(str(zone.get("confluence_class")), 0)
+    return {"LOW": 1, "MID": 2, "MEDIUM": 2, "HIGH": 3, "VERY_HIGH": 4}.get(str(zone.get("key_point_class", zone.get("confluence_class"))), 0)
 
 
 def _strength_rank(zone: dict[str, Any]) -> int:
@@ -316,7 +322,7 @@ def _zone_target(zone: dict[str, Any]) -> dict[str, Any]:
         "range": [float(zone["low"]), float(zone["high"])],
         "source": "WEEKLY_ZONE",
         "zone_id": zone.get("zone_id"),
-        "confluence": zone.get("confluence_class"),
+        "confluence": zone.get("key_point_class", zone.get("confluence_class")),
     }
 
 
