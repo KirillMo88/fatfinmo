@@ -297,16 +297,19 @@ def build_simple_v3_chart(
     fibonacci: dict[str, Any] | None = None,
     enabled_sources: set[str] | None = None,
 ) -> alt.VConcatChart:
+    chart_height = 480  # 50% taller than the original 320px chart.
+    price_width = 700
+    profile_width = 140
     frame = bars.tail(int(CONFIG["chart"]["bars"])).copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True).dt.tz_convert(None)
     frame = frame.dropna(subset=["timestamp"])
     if frame.empty:
-        return alt.Chart(pd.DataFrame({"timestamp": [], "price": []})).mark_point().properties(height=320)
+        return alt.Chart(pd.DataFrame({"timestamp": [], "price": []})).mark_point().properties(width=price_width, height=chart_height)
     enabled = {"SWING_STRUCTURE", "VOLUME_ACCEPTANCE", "FIBONACCI", "MOVING_AVERAGE"} if enabled_sources is None else {str(value).upper() for value in enabled_sources}
     frame["direction"] = np.where(frame["close"] >= frame["open"], "up", "down")
     start, end = frame["timestamp"].min(), frame["timestamp"].max()
     base = alt.Chart(frame).encode(
-        x=alt.X("timestamp:T", axis=alt.Axis(title=None, format="%b %Y", labelFontSize=8)),
+        x=alt.X("timestamp:T", axis=alt.Axis(title=None, format="%b %Y", labelFontSize=12, labelLimit=110)),
         tooltip=[
             alt.Tooltip("timestamp:T", title="Date"), alt.Tooltip("open:Q", format=",.2f"),
             alt.Tooltip("high:Q", format=",.2f"), alt.Tooltip("low:Q", format=",.2f"), alt.Tooltip("close:Q", format=",.2f"),
@@ -361,13 +364,13 @@ def build_simple_v3_chart(
         ))
     layers.extend(_elliott_layers(primary, "#ffffff", start, end))
     layers.extend(_elliott_layers(alternative, "#f97316", start, end))
-    price = alt.layer(*layers).properties(height=320)
+    price = alt.layer(*layers).properties(width=price_width, height=chart_height)
     if "VOLUME_ACCEPTANCE" in enabled and not profile_frame.empty:
-        profile_chart = alt.Chart(profile_frame).mark_bar(color="#d946ef", opacity=0.72).encode(
-            x=alt.X("volume:Q", axis=None),
+        profile_chart = alt.Chart(profile_frame).mark_bar(color="#c026d3", opacity=0.82).encode(
+            x=alt.X("volume:Q", axis=None, scale=alt.Scale(zero=True)),
             y=alt.Y("low:Q", axis=None, scale=alt.Scale(zero=False)),
             y2="high:Q",
-        ).properties(width=115, height=320)
+        ).properties(width=profile_width, height=chart_height)
         top = alt.hconcat(price, profile_chart).resolve_scale(y="shared")
     else:
         top = price
@@ -402,7 +405,7 @@ def _fibonacci_layers(framework: dict[str, Any], start: pd.Timestamp, end: pd.Ti
     }
     colors = {
         "Strategic Fibonacci 0.382": "#7c3aed", "Strategic Fibonacci Zone 0.500–0.618": "#c4b5fd",
-        "Tactical Fibonacci 0.382": "#0f766e", "Tactical Fibonacci Zone 0.500–0.618": "#99f6e4",
+        "Tactical Fibonacci 0.382": "#0f766e", "Tactical Fibonacci Zone 0.500–0.618": "#86efac",
     }
     for key in ("strategic", "tactical"):
         item = framework.get(key) or {}
@@ -430,7 +433,7 @@ def _fibonacci_layers(framework: dict[str, Any], start: pd.Timestamp, end: pd.Ti
                     "high": level["high"],
                     "legend_label": label,
                 }])
-                layers.append(alt.Chart(data).mark_rect(opacity=0.22).encode(
+                layers.append(alt.Chart(data).mark_rect(opacity=0.34).encode(
                     x="x_start:T", x2="x_end:T", y="low:Q", y2="high:Q", color=color,
                 ))
     markers = []
