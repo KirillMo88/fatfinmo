@@ -4,12 +4,13 @@ import importlib
 import hashlib
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from elliott_waves.data import ElliottDataError, _normalized_frame
+from market_data import MarketDataError, _normalized_frame
 from technical_outlook.analytics import calculate_indicators
 from technical_outlook.engine import TechnicalOutlookEngine
 from technical_outlook_simple_v3.config import CONFIG, CORE_ASSETS, swing_config
@@ -159,7 +160,7 @@ def test_unfinished_invalid_yahoo_bar_is_removed_before_validation() -> None:
     assert pd.Timestamp(validated.iloc[0]["timestamp"]) == pd.Timestamp("2026-09-28")
 
     frame.loc[1, "is_closed"] = True
-    with pytest.raises(ElliottDataError):
+    with pytest.raises(MarketDataError):
         _validate_completed_bars(frame, spec)
 
 
@@ -348,6 +349,15 @@ def test_simple_v3_never_imports_elliott_wave_engine() -> None:
         importlib.import_module("technical_outlook_simple_v3.support_resistance"),
     ]
     assert all("ElliottWaveEngine" not in vars(module) for module in modules)
+
+
+def test_legacy_elliott_waves_runtime_is_removed() -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert not (root / "elliott_waves").exists()
+    assert not (root / "elliott_waves_tab.py").exists()
+    assert "Eliot waves" not in (root / "app.py").read_text(encoding="utf-8")
+    assert "elliott_waves" not in (root / "refresh_jobs.py").read_text(encoding="utf-8")
+    assert "persistent/elliott_waves" not in (root / "docker-compose.yml").read_text(encoding="utf-8")
 
 
 def test_engine_snapshot_is_isolated_and_weekly_scenario_has_no_daily_input() -> None:

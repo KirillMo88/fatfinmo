@@ -8,8 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from elliott_waves.config import AssetSpec
-from elliott_waves.data import aggregate_daily_bars, validate_bars
+from market_data import AssetSpec, aggregate_daily_bars, validate_bars
 
 from .config import CONFIG, MODEL_VERSION
 

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from elliott_waves.data import _normalized_frame
+from market_data import _normalized_frame
 from technical_outlook.analytics import (
     build_support_resistance,
     calculate_indicators,

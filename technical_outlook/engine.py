@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from elliott_waves.config import AssetSpec
+from market_data import AssetSpec
 
 from .analytics import (
     build_timeframe_bars,

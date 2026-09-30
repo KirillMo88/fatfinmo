@@ -7,8 +7,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from elliott_waves.config import AssetSpec
-from elliott_waves.data import load_base_bars, load_yahoo_daily, validate_bars
+from market_data import AssetSpec, load_base_bars, load_yahoo_daily, validate_bars
 
 from .config import CONFIG_VERSION, CORE_ASSETS, CORE_ASSET_KEYS, MODEL_VERSION, SR_ENGINE_VERSION, yahoo_asset_spec
 from .engine import TechnicalOutlookSimpleV3Engine

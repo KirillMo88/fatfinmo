@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from elliott_waves.config import AssetSpec
+from market_data import AssetSpec
 
 
 MODEL_VERSION = "TECHNICAL_OUTLOOK_V3"
