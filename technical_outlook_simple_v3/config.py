@@ -137,7 +137,9 @@ CONFIG: dict[str, Any] = {
         },
         "class_thresholds": {"moderate": 2.5, "strong": 5.0, "very_strong": 7.5},
     },
-    "display": {"lower_cutoff_fraction": 0.40, "classes": ["HIGH", "VERY_HIGH"]},
+    # MEDIUM zones are now eligible for chart overlays.  They remain
+    # informational only and are not used as primary scenario targets.
+    "display": {"lower_cutoff_fraction": 0.40, "classes": ["MEDIUM", "HIGH", "VERY_HIGH"]},
     "scenario": {
         "weights": {
             "market_structure": 0.30,

@@ -92,10 +92,20 @@ def render_simple_v3_asset(
 
     interpretation = snapshot.get("llm_interpretation") or {}
     elliott = interpretation.get("elliott_structure") or {}
-    controls = st.columns(3)
+    controls = st.columns(4)
     show_primary = controls[0].checkbox("Elliott Primary", value=False, key=f"simple_v3_primary_{ticker}")
     show_alternative = controls[1].checkbox("Elliott Alternative", value=False, key=f"simple_v3_alt_{ticker}")
     show_levels = controls[2].checkbox("Support / Resistance", value=True, key=f"simple_v3_sr_{ticker}")
+    st.markdown("**Zone sources**")
+    source_controls = st.columns(4)
+    source_filters = {
+        "SWING_STRUCTURE": source_controls[0].checkbox("Swing", value=True, key=f"simple_v3_swing_{ticker}"),
+        "VOLUME_ACCEPTANCE": source_controls[1].checkbox("Volume", value=True, key=f"simple_v3_volume_{ticker}"),
+        "FIBONACCI": source_controls[2].checkbox("Fibonacci", value=True, key=f"simple_v3_fibonacci_{ticker}"),
+        "MOVING_AVERAGE": source_controls[3].checkbox("Moving Average", value=True, key=f"simple_v3_ma_{ticker}"),
+    }
+    st.caption("Chart colors: Swing = orange · Volume = cyan · Fibonacci = purple · Moving Average = yellow · Multi-source = white")
+    enabled_sources = {family for family, enabled_source in source_filters.items() if enabled_source}
     chart_cols = st.columns(2)
     for column, timeframe, title, zone_key in (
         (chart_cols[0], "1W", "WEEKLY", "weekly_zones"),
@@ -109,7 +119,7 @@ def render_simple_v3_asset(
             else:
                 chart = build_simple_v3_chart(
                     bars,
-                    (snapshot.get(zone_key) or []) if show_levels else [],
+                    filter_chart_zones(snapshot.get(zone_key) or [], enabled_sources) if show_levels else [],
                     primary=elliott.get("primary") if show_primary else None,
                     alternative=elliott.get("alternative") if show_alternative else None,
                     timeframe=title,
@@ -133,9 +143,15 @@ def render_simple_v3_asset(
         st.caption("Optional LLM commentary is not available. Quant levels and scenarios are complete without it.")
 
     st.markdown("### Weekly Key Levels")
-    _render_zone_table(snapshot.get("weekly_zones") or [])
+    _render_zone_table(snapshot.get("weekly_zones") or [], classes={"HIGH", "VERY_HIGH"})
+    st.markdown("### Weekly Secondary Levels")
+    st.caption("MEDIUM confluence levels are informational overlays; they do not affect the 6M Scenario Matrix.")
+    _render_zone_table(snapshot.get("weekly_zones") or [], classes={"MEDIUM"})
     st.markdown("### Daily Key Levels")
-    _render_zone_table(snapshot.get("daily_zones") or [])
+    _render_zone_table(snapshot.get("daily_zones") or [], classes={"HIGH", "VERY_HIGH"})
+    st.markdown("### Daily Secondary Levels")
+    st.caption("MEDIUM confluence levels are informational overlays; they do not affect the 6M Scenario Matrix.")
+    _render_zone_table(snapshot.get("daily_zones") or [], classes={"MEDIUM"})
     st.markdown("### Weekly 6M Scenario Matrix")
     scenarios = snapshot.get("weekly_scenario_matrix") or []
     st.dataframe(pd.DataFrame([{
@@ -168,21 +184,81 @@ def render_simple_v3_asset(
     st.divider()
 
 
+SOURCE_COLORS = {
+    "SWING_STRUCTURE": "#f97316",
+    "VOLUME_ACCEPTANCE": "#06b6d4",
+    "FIBONACCI": "#a855f7",
+    "MOVING_AVERAGE": "#facc15",
+    "MULTI_SOURCE": "#f8fafc",
+    "UNKNOWN": "#94a3b8",
+}
+
+SOURCE_LABELS = {
+    "SWING_STRUCTURE": "Swing",
+    "VOLUME_ACCEPTANCE": "Volume",
+    "FIBONACCI": "Fibonacci",
+    "MOVING_AVERAGE": "Moving Average",
+}
+
+
+def zone_source_color(zone: dict[str, Any]) -> str:
+    """Return a source-based overlay color for a chart zone."""
+    families = sorted({str(value).upper() for value in (zone.get("source_families") or []) if value})
+    if len(families) == 1:
+        return SOURCE_COLORS.get(families[0], SOURCE_COLORS["UNKNOWN"])
+    if len(families) > 1:
+        return SOURCE_COLORS["MULTI_SOURCE"]
+    return SOURCE_COLORS["UNKNOWN"]
+
+
+def _zone_source_label(zone: dict[str, Any]) -> str:
+    families = sorted({str(value).upper() for value in (zone.get("source_families") or []) if value})
+    return " + ".join(SOURCE_LABELS.get(family, family) for family in families) or "Unknown"
+
+
 def visible_zone_frame(zones: list[dict[str, Any]], *, timeframe: str) -> pd.DataFrame:
     rows = [
         zone for zone in zones
-        if zone.get("confluence_class") in {"HIGH", "VERY_HIGH"}
-        and not zone.get("hidden_by_60pct_filter")
-        and zone.get("visible_on_chart", True)
+        # All confluence classes are eligible for chart overlays.  The
+        # lower-price safety filter remains independent from confluence.
+        if not zone.get("hidden_by_60pct_filter")
     ]
     if not rows:
         return pd.DataFrame()
     frame = pd.DataFrame(rows)
-    colors = {"SUPPORT": "#00e68a", "RESISTANCE": "#ff4d5a", "TESTING": "#ffd84d"}
-    frame["color"] = frame["role"].map(colors).fillna("#94a3b8")
-    frame["zone_opacity"] = np.where(frame["confluence_class"] == "VERY_HIGH", 0.46, 0.30)
+    frame["color"] = frame.apply(lambda row: zone_source_color(row.to_dict()), axis=1)
+    frame["source_label"] = frame.apply(lambda row: _zone_source_label(row.to_dict()), axis=1)
+    frame["zone_opacity"] = np.select(
+        [
+            frame["confluence_class"].eq("VERY_HIGH"),
+            frame["confluence_class"].eq("HIGH"),
+            frame["confluence_class"].eq("MEDIUM"),
+        ],
+        [0.46, 0.30, 0.18],
+        default=0.18,
+    )
     frame["level_set"] = timeframe
     return frame
+
+
+def filter_chart_zones(
+    zones: list[dict[str, Any]],
+    enabled_sources: set[str],
+) -> list[dict[str, Any]]:
+    """Keep zones that contain at least one enabled source family.
+
+    A zone can contain multiple families; it remains on the chart when any of
+    those families is enabled.  This makes the source switches useful for
+    inspecting the contribution of each family without changing the stored
+    quant snapshot or scenario calculations.
+    """
+    if not enabled_sources:
+        return []
+    selected = {str(value).upper() for value in enabled_sources}
+    return [
+        zone for zone in zones
+        if selected.intersection({str(value).upper() for value in (zone.get("source_families") or [])})
+    ]
 
 
 def build_simple_v3_chart(
@@ -225,6 +301,7 @@ def build_simple_v3_chart(
             tooltip=[
                 alt.Tooltip("role:N", title="Role"), alt.Tooltip("confluence_class:N", title="Confluence"),
                 alt.Tooltip("strength_class:N", title="Strength"), alt.Tooltip("low:Q", format=",.2f"), alt.Tooltip("high:Q", format=",.2f"),
+                alt.Tooltip("source_label:N", title="Sources"),
             ],
         ))
     start, end = frame["timestamp"].min(), frame["timestamp"].max()
@@ -257,10 +334,11 @@ def _elliott_layers(candidate: dict[str, Any] | None, color: str, start: pd.Time
     ]
 
 
-def _render_zone_table(zones: list[dict[str, Any]]) -> None:
-    visible = [zone for zone in zones if zone.get("confluence_class") in {"HIGH", "VERY_HIGH"} and not zone.get("hidden_by_60pct_filter")]
+def _render_zone_table(zones: list[dict[str, Any]], *, classes: set[str]) -> None:
+    visible = [zone for zone in zones if zone.get("confluence_class") in classes and not zone.get("hidden_by_60pct_filter")]
     if not visible:
-        st.caption("No HIGH / VERY_HIGH zones currently qualify.")
+        class_label = " / ".join(sorted(classes))
+        st.caption(f"No {class_label} zones currently qualify.")
         return
     family_names = {
         "SWING_STRUCTURE": "Swing", "VOLUME_ACCEPTANCE": "Volume",
