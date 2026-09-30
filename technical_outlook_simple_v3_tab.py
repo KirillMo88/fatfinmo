@@ -530,3 +530,11 @@ def _percent(value: Any) -> str:
         return f"{float(value):+.2%}"
     except Exception:
         return "N/A"
+
+
+def _finite(value: Any) -> float | None:
+    try:
+        number = float(value)
+        return number if np.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
