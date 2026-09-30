@@ -108,6 +108,41 @@ def test_clustering_is_order_invariant_and_chain_protected() -> None:
     assert ["far"] in signature(first)
 
 
+def test_volume_interval_participates_across_its_full_price_node() -> None:
+    members = [
+        {
+            "member_id": "ma", "price": 656.0, "low": 656.0, "high": 656.0,
+            "family": "MOVING_AVERAGE", "source": "sma100", "weight": 2.0,
+        },
+        {
+            "member_id": "volume", "price": 676.0, "low": 660.0, "high": 692.0,
+            "family": "VOLUME_ACCEPTANCE", "source": "hvn", "weight": 2.5,
+        },
+        {
+            "member_id": "fib", "price": 661.0, "low": 661.0, "high": 661.0,
+            "family": "FIBONACCI", "source": "fib_0.786", "weight": 1.25,
+        },
+        {
+            "member_id": "far", "price": 705.0, "low": 705.0, "high": 705.0,
+            "family": "SWING_STRUCTURE", "source": "weekly_swing", "weight": 3.0,
+        },
+    ]
+    clusters = deterministic_clusters(members, current=765.0, atr=17.5, timeframe="WEEKLY")
+    signature = sorted(sorted(item["member_id"] for item in cluster) for cluster in clusters)
+    assert ["fib", "ma", "volume"] in signature
+    assert ["far"] in signature
+    joined = next(cluster for cluster in clusters if {item["member_id"] for item in cluster} == {"fib", "ma", "volume"})
+    assert len(_family_scores(joined)[0]) == 3
+
+
+def test_interval_aware_weekly_radius_is_bounded_by_zone_width() -> None:
+    weekly = CONFIG["clustering"]["weekly"]
+    assert CONFIG["config_version"] == "TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG_V2"
+    assert weekly["base_price_fraction"] == pytest.approx(0.0135)
+    assert weekly["atr_multiplier"] == pytest.approx(0.825)
+    assert weekly["radius_cap_fraction"] == pytest.approx(weekly["max_total_width_fraction"] / 2.0)
+
+
 def test_asset_specific_and_default_swing_configs() -> None:
     assert swing_config("SPY")["weekly"] == {"atr_multiplier": 2.75, "min_reversal_pct": 0.09}
     assert swing_config("QQQ")["weekly"] == {"atr_multiplier": 2.5, "min_reversal_pct": 0.10}
@@ -282,12 +317,20 @@ def test_engine_snapshot_is_isolated_and_weekly_scenario_has_no_daily_input() ->
         daily, spec, created_at=datetime(2030, 1, 2, tzinfo=timezone.utc),
     )
     assert snapshot["model_version"] == "TECHNICAL_OUTLOOK_SIMPLE_V3"
-    assert snapshot["sr_engine_version"] == "SR_ENGINE_SIMPLE_V3"
+    assert snapshot["config_version"] == "TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG_V2"
+    assert snapshot["sr_engine_version"] == "SR_ENGINE_SIMPLE_V3_V2"
     assert snapshot["scenario_engine_version"] == "SCENARIO_ENGINE_SIMPLE_V3"
     assert "cross_timeframe_support_resistance" not in snapshot
     assert len(charts["1D"]) == 500
     assert len(charts["1W"]) <= 500
     assert all(zone["family_count"] == len(zone["source_families"]) for zone in snapshot["weekly_zones"])
+    volume_members = [
+        member
+        for zone in snapshot["weekly_zones"]
+        for member in zone["source_members"]
+        if member["family"] == "VOLUME_ACCEPTANCE"
+    ]
+    assert volume_members and any(member["high"] > member["low"] for member in volume_members)
     assert sum(snapshot["scenario_probabilities"].values()) == 100
 
 

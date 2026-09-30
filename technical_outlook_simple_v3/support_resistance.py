@@ -62,21 +62,48 @@ def deterministic_clusters(
     atr: float,
     timeframe: str,
 ) -> list[list[dict[str, Any]]]:
-    ordered = sorted(members, key=lambda item: (float(item["price"]), item["family"], item["source"], item["member_id"]))
+    ordered = sorted(members, key=_member_sort_key)
+    points = [item for item in ordered if not _is_interval(item)]
+    intervals = [item for item in ordered if _is_interval(item)]
     clusters: list[list[dict[str, Any]]] = []
-    for item in ordered:
+    # Establish point-based technical clusters first. A broad volume node may
+    # confirm an existing price area, but must never pull a point away from an
+    # otherwise valid Swing/Fibonacci/MA confluence cluster.
+    for item in points:
         eligible: list[tuple[float, int, list[dict[str, Any]]]] = []
         for index, cluster in enumerate(clusters):
             trial = cluster + [item]
-            center = _weighted_median([x["price"] for x in trial], [_center_weight(x) for x in trial])
+            center = _cluster_center(trial)
             radius = _cluster_radius(current, atr, timeframe)
-            if all(abs(float(x["price"]) - center) <= radius + 1e-12 for x in trial):
-                eligible.append((abs(float(item["price"]) - center), index, trial))
+            if all(_distance_to_member(center, member) <= radius + 1e-12 for member in trial):
+                eligible.append((_distance_to_member(center, item), index, trial))
         if not eligible:
             clusters.append([item])
         else:
             _, index, trial = min(eligible, key=lambda value: (value[0], value[1]))
             clusters[index] = _stabilize(trial, current, atr, timeframe)
+
+    # Attach POC/HVN intervals to the strongest compatible point cluster. The
+    # interval participates across its full price node while remaining one
+    # independent Volume Acceptance observation.
+    for item in intervals:
+        eligible_intervals: list[tuple[int, int, float, int, list[dict[str, Any]]]] = []
+        for index, cluster in enumerate(clusters):
+            trial = cluster + [item]
+            center = _cluster_center(trial)
+            radius = _cluster_radius(current, atr, timeframe)
+            if not all(_distance_to_member(center, member) <= radius + 1e-12 for member in trial):
+                continue
+            trial_families = len({str(member["family"]) for member in trial})
+            cluster_families = len({str(member["family"]) for member in cluster})
+            eligible_intervals.append(
+                (-trial_families, -cluster_families, _distance_to_member(_cluster_center(cluster), item), index, trial)
+            )
+        if not eligible_intervals:
+            clusters.append([item])
+        else:
+            _, _, _, index, trial = min(eligible_intervals)
+            clusters[index] = trial
     changed = True
     while changed:
         changed = False
@@ -86,9 +113,9 @@ def deterministic_clusters(
                 trial = _stabilize(joined, current, atr, timeframe)
                 if len(trial) != len(joined):
                     continue
-                center = _weighted_median([x["price"] for x in trial], [_center_weight(x) for x in trial])
+                center = _cluster_center(trial)
                 radius = _cluster_radius(current, atr, timeframe)
-                if all(abs(float(x["price"]) - center) <= radius + 1e-12 for x in trial):
+                if all(_distance_to_member(center, item) <= radius + 1e-12 for item in trial):
                     clusters[left] = trial
                     del clusters[right]
                     changed = True
@@ -96,6 +123,15 @@ def deterministic_clusters(
             if changed:
                 break
     return [sorted(cluster, key=lambda item: (item["price"], item["member_id"])) for cluster in clusters if cluster]
+
+
+def _member_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (*_member_bounds(item), float(item["price"]), item["family"], item["source"], item["member_id"])
+
+
+def _is_interval(item: dict[str, Any]) -> bool:
+    low, high = _member_bounds(item)
+    return high - low > 1e-12
 
 
 def _candidate_members(
@@ -120,16 +156,19 @@ def _candidate_members(
         ))
     if profile.get("status") == "AVAILABLE":
         if profile.get("poc") is not None:
+            poc_zone = profile.get("poc_zone") or {}
             members.append(_member(
                 price=float(profile["poc"]), family="VOLUME_ACCEPTANCE", source="poc",
                 weight=float(weights["poc"]), confirmation_time=as_of,
                 metadata={"profile_start": profile.get("profile_start"), "profile_end": profile.get("profile_end")},
+                low=_finite(poc_zone.get("low")), high=_finite(poc_zone.get("high")),
             ))
         for index, hvn in enumerate(profile.get("hvns") or []):
             members.append(_member(
                 price=float(hvn["center"]), family="VOLUME_ACCEPTANCE", source="hvn",
                 weight=float(weights["hvn"]), confirmation_time=as_of,
                 metadata={"hvn_index": index, **hvn},
+                low=_finite(hvn.get("low")), high=_finite(hvn.get("high")),
             ))
     for item in fibonacci.get("retracements") or []:
         source = str(item["source"])
@@ -155,10 +194,19 @@ def _candidate_members(
 def _member(
     *, price: float, family: str, source: str, weight: float,
     confirmation_time: Any, metadata: dict[str, Any],
+    low: float | None = None, high: float | None = None,
 ) -> dict[str, Any]:
-    identity = {"price": round(price, 8), "family": family, "source": source, "confirmation_time": confirmation_time, "metadata": metadata}
+    lower = float(price if low is None else low)
+    upper = float(price if high is None else high)
+    if lower > upper:
+        lower, upper = upper, lower
+    identity = {
+        "price": round(price, 8), "low": round(lower, 8), "high": round(upper, 8),
+        "family": family, "source": source, "confirmation_time": confirmation_time, "metadata": metadata,
+    }
     return {
         "member_id": _stable_id(identity), "price": float(price), "family": family,
+        "low": lower, "high": upper,
         "source": source, "weight": float(weight), "confirmation_time": confirmation_time,
         "metadata": metadata,
     }
@@ -171,13 +219,13 @@ def _zone_from_members(
 ) -> dict[str, Any] | None:
     if not members:
         return None
-    center = _weighted_median([item["price"] for item in members], [_center_weight(item) for item in members])
+    center = _cluster_center(members)
     radius = _cluster_radius(current, atr, timeframe)
-    members = [item for item in members if abs(float(item["price"]) - center) <= radius + 1e-12]
+    members = [item for item in members if _distance_to_member(center, item) <= radius + 1e-12]
     if not members:
         return None
-    center = _weighted_median([item["price"] for item in members], [_center_weight(item) for item in members])
-    deviations = [abs(float(item["price"]) - center) for item in members]
+    center = _cluster_center(members)
+    deviations = [_distance_to_member(center, item) for item in members]
     mad = _weighted_median(deviations, [_center_weight(item) for item in members])
     cfg = CONFIG["clustering"]["weekly" if timeframe == "WEEKLY" else "daily"]
     min_half = max(center * float(cfg["min_width_fraction"]), atr * float(cfg["min_width_atr_multiplier"])) / 2.0
@@ -263,9 +311,9 @@ def _family_scores(members: list[dict[str, Any]]) -> tuple[dict[str, float], dic
 def _stabilize(members: list[dict[str, Any]], current: float, atr: float, timeframe: str) -> list[dict[str, Any]]:
     result = list(members)
     while result:
-        center = _weighted_median([item["price"] for item in result], [_center_weight(item) for item in result])
+        center = _cluster_center(result)
         radius = _cluster_radius(current, atr, timeframe)
-        retained = [item for item in result if abs(float(item["price"]) - center) <= radius + 1e-12]
+        retained = [item for item in result if _distance_to_member(center, item) <= radius + 1e-12]
         if len(retained) == len(result):
             return retained
         result = retained
@@ -282,6 +330,40 @@ def _cluster_radius(current: float, atr: float, timeframe: str) -> float:
 
 def _center_weight(item: dict[str, Any]) -> float:
     return max(float(item.get("weight") or 0.0), 1e-9)
+
+
+def _member_bounds(item: dict[str, Any]) -> tuple[float, float]:
+    price = float(item["price"])
+    low = _finite(item.get("low"))
+    high = _finite(item.get("high"))
+    lower = price if low is None else low
+    upper = price if high is None else high
+    return (min(lower, upper), max(lower, upper))
+
+
+def _distance_to_member(value: float, item: dict[str, Any]) -> float:
+    low, high = _member_bounds(item)
+    if value < low:
+        return low - value
+    if value > high:
+        return value - high
+    return 0.0
+
+
+def _cluster_center(members: list[dict[str, Any]]) -> float:
+    """Return the deterministic weighted 1-D median of points and price intervals."""
+    prices = [float(item["price"]) for item in members]
+    weights = [_center_weight(item) for item in members]
+    reference = _weighted_median(prices, weights)
+    candidates = {reference}
+    for item in members:
+        low, high = _member_bounds(item)
+        candidates.update((low, float(item["price"]), high))
+
+    def objective(value: float) -> float:
+        return sum(_center_weight(item) * _distance_to_member(value, item) for item in members)
+
+    return float(min(candidates, key=lambda value: (objective(value), abs(value - reference), value)))
 
 
 def _weighted_median(values: list[float], weights: list[float]) -> float:
