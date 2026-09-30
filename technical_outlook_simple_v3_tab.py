@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
@@ -94,18 +95,29 @@ def render_simple_v3_asset(
     elliott = interpretation.get("elliott_structure") or {}
 
     st.markdown("### System Summary")
-    st.info(str(snapshot.get("deterministic_narrative") or "System summary unavailable."))
+    st.info(_format_numeric_text(str(snapshot.get("deterministic_narrative") or "System summary unavailable.")))
     st.markdown("### LLM Commentary")
     if interpretation:
-        st.success(str(interpretation.get("summary") or "LLM summary is empty."))
-        st.dataframe(pd.DataFrame([
-            {"Block": "Market Structure", "Commentary": interpretation.get("market_structure_summary", "")},
-            {"Block": "Elliott", "Commentary": interpretation.get("elliott_summary", "")},
-            {"Block": "Momentum", "Commentary": interpretation.get("momentum_summary", "")},
-            {"Block": "Volume Profile", "Commentary": interpretation.get("volume_profile_summary", "")},
-            {"Block": "Key Levels", "Commentary": interpretation.get("key_levels_summary", "")},
-            {"Block": "Scenario Matrix", "Commentary": interpretation.get("scenario_summary", "")},
-        ]), hide_index=True, use_container_width=True)
+        st.success(_format_numeric_text(str(interpretation.get("summary") or "LLM summary is empty.")))
+        commentary_frame = pd.DataFrame([
+            {"Block": "Market Structure", "Commentary": _format_numeric_text(interpretation.get("market_structure_summary", ""))},
+            {"Block": "Elliott", "Commentary": _format_numeric_text(interpretation.get("elliott_summary", ""))},
+            {"Block": "Momentum", "Commentary": _format_numeric_text(interpretation.get("momentum_summary", ""))},
+            {"Block": "Volume Profile", "Commentary": _format_numeric_text(interpretation.get("volume_profile_summary", ""))},
+            {"Block": "Key Levels", "Commentary": _format_numeric_text(interpretation.get("key_levels_summary", ""))},
+            {"Block": "Scenario Matrix", "Commentary": _format_numeric_text(interpretation.get("scenario_summary", ""))},
+        ])
+        st.dataframe(
+            commentary_frame,
+            column_config={
+                # None means content-sized in Streamlit: the Block column
+                # follows its longest label instead of taking a fixed share.
+                "Block": st.column_config.TextColumn(width=None),
+                "Commentary": st.column_config.TextColumn(width=None),
+            },
+            hide_index=True,
+            use_container_width=True,
+        )
     else:
         st.caption("Optional LLM commentary is not available. Quant levels and scenarios are complete without it.")
 
@@ -172,7 +184,7 @@ def render_simple_v3_asset(
     scenarios = snapshot.get("weekly_scenario_matrix") or []
     st.dataframe(pd.DataFrame([{
         "Scenario": item.get("scenario"),
-        "Probability": f"{item.get('probability', 0)}%",
+        "Probability": f"{_number(item.get('probability'))}%",
         "Confidence": item.get("confidence"),
         "Trigger": item.get("trigger"),
         "Primary Target": _target(item.get("primary_target")),
@@ -197,7 +209,7 @@ def render_simple_v3_asset(
     with st.expander("Historical Analogs"):
         analogs = snapshot.get("historical_analogs") or {}
         st.caption(f"Sample size: {analogs.get('sample_size', 0)} | {analogs.get('warning') or 'Causal sample available'}")
-        st.json({"returns": analogs.get("returns"), "drawdown_probabilities": analogs.get("drawdown_probabilities")})
+        st.json(_round_numeric_values({"returns": analogs.get("returns"), "drawdown_probabilities": analogs.get("drawdown_probabilities")}))
     st.divider()
 
 
@@ -293,12 +305,15 @@ def _v3_structure_row(label: str, structure: Any, moving_average: Any) -> dict[s
 
 def _render_v3_elliott_candidate(title: str, candidate: dict[str, Any], confidence: Any) -> None:
     st.markdown(f"**{title}**")
-    st.markdown(f"**{candidate.get('label', 'AWAITING LLM')}**")
+    st.markdown(f"**{_format_numeric_text(candidate.get('label', 'AWAITING LLM'))}**")
     st.caption(
-        f"Confidence {confidence or 'N/A'} | Current wave {candidate.get('current_wave', 'N/A')} | "
+        f"Confidence {confidence or 'N/A'} | Current wave {_format_numeric_text(candidate.get('current_wave', 'N/A'))} | "
         f"{candidate.get('wave_state', 'UNRESOLVED')}"
     )
-    st.caption(f"Targets: {candidate.get('targets', 'N/A')} | Invalidation: {candidate.get('invalidation', 'N/A')}")
+    st.caption(
+        f"Targets: {_format_numeric_text(candidate.get('targets', 'N/A'))} | "
+        f"Invalidation: {_format_numeric_text(candidate.get('invalidation', 'N/A'))}"
+    )
 
 
 def _v3_horizons(snapshot: dict[str, Any]) -> dict[str, dict[str, str]]:
@@ -322,7 +337,7 @@ def _v3_horizons(snapshot: dict[str, Any]) -> dict[str, dict[str, str]]:
         "six_month": {
             "range": "3–6 months",
             "state": str(scenario_name),
-            "explanation": f"Weekly quantitative priority scenario is {scenario_name}; probability is {probability}%.",
+            "explanation": f"Weekly quantitative priority scenario is {scenario_name}; probability is {_number(probability)}%.",
         },
     }
 
@@ -534,6 +549,32 @@ def _number(value: Any) -> str:
         return f"{float(value):.2f}"
     except Exception:
         return "N/A"
+
+
+_DECIMAL_TOKEN = re.compile(r"(?<![A-Za-z0-9_])([+-]?\d+\.\d+)(?![A-Za-z0-9_])")
+
+
+def _format_numeric_text(value: Any) -> str:
+    """Format decimal tokens embedded in narrative/LLM text to two places."""
+    text = "" if value is None else str(value)
+
+    def replace(match: re.Match[str]) -> str:
+        try:
+            return f"{float(match.group(1)):.2f}"
+        except (TypeError, ValueError):
+            return match.group(1)
+
+    return _DECIMAL_TOKEN.sub(replace, text)
+
+
+def _round_numeric_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _round_numeric_values(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_round_numeric_values(item) for item in value]
+    if isinstance(value, (int, float, np.number)) and not isinstance(value, bool):
+        return round(float(value), 2)
+    return value
 
 
 def _percent(value: Any) -> str:
