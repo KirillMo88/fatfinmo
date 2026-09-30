@@ -99,9 +99,9 @@ def render_simple_v3_asset(
     st.markdown("**Zone sources**")
     source_controls = st.columns(4)
     source_filters = {
-        "SWING_STRUCTURE": source_controls[0].checkbox("Swing", value=True, key=f"simple_v3_swing_{ticker}"),
+        "SWING_STRUCTURE": source_controls[0].checkbox("Swing", value=False, key=f"simple_v3_swing_{ticker}"),
         "VOLUME_ACCEPTANCE": source_controls[1].checkbox("Volume", value=True, key=f"simple_v3_volume_{ticker}"),
-        "FIBONACCI": source_controls[2].checkbox("Fibonacci", value=True, key=f"simple_v3_fibonacci_{ticker}"),
+        "FIBONACCI": source_controls[2].checkbox("Fibonacci", value=False, key=f"simple_v3_fibonacci_{ticker}"),
         "MOVING_AVERAGE": source_controls[3].checkbox("Moving Average", value=True, key=f"simple_v3_ma_{ticker}"),
     }
     st.caption("Swing: orange · Volume: pink · Strategic Fibonacci: violet · Tactical Fibonacci: green · SMA 50 / 100 / 200: blue / teal / red")
@@ -122,7 +122,7 @@ def render_simple_v3_asset(
             key_point_filter = st.radio(
                 "Key Point Zones",
                 CONFIG["display"]["key_point_filter_options"],
-                index=0,
+                index=2,
                 horizontal=True,
                 key=f"simple_v3_key_point_filter_{ticker}_{timeframe}",
             )
