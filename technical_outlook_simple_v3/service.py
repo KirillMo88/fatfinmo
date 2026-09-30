@@ -8,7 +8,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from elliott_waves.config import AssetSpec
-from elliott_waves.data import load_base_bars
+from elliott_waves.data import load_base_bars, load_yahoo_daily, validate_bars
 
 from .config import CONFIG_VERSION, CORE_ASSETS, MODEL_VERSION, SR_ENGINE_VERSION, yahoo_asset_spec
 from .engine import TechnicalOutlookSimpleV3Engine
@@ -143,7 +143,20 @@ def _load(spec: AssetSpec) -> pd.DataFrame:
     # The canonical Technical Outlook refresh runs immediately before SIMPLE
     # v3 in the shared nightly pipeline, so reuse its freshly persisted market
     # data instead of making a second provider request for every core asset.
+    if spec.source_id == "yahoo_finance":
+        # Yahoo's live daily candle can temporarily violate final OHLC
+        # invariants while it is still forming. SIMPLE v3 is completed-bar
+        # only, so exclude it before validation; malformed closed history must
+        # still fail loudly.
+        return _validate_completed_bars(load_yahoo_daily(spec), spec)
     return load_base_bars(spec, force=False)
+
+
+def _validate_completed_bars(frame: pd.DataFrame, spec: AssetSpec) -> pd.DataFrame:
+    if frame is None or frame.empty or "is_closed" not in frame.columns:
+        return validate_bars(frame, spec)
+    closed = frame.loc[frame["is_closed"].fillna(False)].copy()
+    return validate_bars(closed, spec).reset_index(drop=True)
 
 
 def _copy_previous_llm(snapshot: dict[str, Any], previous: dict[str, Any] | None) -> None:
