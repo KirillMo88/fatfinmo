@@ -145,6 +145,8 @@ def render_simple_v3_asset(
                 st.plotly_chart(chart, use_container_width=True, theme=None, config=CHART_CONFIG,
                                 key=f"simple_v3_chart_{ticker}_{timeframe}")
 
+    _render_v3_analysis_modules(snapshot, interpretation)
+
     st.markdown("### System Summary")
     st.info(str(snapshot.get("deterministic_narrative") or "System summary unavailable."))
     st.markdown("### LLM Commentary")
@@ -195,6 +197,167 @@ def render_simple_v3_asset(
         st.caption(f"Sample size: {analogs.get('sample_size', 0)} | {analogs.get('warning') or 'Causal sample available'}")
         st.json({"returns": analogs.get("returns"), "drawdown_probabilities": analogs.get("drawdown_probabilities")})
     st.divider()
+
+
+def _render_v3_analysis_modules(snapshot: dict[str, Any], interpretation: dict[str, Any]) -> None:
+    """Render the diagnostic modules carried forward from the original outlook.
+
+    These are deliberately read-only views over the SIMPLE v3 snapshot.  They
+    do not invoke the legacy model or alter the v3 chart/zone calculations.
+    """
+    st.markdown("### Market Structure")
+    st.dataframe(pd.DataFrame([
+        _v3_structure_row("Weekly", snapshot.get("weekly_structure"), snapshot.get("weekly_moving_averages")),
+        _v3_structure_row("Daily", snapshot.get("daily_structure"), snapshot.get("daily_moving_averages")),
+    ]), hide_index=True, use_container_width=True)
+
+    st.markdown("### Elliott Structure — LLM")
+    elliott = (interpretation or {}).get("elliott_structure") or {}
+    elliott_cols = st.columns(2)
+    with elliott_cols[0]:
+        _render_v3_elliott_candidate("PRIMARY COUNT", elliott.get("primary") or {}, elliott.get("confidence"))
+    with elliott_cols[1]:
+        _render_v3_elliott_candidate("ALTERNATIVE COUNT", elliott.get("alternative") or {}, elliott.get("confidence"))
+    st.caption(f"Source: LLM | Current wave state: {elliott.get('current_wave_state', 'AWAITING LLM')}")
+
+    st.markdown("### Momentum")
+    weekly = snapshot.get("weekly_momentum_summary") or snapshot.get("weekly_indicators") or {}
+    daily = snapshot.get("daily_momentum_summary") or snapshot.get("daily_indicators") or {}
+    st.dataframe(pd.DataFrame([
+        {"Metric": "RSI14", "Weekly": _number(weekly.get("rsi14")), "Daily": _number(daily.get("rsi14")), "Interpretation": daily.get("rsi_regime")},
+        {"Metric": "MACD", "Weekly": _number(weekly.get("macd")), "Daily": _number(daily.get("macd")), "Interpretation": f"{daily.get('macd_zero_state')} / {daily.get('macd_histogram')}"},
+        {"Metric": "ROC12", "Weekly": _number(weekly.get("roc12")), "Daily": _number(daily.get("roc12")), "Interpretation": daily.get("roc_state")},
+        {"Metric": "PPO200 / Extension", "Weekly": _number(weekly.get("extension200")), "Daily": _number(daily.get("extension200")), "Interpretation": daily.get("extension_state")},
+    ]), hide_index=True, use_container_width=True)
+    divergences = snapshot.get("divergences") or []
+    st.caption("Detected Divergences")
+    if divergences:
+        st.dataframe(pd.DataFrame([
+            {"Type": item.get("type"), "Timeframe": item.get("timeframe"),
+             "Status": "ACTIVE" if item.get("active") else "INACTIVE", "Magnitude": item.get("magnitude")}
+            for item in divergences
+        ]), hide_index=True, use_container_width=True)
+    else:
+        st.caption("No structural RSI/MACD divergence detected.")
+
+    st.markdown("### Volume / Volume Profile")
+    volume_rows = []
+    for label, state_key, profile_key in (
+        ("Weekly", "weekly_volume_state", "weekly_volume_profile"),
+        ("Daily", "daily_volume_state", "daily_volume_profile"),
+    ):
+        state = snapshot.get(state_key) or {}
+        profile = snapshot.get(profile_key) or {}
+        volume_rows.append({
+            "Timeframe": label,
+            "Volume Trend": state.get("trend"),
+            "Event": state.get("event"),
+            "Current / Average": _number(state.get("current_vs_average")),
+            "POC": _number(profile.get("poc")),
+            "Nearest HVN": _nearest_v3_profile(profile.get("hvns") or profile.get("local_peaks"), snapshot.get("price")),
+            "Nearest LVN": "N/A",
+            "Value Area": _profile_range(profile.get("poc_zone") or profile.get("range")),
+        })
+    st.dataframe(pd.DataFrame(volume_rows), hide_index=True, use_container_width=True)
+
+    st.markdown("### Forecast Horizons")
+    horizons = _v3_horizons(snapshot)
+    horizon_cols = st.columns(3)
+    for column, key, title in zip(horizon_cols, ("short_term", "medium_term", "six_month"), ("SHORT TERM", "MEDIUM TERM", "6M OUTLOOK")):
+        item = horizons[key]
+        with column:
+            st.markdown(f"**{title} — {item['range']}**")
+            st.markdown(f"**{item['state']}**")
+            st.caption(item["explanation"])
+
+    st.markdown("### Confirmation / Invalidation")
+    confirmation = _v3_confirmation(snapshot)
+    st.dataframe(pd.DataFrame(confirmation), hide_index=True, use_container_width=True)
+
+
+def _v3_structure_row(label: str, structure: Any, moving_average: Any) -> dict[str, Any]:
+    structure = structure if isinstance(structure, dict) else {}
+    moving_average = moving_average if isinstance(moving_average, dict) else {}
+    return {
+        "Timeframe": label,
+        "State": structure.get("state", "N/A"),
+        "Swings": structure.get("sequence", "N/A"),
+        "MA Structure": moving_average.get("ordering", "N/A"),
+        "Explanation": structure.get("explanation", "N/A"),
+    }
+
+
+def _render_v3_elliott_candidate(title: str, candidate: dict[str, Any], confidence: Any) -> None:
+    st.markdown(f"**{title}**")
+    st.markdown(f"**{candidate.get('label', 'AWAITING LLM')}**")
+    st.caption(
+        f"Confidence {confidence or 'N/A'} | Current wave {candidate.get('current_wave', 'N/A')} | "
+        f"{candidate.get('wave_state', 'UNRESOLVED')}"
+    )
+    st.caption(f"Targets: {candidate.get('targets', 'N/A')} | Invalidation: {candidate.get('invalidation', 'N/A')}")
+
+
+def _v3_horizons(snapshot: dict[str, Any]) -> dict[str, dict[str, str]]:
+    daily = snapshot.get("daily_structure") or {}
+    daily_momentum = snapshot.get("daily_momentum_summary") or {}
+    scenarios = snapshot.get("weekly_scenario_matrix") or []
+    dominant = max(scenarios, key=lambda item: float(item.get("probability") or 0.0), default={})
+    probability = dominant.get("probability", "N/A")
+    scenario_name = dominant.get("scenario", "N/A")
+    return {
+        "short_term": {
+            "range": "1–4 weeks",
+            "state": str(daily_momentum.get("classification", "N/A")),
+            "explanation": f"Daily momentum is {daily_momentum.get('classification', 'N/A')} and {daily_momentum.get('trajectory', 'N/A')}.",
+        },
+        "medium_term": {
+            "range": "1–3 months",
+            "state": str(daily.get("state", "N/A")),
+            "explanation": f"Daily market structure is {daily.get('state', 'N/A')} ({daily.get('sequence', 'N/A')}).",
+        },
+        "six_month": {
+            "range": "3–6 months",
+            "state": str(scenario_name),
+            "explanation": f"Weekly quantitative priority scenario is {scenario_name}; probability is {probability}%.",
+        },
+    }
+
+
+def _v3_confirmation(snapshot: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for item in snapshot.get("weekly_scenario_matrix") or []:
+        scenario = str(item.get("scenario", "Scenario"))
+        trigger = item.get("trigger")
+        invalidation = item.get("invalidation")
+        if trigger:
+            rows.append({"event": str(trigger), "interpretation": f"{scenario} scenario confirmed"})
+        if invalidation:
+            rows.append({"event": str(invalidation), "interpretation": f"{scenario} scenario invalidated"})
+    return rows or [{"event": "N/A", "interpretation": "No scenario confirmation events available."}]
+
+
+def _nearest_v3_profile(values: Any, current: Any) -> str:
+    current_value = _finite(current)
+    candidates: list[float] = []
+    for value in values if isinstance(values, list) else []:
+        raw = value.get("center") if isinstance(value, dict) else value
+        number = _finite(raw)
+        if number is not None:
+            candidates.append(number)
+    if not candidates:
+        return "N/A"
+    selected = min(candidates, key=lambda item: abs(item - current_value)) if current_value is not None else candidates[0]
+    return _number(selected)
+
+
+def _profile_range(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "N/A"
+    low = value.get("low")
+    high = value.get("high")
+    if _finite(low) is None or _finite(high) is None:
+        return "N/A"
+    return f"{_number(low)}–{_number(high)}"
 
 
 SOURCE_COLORS = {
