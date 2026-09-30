@@ -53,6 +53,9 @@ class TechnicalOutlookSimpleV3Engine:
         weekly = calculate_indicators(build_timeframe_bars(daily, "1W", spec))
         if daily.empty or weekly.empty:
             raise ValueError(f"{spec.display_name}: insufficient Weekly/Daily history")
+        chart_bars = int(CONFIG["chart"]["bars"])
+        daily = daily.tail(chart_bars).reset_index(drop=True)
+        weekly = weekly.tail(chart_bars).reset_index(drop=True)
 
         configured = swing_config(spec.display_name)
         weekly_cfg = configured["weekly"]
@@ -79,8 +82,8 @@ class TechnicalOutlookSimpleV3Engine:
         daily_volume_state = volume_state(daily)
         weekly_profile = build_volume_profile(weekly, timeframe="WEEKLY")
         daily_profile = build_volume_profile(daily, timeframe="DAILY")
-        weekly_fibonacci = active_fibonacci_framework(weekly_pivots, timeframe="WEEKLY")
-        daily_fibonacci = active_fibonacci_framework(daily_pivots, timeframe="DAILY")
+        weekly_fibonacci = active_fibonacci_framework(weekly_pivots, timeframe="WEEKLY", frame=weekly)
+        daily_fibonacci = active_fibonacci_framework(daily_pivots, timeframe="DAILY", frame=daily)
         as_of = pd.Timestamp(daily.iloc[-1]["timestamp"]).isoformat()
         price = float(daily.iloc[-1]["close"])
         weekly_zones = build_support_resistance(
@@ -176,8 +179,14 @@ class TechnicalOutlookSimpleV3Engine:
             "data_version": version,
             "data_status": "CURRENT",
             "stale_reason": None,
+            "history_window": {
+                "bars": chart_bars,
+                "weekly_available": int(len(weekly)),
+                "daily_available": int(len(daily)),
+                "weekly_insufficient": bool(len(weekly) < chart_bars),
+                "daily_insufficient": bool(len(daily) < chart_bars),
+            },
         }
-        chart_bars = int(CONFIG["chart"]["bars"])
         charts = {"1W": _chart_frame(weekly, chart_bars), "1D": _chart_frame(daily, chart_bars)}
         return payload, charts
 

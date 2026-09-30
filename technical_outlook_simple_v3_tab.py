@@ -9,6 +9,7 @@ import streamlit as st
 
 from technical_outlook_simple_v3.config import CONFIG, CORE_ASSETS
 from technical_outlook_simple_v3.service import analyze_requested_asset, run_llm_now
+from technical_outlook_simple_v3.volume_profile import build_volume_profile
 from technical_outlook_simple_v3.storage import (
     read_chart_bars,
     read_latest_snapshot,
@@ -21,8 +22,8 @@ from technical_outlook_simple_v3.storage import (
 def render_technical_outlook_simple_v3_tab(available_tickers: list[str] | None = None) -> None:
     st.markdown("## Technical Outlook v3")
     st.caption(
-        "SIMPLE v3: independent Weekly strategic and Daily tactical analysis. Confluence is strict family count; "
-        "the 6M Scenario Matrix uses Weekly Quant evidence only."
+        "SIMPLE v3: independent Weekly strategic and Daily tactical analysis. Key Point classes use capped "
+        "family scores (HIGH / MID / LOW); the 6M Scenario Matrix uses Weekly Quant evidence only."
     )
     settings = read_settings()
     enabled = st.toggle(
@@ -106,6 +107,7 @@ def render_simple_v3_asset(
     }
     st.caption("Chart colors: Swing = orange · Volume = cyan · Fibonacci = purple · Moving Average = yellow · Multi-source = white")
     enabled_sources = {family for family, enabled_source in source_filters.items() if enabled_source}
+    history_window = snapshot.get("history_window") or {}
     chart_cols = st.columns(2)
     for column, timeframe, title, zone_key in (
         (chart_cols[0], "1W", "WEEKLY", "weekly_zones"),
@@ -114,6 +116,17 @@ def render_simple_v3_asset(
         bars = read_chart_bars(ticker, str(snapshot.get("snapshot_id")), timeframe)
         with column:
             st.markdown(f"#### {title}")
+            available_bars = history_window.get("weekly_available" if timeframe == "1W" else "daily_available")
+            insufficient = history_window.get("weekly_insufficient" if timeframe == "1W" else "daily_insufficient")
+            if insufficient:
+                st.caption(f"Fixed window: {available_bars or 0} completed bars available (less than 300).")
+            key_point_filter = st.radio(
+                "Key Point Zones",
+                CONFIG["display"]["key_point_filter_options"],
+                index=0,
+                horizontal=True,
+                key=f"simple_v3_key_point_filter_{ticker}_{timeframe}",
+            )
             if bars.empty:
                 st.info("Chart data unavailable.")
             else:
@@ -123,6 +136,11 @@ def render_simple_v3_asset(
                     primary=elliott.get("primary") if show_primary else None,
                     alternative=elliott.get("alternative") if show_alternative else None,
                     timeframe=title,
+                    key_point_filter=key_point_filter,
+                    pivots=snapshot.get("weekly_pivots" if timeframe == "1W" else "daily_pivots") or [],
+                    profile=snapshot.get("weekly_volume_profile" if timeframe == "1W" else "daily_volume_profile") or {},
+                    fibonacci=snapshot.get("weekly_fibonacci_framework" if timeframe == "1W" else "daily_fibonacci_framework") or {},
+                    enabled_sources=enabled_sources,
                 )
                 st.altair_chart(chart, use_container_width=True)
 
@@ -143,15 +161,9 @@ def render_simple_v3_asset(
         st.caption("Optional LLM commentary is not available. Quant levels and scenarios are complete without it.")
 
     st.markdown("### Weekly Key Levels")
-    _render_zone_table(snapshot.get("weekly_zones") or [], classes={"HIGH", "VERY_HIGH"})
-    st.markdown("### Weekly Secondary Levels")
-    st.caption("MEDIUM confluence levels are informational overlays; they do not affect the 6M Scenario Matrix.")
-    _render_zone_table(snapshot.get("weekly_zones") or [], classes={"MEDIUM"})
+    _render_zone_table(snapshot.get("weekly_zones") or [], classes={"HIGH", "MID", "LOW"})
     st.markdown("### Daily Key Levels")
-    _render_zone_table(snapshot.get("daily_zones") or [], classes={"HIGH", "VERY_HIGH"})
-    st.markdown("### Daily Secondary Levels")
-    st.caption("MEDIUM confluence levels are informational overlays; they do not affect the 6M Scenario Matrix.")
-    _render_zone_table(snapshot.get("daily_zones") or [], classes={"MEDIUM"})
+    _render_zone_table(snapshot.get("daily_zones") or [], classes={"HIGH", "MID", "LOW"})
     st.markdown("### Weekly 6M Scenario Matrix")
     scenarios = snapshot.get("weekly_scenario_matrix") or []
     st.dataframe(pd.DataFrame([{
@@ -216,29 +228,40 @@ def _zone_source_label(zone: dict[str, Any]) -> str:
     return " + ".join(SOURCE_LABELS.get(family, family) for family in families) or "Unknown"
 
 
-def visible_zone_frame(zones: list[dict[str, Any]], *, timeframe: str) -> pd.DataFrame:
+def visible_zone_frame(zones: list[dict[str, Any]], *, timeframe: str, key_point_filter: str = "ALL") -> pd.DataFrame:
     rows = [
         zone for zone in zones
-        # All confluence classes are eligible for chart overlays.  The
-        # lower-price safety filter remains independent from confluence.
-        if not zone.get("hidden_by_60pct_filter")
+        if not zone.get("hidden_by_60pct_filter") and _key_point_zone_visible(zone, key_point_filter)
     ]
     if not rows:
         return pd.DataFrame()
     frame = pd.DataFrame(rows)
     frame["color"] = frame.apply(lambda row: zone_source_color(row.to_dict()), axis=1)
     frame["source_label"] = frame.apply(lambda row: _zone_source_label(row.to_dict()), axis=1)
+    frame["key_point_class"] = frame.get("key_point_class", frame.get("confluence_class", "LOW"))
     frame["zone_opacity"] = np.select(
         [
-            frame["confluence_class"].eq("VERY_HIGH"),
-            frame["confluence_class"].eq("HIGH"),
-            frame["confluence_class"].eq("MEDIUM"),
+            frame["key_point_class"].eq("HIGH"),
+            frame["key_point_class"].eq("MID"),
+            frame["key_point_class"].eq("MEDIUM"),
         ],
-        [0.46, 0.30, 0.18],
-        default=0.18,
+        [0.50, 0.34, 0.34],
+        default=0.24,
     )
     frame["level_set"] = timeframe
     return frame
+
+
+def _key_point_zone_visible(zone: dict[str, Any], key_point_filter: str) -> bool:
+    if str(key_point_filter).upper() == "OFF":
+        return False
+    score = float(zone.get("key_point_score", zone.get("total_score", zone.get("quality_score", 0.0))) or 0.0)
+    selected = str(key_point_filter).upper()
+    if selected == "HIGH":
+        return score > 150.0
+    if selected in {"HIGH + MID", "HIGH+MID"}:
+        return score >= 75.0
+    return True
 
 
 def filter_chart_zones(
@@ -268,11 +291,20 @@ def build_simple_v3_chart(
     primary: dict[str, Any] | None,
     alternative: dict[str, Any] | None,
     timeframe: str,
+    key_point_filter: str = "ALL",
+    pivots: list[dict[str, Any]] | None = None,
+    profile: dict[str, Any] | None = None,
+    fibonacci: dict[str, Any] | None = None,
+    enabled_sources: set[str] | None = None,
 ) -> alt.VConcatChart:
     frame = bars.tail(int(CONFIG["chart"]["bars"])).copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True).dt.tz_convert(None)
     frame = frame.dropna(subset=["timestamp"])
+    if frame.empty:
+        return alt.Chart(pd.DataFrame({"timestamp": [], "price": []})).mark_point().properties(height=320)
+    enabled = {"SWING_STRUCTURE", "VOLUME_ACCEPTANCE", "FIBONACCI", "MOVING_AVERAGE"} if enabled_sources is None else {str(value).upper() for value in enabled_sources}
     frame["direction"] = np.where(frame["close"] >= frame["open"], "up", "down")
+    start, end = frame["timestamp"].min(), frame["timestamp"].max()
     base = alt.Chart(frame).encode(
         x=alt.X("timestamp:T", axis=alt.Axis(title=None, format="%b %Y", labelFontSize=8)),
         tooltip=[
@@ -289,10 +321,33 @@ def build_simple_v3_chart(
         color=alt.Color("direction:N", scale=alt.Scale(domain=["up", "down"], range=["#22c55e", "#ef4444"]), legend=None),
     )
     layers: list[Any] = [wick, body]
-    for name, color in {"sma50": "#f59e0b", "sma100": "#14b8a6", "sma200": "#60a5fa"}.items():
-        if name in frame and frame[name].notna().any():
+    for name, color in {"sma50": "#2563eb", "sma100": "#14b8a6", "sma200": "#ef4444"}.items():
+        if "MOVING_AVERAGE" in enabled and name in frame and frame[name].notna().any():
             layers.append(base.mark_line(color=color, strokeWidth=1.5).encode(y=alt.Y(f"{name}:Q", scale=alt.Scale(zero=False))))
-    zone_frame = visible_zone_frame(zones, timeframe=timeframe)
+
+    if "SWING_STRUCTURE" in enabled:
+        swing_frame = _pivot_frame(pivots or [], start, end)
+        if not swing_frame.empty:
+            tolerance = _chart_tolerance(frame, timeframe)
+            swing_frame["zone_low"] = swing_frame["price"] - tolerance
+            swing_frame["zone_high"] = swing_frame["price"] + tolerance
+            swing_frame["x_start"], swing_frame["x_end"] = start, end
+            layers.append(alt.Chart(swing_frame).mark_rect(color="#f59e0b", opacity=0.16).encode(x="x_start:T", x2="x_end:T", y="zone_low:Q", y2="zone_high:Q"))
+            layers.append(alt.Chart(swing_frame).mark_point(color="#f59e0b", filled=True, size=42).encode(x="timestamp:T", y="price:Q", tooltip=[alt.Tooltip("timestamp:T", title="Pivot"), alt.Tooltip("price:Q", format=",.2f"), alt.Tooltip("kind:N", title="Type")]))
+
+    active_profile = profile if profile and profile.get("bins") else build_volume_profile(frame, timeframe=timeframe)
+    profile_frame = pd.DataFrame(active_profile.get("bins") or [])
+    if "VOLUME_ACCEPTANCE" in enabled and active_profile.get("status") == "AVAILABLE":
+        if active_profile.get("poc") is not None:
+            layers.append(alt.Chart(pd.DataFrame([{ "price": active_profile["poc"] }])).mark_rule(color="#111827", strokeWidth=2).encode(y="price:Q"))
+        peak_frame = pd.DataFrame(active_profile.get("local_peaks") or [])
+        if not peak_frame.empty:
+            layers.append(alt.Chart(peak_frame).mark_rule(color="#6b7280", strokeDash=[5, 4], strokeWidth=1.4).encode(y="center:Q", tooltip=[alt.Tooltip("center:Q", format=",.2f"), alt.Tooltip("relative_volume:Q", format=".2f")]))
+
+    if "FIBONACCI" in enabled:
+        layers.extend(_fibonacci_layers(fibonacci or {}, start, end))
+
+    zone_frame = visible_zone_frame(zones, timeframe=timeframe, key_point_filter=key_point_filter)
     if not zone_frame.empty:
         layers.append(alt.Chart(zone_frame).mark_rect().encode(
             y="low:Q", y2="high:Q",
@@ -304,15 +359,95 @@ def build_simple_v3_chart(
                 alt.Tooltip("source_label:N", title="Sources"),
             ],
         ))
-    start, end = frame["timestamp"].min(), frame["timestamp"].max()
     layers.extend(_elliott_layers(primary, "#ffffff", start, end))
     layers.extend(_elliott_layers(alternative, "#f97316", start, end))
     price = alt.layer(*layers).properties(height=320)
-    indicator = alt.Chart(frame).mark_line(color="#a78bfa").encode(
-        x=alt.X("timestamp:T", axis=alt.Axis(title=None)), y=alt.Y("rsi14:Q", title="RSI")
-    ).properties(height=70)
+    if "VOLUME_ACCEPTANCE" in enabled and not profile_frame.empty:
+        profile_chart = alt.Chart(profile_frame).mark_bar(color="#d946ef", opacity=0.72).encode(
+            x=alt.X("volume:Q", axis=None),
+            y=alt.Y("low:Q", axis=None, scale=alt.Scale(zero=False)),
+            y2="high:Q",
+        ).properties(width=115, height=320)
+        top = alt.hconcat(price, profile_chart).resolve_scale(y="shared")
+    else:
+        top = price
     # Deliberately no .interactive(), interval selection, bind="scales", or range selector.
-    return alt.vconcat(price, indicator, spacing=3).resolve_scale(x="shared")
+    return top
+
+
+def _chart_tolerance(frame: pd.DataFrame, timeframe: str) -> float:
+    current = float(frame.iloc[-1]["close"])
+    atr = _finite(frame.iloc[-1].get("atr14")) or current * (0.04 if timeframe == "WEEKLY" else 0.02)
+    cfg = CONFIG["clustering"]["weekly" if timeframe == "WEEKLY" else "daily"]
+    return min(max(current * float(cfg["base_price_fraction"]), atr * float(cfg["atr_multiplier"])), current * float(cfg["radius_cap_fraction"]))
+
+
+def _pivot_frame(pivots: list[dict[str, Any]], start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    rows = [{"timestamp": item.get("pivot_time"), "price": item.get("price"), "kind": item.get("kind"), "status": item.get("status")} for item in pivots if item.get("status") == "CONFIRMED"]
+    if not rows:
+        return pd.DataFrame()
+    frame = pd.DataFrame(rows)
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True).dt.tz_convert(None)
+    frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
+    return frame.dropna(subset=["timestamp", "price"]).loc[lambda value: value["timestamp"].between(start, end, inclusive="both")]
+
+
+def _fibonacci_layers(framework: dict[str, Any], start: pd.Timestamp, end: pd.Timestamp) -> list[Any]:
+    layers: list[Any] = []
+    labels = {
+        ("STRATEGIC", "0.382"): "Strategic Fibonacci 0.382",
+        ("STRATEGIC", "0.500_0.618"): "Strategic Fibonacci Zone 0.500–0.618",
+        ("TACTICAL", "0.382"): "Tactical Fibonacci 0.382",
+        ("TACTICAL", "0.500_0.618"): "Tactical Fibonacci Zone 0.500–0.618",
+    }
+    colors = {
+        "Strategic Fibonacci 0.382": "#7c3aed", "Strategic Fibonacci Zone 0.500–0.618": "#c4b5fd",
+        "Tactical Fibonacci 0.382": "#0f766e", "Tactical Fibonacci Zone 0.500–0.618": "#99f6e4",
+    }
+    for key in ("strategic", "tactical"):
+        item = framework.get(key) or {}
+        seen_types: set[str] = set()
+        for level in item.get("levels") or []:
+            label = labels.get((str(key).upper(), str(level.get("type"))))
+            if not label:
+                continue
+            if str(level.get("type")) in seen_types:
+                continue
+            seen_types.add(str(level.get("type")))
+            color = alt.Color(
+                "legend_label:N",
+                scale=alt.Scale(domain=list(colors), range=list(colors.values())),
+                title="Fibonacci",
+            )
+            if level.get("type") == "0.382":
+                data = pd.DataFrame([{"price": level["price"], "legend_label": label}])
+                layers.append(alt.Chart(data).mark_rule(strokeDash=[7, 4], strokeWidth=2).encode(y="price:Q", color=color))
+            else:
+                data = pd.DataFrame([{
+                    "x_start": start,
+                    "x_end": end,
+                    "low": level["low"],
+                    "high": level["high"],
+                    "legend_label": label,
+                }])
+                layers.append(alt.Chart(data).mark_rect(opacity=0.22).encode(
+                    x="x_start:T", x2="x_end:T", y="low:Q", y2="high:Q", color=color,
+                ))
+    markers = []
+    ath = framework.get("ath") or {}
+    if ath.get("date") and ath.get("price") is not None:
+        markers.append({"timestamp": ath["date"], "price": ath["price"], "label": "Latest ATH"})
+    for key, label in (("strategic_anchor", "Strategic Fibonacci anchor"), ("tactical_anchor", "Tactical Fibonacci anchor")):
+        anchor = framework.get(key) or {}
+        if anchor.get("pivot_time") and anchor.get("price") is not None:
+            markers.append({"timestamp": anchor["pivot_time"], "price": anchor["price"], "label": label})
+    if markers:
+        marker_frame = pd.DataFrame(markers)
+        marker_frame["timestamp"] = pd.to_datetime(marker_frame["timestamp"], errors="coerce", utc=True).dt.tz_convert(None)
+        marker_frame = marker_frame.loc[marker_frame["timestamp"].between(start, end, inclusive="both")]
+        if not marker_frame.empty:
+            layers.append(alt.Chart(marker_frame).mark_point(size=58, filled=True, color="#db2777").encode(x="timestamp:T", y="price:Q", shape=alt.Shape("label:N", legend=None), tooltip=[alt.Tooltip("label:N"), alt.Tooltip("price:Q", format=",.2f")]))
+    return layers
 
 
 def _elliott_layers(candidate: dict[str, Any] | None, color: str, start: pd.Timestamp, end: pd.Timestamp) -> list[Any]:
@@ -335,7 +470,7 @@ def _elliott_layers(candidate: dict[str, Any] | None, color: str, start: pd.Time
 
 
 def _render_zone_table(zones: list[dict[str, Any]], *, classes: set[str]) -> None:
-    visible = [zone for zone in zones if zone.get("confluence_class") in classes and not zone.get("hidden_by_60pct_filter")]
+    visible = [zone for zone in zones if zone.get("key_point_class", zone.get("confluence_class")) in classes and not zone.get("hidden_by_60pct_filter")]
     if not visible:
         class_label = " / ".join(sorted(classes))
         st.caption(f"No {class_label} zones currently qualify.")
@@ -347,10 +482,14 @@ def _render_zone_table(zones: list[dict[str, Any]], *, classes: set[str]) -> Non
     st.dataframe(pd.DataFrame([{
         "Role": zone.get("role"),
         "Zone": f"{float(zone.get('low', 0)):,.2f}–{float(zone.get('high', 0)):,.2f}",
-        "Confluence": zone.get("confluence_class"),
-        "Quality Score": _number(zone.get("quality_score")),
+        "Class": zone.get("key_point_class", zone.get("confluence_class")),
+        "Score": _number(zone.get("key_point_score", zone.get("quality_score"))),
+        "Pivot Score": _number(zone.get("pivot_score")),
+        "SMA Score": _number(zone.get("sma_score")),
+        "Volume Score": _number(zone.get("volume_score")),
+        "Fibonacci Score": _number(zone.get("fibonacci_score")),
         "Strength": zone.get("strength_class"),
-        "Sources": " + ".join(family_names.get(name, name) for name in zone.get("source_families") or []),
+        "Drivers": " | ".join(zone.get("drivers") or []),
         "Distance %": _percent(zone.get("distance_pct")),
     } for zone in visible]), hide_index=True, use_container_width=True)
 
