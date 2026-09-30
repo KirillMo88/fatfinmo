@@ -175,10 +175,10 @@ def render_simple_v3_asset(
 
     _render_v3_analysis_modules(snapshot, interpretation)
 
-    st.markdown("### Weekly Key Levels")
-    _render_zone_table(snapshot.get("weekly_zones") or [], classes={"HIGH", "MID", "LOW"})
-    st.markdown("### Daily Key Levels")
-    _render_zone_table(snapshot.get("daily_zones") or [], classes={"HIGH", "MID", "LOW"})
+    with st.expander("Weekly Key Levels", expanded=False):
+        _render_zone_table(snapshot.get("weekly_zones") or [], classes={"HIGH", "MID", "LOW"})
+    with st.expander("Daily Key Levels", expanded=False):
+        _render_zone_table(snapshot.get("daily_zones") or [], classes={"HIGH", "MID", "LOW"})
     st.markdown("### Weekly 6M Scenario Matrix")
     scenarios = snapshot.get("weekly_scenario_matrix") or []
     st.dataframe(pd.DataFrame([{
