@@ -592,7 +592,11 @@ def build_level_momentum_fig(d: pd.DataFrame, show_components: bool) -> go.Figur
         for col, color in [("SurveyScore", "#60a5fa"), ("ProductionScore", "#22c55e"), ("DemandIncomeScore", "#f97316"), ("LaborScore", "#e879f9")]:
             fig.add_trace(go.Scatter(x=d["date"], y=d[col], mode="lines", name=col, line={"color": color, "width": 1.1, "dash": "dot"}))
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
-    return style_business_fig(fig, "Business Cycle Level and Momentum", 360)
+    return style_business_fig(
+        fig,
+        "Business Cycle Level and Momentum = 30% × Survey + 30% × Production + 25% × Demand & Income + 15% × Labor",
+        360,
+    )
 
 
 def build_pillar_score_fig(
