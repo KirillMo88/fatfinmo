@@ -120,6 +120,17 @@ def render_business_cycle_tab(api_key: str | None) -> None:
         show_components = st.checkbox("Show pillar scores", value=True, key="business_cycle_show_pillars")
         st.plotly_chart(build_level_momentum_fig(d, show_components), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
 
+    pillar_top = st.columns(2)
+    with pillar_top[0]:
+        st.plotly_chart(build_survey_score_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
+    with pillar_top[1]:
+        st.plotly_chart(build_production_score_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
+    pillar_bottom = st.columns(2)
+    with pillar_bottom[0]:
+        st.plotly_chart(build_demand_income_score_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
+    with pillar_bottom[1]:
+        st.plotly_chart(build_labor_score_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
+
     inf_col, curve_col = st.columns(2)
     with inf_col:
         show_inflation_components = st.checkbox("Show inflation channel scores", value=False, key="business_cycle_show_inflation_components")
@@ -582,6 +593,95 @@ def build_level_momentum_fig(d: pd.DataFrame, show_components: bool) -> go.Figur
             fig.add_trace(go.Scatter(x=d["date"], y=d[col], mode="lines", name=col, line={"color": color, "width": 1.1, "dash": "dot"}))
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
     return style_business_fig(fig, "Business Cycle Level and Momentum", 360)
+
+
+def build_pillar_score_fig(
+    d: pd.DataFrame,
+    title: str,
+    score_column: str,
+    score_label: str,
+    score_color: str,
+    components: list[tuple[str, str, str]],
+) -> go.Figure:
+    fig = go.Figure()
+    fig.add_hrect(y0=-0.10, y1=0.10, fillcolor="#94a3b8", opacity=0.12, line_width=0)
+    fig.add_trace(
+        go.Scatter(
+            x=d["date"],
+            y=pd.to_numeric(d.get(score_column), errors="coerce"),
+            mode="lines",
+            name=score_label,
+            line={"color": score_color, "width": 2.2},
+            hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{score_label}: %{{y:.2f}}<extra></extra>",
+        )
+    )
+    for column, label, color in components:
+        fig.add_trace(
+            go.Scatter(
+                x=d["date"],
+                y=pd.to_numeric(d.get(column), errors="coerce"),
+                mode="lines",
+                name=label,
+                line={"color": color, "width": 1.2, "dash": "dot"},
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{label}: %{{y:.2f}}<extra></extra>",
+            )
+        )
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+    fig.update_yaxes(title="Historical Z-score")
+    return style_business_fig(fig, title, 360)
+
+
+def build_survey_score_fig(d: pd.DataFrame) -> go.Figure:
+    return build_pillar_score_fig(
+        d,
+        "Survey Score = 50% × ISM+50% × CFNAI",
+        "SurveyScore",
+        "Survey Score",
+        "#60a5fa",
+        [("ISM_Z", "ISM", "#38bdf8"), ("CFNAI_Z", "CFNAI", "#a78bfa")],
+    )
+
+
+def build_production_score_fig(d: pd.DataFrame) -> go.Figure:
+    return build_pillar_score_fig(
+        d,
+        "Production Score = Industrial Production",
+        "ProductionScore",
+        "Production Score",
+        "#22c55e",
+        [("IndustrialProduction_Z", "Industrial Production", "#86efac")],
+    )
+
+
+def build_demand_income_score_fig(d: pd.DataFrame) -> go.Figure:
+    return build_pillar_score_fig(
+        d,
+        "Demand & Income Score = Retail Sales, Real PCE и Real Income",
+        "DemandIncomeScore",
+        "Demand & Income Score",
+        "#f97316",
+        [
+            ("RetailSales_Z", "Retail Sales", "#fb923c"),
+            ("RealPCE_Z", "Real PCE", "#facc15"),
+            ("RealPersonalIncome_Z", "Real Income", "#f43f5e"),
+        ],
+    )
+
+
+def build_labor_score_fig(d: pd.DataFrame) -> go.Figure:
+    return build_pillar_score_fig(
+        d,
+        "Labor Score = 35% × Initial Claims + 15% × Continuing Claims +  + 25% × Unemployment +  + 25% × Payrolls",
+        "LaborScore",
+        "Labor Score",
+        "#e879f9",
+        [
+            ("InitialClaims_Z_INV", "Initial Claims", "#38bdf8"),
+            ("ContinuingClaims_Z_INV", "Continuing Claims", "#60a5fa"),
+            ("Unemployment_Z_INV", "Unemployment", "#f97316"),
+            ("Payrolls_Z", "Payrolls", "#22c55e"),
+        ],
+    )
 
 
 def build_regime_map_fig(history: pd.DataFrame, window: str) -> go.Figure:
