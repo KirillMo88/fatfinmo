@@ -4,12 +4,14 @@ import numpy as np
 import pandas as pd
 
 from gold_regime.aisc import (
+    ANNUAL_AISC_HISTORY,
+    AISC_QUARTERLY_STATUS,
     NORMAL_AISC_MULTIPLE,
     aisc_valuation_state,
     build_gold_aisc_valuation,
     build_quarterly_aisc,
 )
-from gold_regime.aisc_view import filter_aisc_range
+from gold_regime.aisc_view import build_gold_aisc_valuation_fig, filter_aisc_range
 from gold_regime.demand_structure import DEMAND_CATEGORIES, build_demand_structure_frame
 from gold_regime.demand_structure_view import build_demand_structure_fig, filter_demand_range
 
@@ -24,6 +26,35 @@ def test_quarterly_aisc_forecast_compounds_from_last_actual() -> None:
     assert np.isclose(quarterly.loc[quarterly["quarter"].eq("2026 Q2"), "aisc"].iloc[0], 1829.625)
     assert np.isclose(quarterly.loc[quarterly["quarter"].eq("2026 Q3"), "aisc"].iloc[0], 1875.365625)
     assert np.isclose(quarterly.loc[quarterly["quarter"].eq("2026 Q4"), "aisc"].iloc[0], 1922.249765625)
+
+
+def test_annual_aisc_history_is_repeated_for_each_quarter_with_source_status() -> None:
+    quarterly = build_quarterly_aisc("2012Q4")
+
+    assert len(ANNUAL_AISC_HISTORY) == 13
+    for year, annual_value in ANNUAL_AISC_HISTORY.items():
+        year_rows = quarterly.loc[quarterly["quarter"].str.startswith(f"{year} ")]
+        assert year_rows["aisc"].tolist() == [annual_value] * 4
+
+    assert [AISC_QUARTERLY_STATUS[pd.Period(f"2012Q{quarter}", freq="Q")] for quarter in range(1, 5)] == [
+        "METALS_FOCUS", "METALS_FOCUS", "METALS_FOCUS", "METALS_FOCUS"
+    ]
+    assert AISC_QUARTERLY_STATUS[pd.Period("2000Q1", freq="Q")] == "RECONSTRUCTED"
+    assert AISC_QUARTERLY_STATUS[pd.Period("2010Q1", freq="Q")] == "METALS_FOCUS_RETROSPECTIVE"
+    assert quarterly.loc[quarterly["quarter"].eq("2013 Q1"), "aisc"].iloc[0] == 1120.0
+
+
+def test_historical_annual_aisc_values_appear_in_gold_chart_with_readable_sources() -> None:
+    dates = pd.to_datetime(["2000-01-03", "2010-01-04", "2012-01-03"])
+    gold = pd.Series([280.0, 1100.0, 1600.0], index=dates)
+    valuation = build_gold_aisc_valuation(gold)
+    figure = build_gold_aisc_valuation_fig(valuation)
+    historical = next(trace for trace in figure.data if trace.name == "Historical AISC")
+
+    assert historical.y.tolist() == [250.0, 801.0, 1112.0]
+    assert [row[1] for row in historical.customdata] == [
+        "Reconstructed", "Metals Focus retrospective", "Metals Focus"
+    ]
 
 
 def test_daily_aisc_is_a_quarterly_step_function_and_actual_overrides_estimate() -> None:

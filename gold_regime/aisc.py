@@ -11,11 +11,46 @@ NORMAL_AISC_MULTIPLE = 1.625
 AISC_QOQ_GROWTH = 0.025
 AISC_ZONE_THRESHOLDS = (1.25, 1.45, 1.80, 2.10, 2.40)
 
+# Annual historical global mining-industry AISC observations in USD/oz.
+# The annual values are intentionally held flat across all four quarters.
+ANNUAL_AISC_HISTORY: dict[int, float] = {
+    2000: 250.0,
+    2001: 245.0,
+    2002: 260.0,
+    2003: 290.0,
+    2004: 315.0,
+    2005: 325.0,
+    2006: 445.0,
+    2007: 520.0,
+    2008: 655.0,
+    2009: 670.0,
+    2010: 801.0,
+    2011: 908.0,
+    2012: 1112.0,
+}
+ANNUAL_AISC_STATUS: dict[int, str] = {
+    **{year: "RECONSTRUCTED" for year in range(2000, 2010)},
+    2010: "METALS_FOCUS_RETROSPECTIVE",
+    2011: "METALS_FOCUS_RETROSPECTIVE",
+    2012: "METALS_FOCUS",
+}
+
+HISTORICAL_AISC_QUARTERLY: dict[str, float] = {
+    f"{year}Q{quarter}": value
+    for year, value in ANNUAL_AISC_HISTORY.items()
+    for quarter in range(1, 5)
+}
+HISTORICAL_AISC_QUARTERLY_STATUS: dict[pd.Period, str] = {
+    pd.Period(f"{year}Q{quarter}", freq="Q"): ANNUAL_AISC_STATUS[year]
+    for year in ANNUAL_AISC_HISTORY
+    for quarter in range(1, 5)
+}
+
 # Quarterly global mining-industry AISC observations in USD/oz. Keep this
 # isolated from the chart code so later actual observations can replace or
 # extend the dataset without changing the valuation calculations.
 ACTUAL_AISC_QUARTERLY: dict[str, float] = {
-    "2012Q1": 1080.0, "2012Q2": 1100.0, "2012Q3": 1130.0, "2012Q4": 1150.0,
+    **HISTORICAL_AISC_QUARTERLY,
     "2013Q1": 1120.0, "2013Q2": 1080.0, "2013Q3": 1010.0, "2013Q4": 980.0,
     "2014Q1": 950.0, "2014Q2": 950.0, "2014Q3": 940.0, "2014Q4": 920.0,
     "2015Q1": 900.0, "2015Q2": 890.0, "2015Q3": 880.0, "2015Q4": 860.0,
@@ -30,6 +65,14 @@ ACTUAL_AISC_QUARTERLY: dict[str, float] = {
     "2024Q1": 1375.0, "2024Q2": 1388.0, "2024Q3": 1456.0, "2024Q4": 1438.0,
     "2025Q1": 1536.0, "2025Q2": 1590.0, "2025Q3": 1605.0, "2025Q4": 1706.0,
     "2026Q1": 1785.0,
+}
+AISC_QUARTERLY_STATUS: dict[pd.Period, str] = {
+    **HISTORICAL_AISC_QUARTERLY_STATUS,
+    **{
+        pd.Period(quarter, freq="Q"): "ACTUAL"
+        for quarter in ACTUAL_AISC_QUARTERLY
+        if pd.Period(quarter, freq="Q").year >= 2013
+    },
 }
 
 AISC_DEFAULT_CONFIG = {
@@ -75,7 +118,7 @@ def build_quarterly_aisc(
     for period in periods:
         if period in actual:
             value = actual[period]
-            source = "ACTUAL"
+            source = AISC_QUARTERLY_STATUS.get(period, "ACTUAL")
         elif period > last_actual:
             periods_after_last_actual = period.ordinal - last_actual.ordinal
             value = last_actual_value * ((1.0 + float(qoq_growth)) ** periods_after_last_actual)
