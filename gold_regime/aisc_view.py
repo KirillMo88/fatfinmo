@@ -21,6 +21,14 @@ AISC_ZONE_COLORS = (
     (2.40, 5.0, "#dc2626", "Extreme / unusual"),
 )
 
+AISC_SOURCE_LABELS = {
+    "RECONSTRUCTED": "Reconstructed",
+    "METALS_FOCUS_RETROSPECTIVE": "Metals Focus retrospective",
+    "METALS_FOCUS": "Metals Focus",
+    "ACTUAL": "Actual",
+    "ESTIMATED": "Estimated",
+}
+
 
 def aisc_range_window(
     frame: pd.DataFrame,
@@ -86,7 +94,7 @@ def render_gold_aisc_valuation(
     with cards[3]:
         st.metric("Current AISC", "N/A" if not np.isfinite(aisc) else f"${aisc:,.0f}")
     with cards[4]:
-        st.metric("AISC Source", source.title())
+        st.metric("AISC Source", AISC_SOURCE_LABELS.get(source.upper(), source.title()))
     with cards[5]:
         st.metric("Quarter", quarter)
 
@@ -184,18 +192,24 @@ def build_gold_aisc_valuation_fig(
     )
     fig.add_hline(y=0.0, line={"color": "#f8fafc", "width": 1.2, "dash": "dot"}, row=2, col=1)
 
-    for source_name, dash in (("ACTUAL", "solid"), ("ESTIMATED", "dash")):
-        segment = data[source.eq(source_name)]
+    for source_name, selector, dash, color in (
+        ("Historical", source.ne("ESTIMATED"), "solid", "#38bdf8"),
+        ("Estimated", source.eq("ESTIMATED"), "dash", "#f59e0b"),
+    ):
+        segment = data[selector]
         if segment.empty:
             continue
+        source_labels = segment["aisc_source"].fillna("N/A").astype(str).map(
+            lambda value: AISC_SOURCE_LABELS.get(value.upper(), value.title())
+        )
         fig.add_trace(
             go.Scatter(
                 x=segment["date"],
                 y=segment["aisc"],
                 mode="lines",
-                name=f"{source_name.title()} AISC",
-                line={"color": "#38bdf8" if source_name == "ACTUAL" else "#f59e0b", "width": 2.2, "dash": dash, "shape": "hv"},
-                customdata=np.column_stack([segment["quarter"].astype(str), segment["aisc_source"].astype(str)]),
+                name=f"{source_name} AISC",
+                line={"color": color, "width": 2.2, "dash": dash, "shape": "hv"},
+                customdata=np.column_stack([segment["quarter"].astype(str), source_labels]),
                 hovertemplate="Date: %{x|%Y-%m-%d}<br>Quarter: %{customdata[0]}<br>AISC: $%{y:,.0f}<br>%{customdata[1]}<extra></extra>",
             ),
             row=3,
