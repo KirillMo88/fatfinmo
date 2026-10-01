@@ -18,6 +18,14 @@ from business_cycle import (
     BusinessCycleSnapshot,
     build_business_cycle_snapshot,
 )
+from cpi_components import (
+    CPI_CACHE_TTL_SECONDS,
+    CPI_HORIZONS,
+    build_cpi_components_chart,
+    calculate_cpi_breakdown,
+    get_bls_api_key,
+    load_cpi_raw_history,
+)
 from macro_surprises import MacroSurprisesSnapshot, build_macro_surprises_snapshot
 
 
@@ -66,6 +74,11 @@ def load_business_cycle_snapshot_cached(api_key: str | None, refresh_nonce: int 
 @st.cache_data(show_spinner=True, ttl=BUSINESS_CYCLE_TTL_SECONDS)
 def load_macro_surprises_snapshot_cached(history: pd.DataFrame, refresh_nonce: int = 0) -> MacroSurprisesSnapshot:
     return build_macro_surprises_snapshot(history, refresh_live=refresh_nonce > 0)
+
+
+@st.cache_data(show_spinner=False, ttl=CPI_CACHE_TTL_SECONDS)
+def load_cpi_raw_history_cached(api_key: str | None, refresh_nonce: int = 0) -> tuple[pd.DataFrame, dict[str, Any]]:
+    return load_cpi_raw_history(api_key, force_refresh=refresh_nonce > 0)
 
 
 def render_business_cycle_tab(api_key: str | None) -> None:
@@ -145,6 +158,8 @@ def render_business_cycle_tab(api_key: str | None) -> None:
     with structural_col:
         st.plotly_chart(build_t5yifr_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
 
+    render_cpi_components_breakdown(int(st.session_state.get("business_cycle_refresh_nonce", 0)))
+
     try:
         macro_snapshot = load_macro_surprises_snapshot_cached(
             history,
@@ -163,6 +178,42 @@ def render_business_cycle_tab(api_key: str | None) -> None:
         st.dataframe(format_diagnostics(snapshot.diagnostics), use_container_width=True, hide_index=True)
     with quality_col:
         st.dataframe(snapshot.data_quality, use_container_width=True, hide_index=True)
+
+
+def render_cpi_components_breakdown(refresh_nonce: int = 0) -> None:
+    st.markdown("#### CPI Components Breakdown")
+    api_key = get_bls_api_key()
+    raw, status = load_cpi_raw_history_cached(api_key, refresh_nonce)
+    if raw.empty:
+        st.warning(f"CPI components are unavailable: {status.get('error') or 'no BLS history is cached.'}")
+        return
+
+    horizon = st.radio(
+        "Inflation horizon",
+        options=list(CPI_HORIZONS),
+        index=3,
+        horizontal=True,
+        key="business_cycle_cpi_horizon",
+        label_visibility="collapsed",
+    )
+    try:
+        breakdown = calculate_cpi_breakdown(raw, horizon)
+    except Exception as exc:
+        st.info("Insufficient CPI history for selected period" if "Insufficient CPI history" in str(exc) else str(exc))
+        return
+
+    if status.get("used_cache_fallback"):
+        st.warning("BLS refresh failed; showing persistent cached observations. " + str(status.get("error") or ""))
+    elif status.get("stale"):
+        st.warning("The latest common BLS CPI observation is more than two months old.")
+    st.plotly_chart(build_cpi_components_chart(breakdown, horizon), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
+    source = "https://www.bls.gov/cpi/"
+    observation = pd.Timestamp(breakdown["ReferenceMonth"].iloc[0]).strftime("%b %Y")
+    st.caption(
+        f"Source: [U.S. Bureau of Labor Statistics]({source}) · Latest common observation: {observation}. "
+        "First four bars are CPI components; CPI and Core CPI are benchmark indexes. "
+        "Reference weights are fixed 2026 basket weights and are not used to reconstruct the indexes."
+    )
 
 
 def render_macro_surprises_section(snapshot: MacroSurprisesSnapshot) -> None:
