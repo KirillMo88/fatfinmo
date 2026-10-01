@@ -130,17 +130,33 @@ def build_regime_map(frame: pd.DataFrame, weeks: int) -> go.Figure:
         fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, fillcolor=REGIME_COLORS[regime], opacity=0.07, line_width=0, layer="below")
     fig.add_hline(y=0, line_color="#64748b")
     fig.add_vline(x=0, line_color="#64748b")
+    fig.add_annotation(x=0.04, y=0.96, xref="paper", yref="paper", text=REGIMES[2], showarrow=False,
+                       xanchor="left", font={"color": REGIME_COLORS[REGIMES[2]], "size": 10})
+    fig.add_annotation(x=0.96, y=0.96, xref="paper", yref="paper", text=REGIMES[3], showarrow=False,
+                       xanchor="right", font={"color": REGIME_COLORS[REGIMES[3]], "size": 10})
+    fig.add_annotation(x=0.04, y=0.04, xref="paper", yref="paper", text=REGIMES[0], showarrow=False,
+                       xanchor="left", font={"color": REGIME_COLORS[REGIMES[0]], "size": 10})
+    fig.add_annotation(x=0.96, y=0.04, xref="paper", yref="paper", text=REGIMES[1], showarrow=False,
+                       xanchor="right", font={"color": REGIME_COLORS[REGIMES[1]], "size": 10})
     if not tail.empty:
+        point_colors = tail["RatesFinancialConditionsRegime"].astype(str).map(REGIME_COLORS).fillna("#64748b")
         fig.add_trace(go.Scatter(x=tail["RatesPressureScore"], y=tail["FinancialConditionsDirectionScore"],
-                                 mode="lines+markers", name="Weekly path", line=dict(color="#94a3b8"), marker=dict(size=6),
+                                 mode="lines+markers", name="Weekly path", line=dict(color="#94a3b8", width=1.2),
+                                 marker=dict(size=8, color=point_colors, line=dict(color="#0f131a", width=0.8)),
                                  customdata=np.column_stack([tail["Date"].dt.strftime("%Y-%m-%d"), tail["RatesFinancialConditionsRegime"]]),
-                                 hovertemplate="%{customdata[0]}<br>Rates %{x:.2f}<br>FC %{y:.2f}<br>%{customdata[1]}<extra></extra>"))
+                                 hovertemplate="Date: %{customdata[0]}<br>Rates Pressure: %{x:.2f}<br>FC Direction: %{y:.2f}<br>Regime: %{customdata[1]}<extra></extra>"))
         latest = tail.iloc[-1]
         fig.add_trace(go.Scatter(x=[latest["RatesPressureScore"]], y=[latest["FinancialConditionsDirectionScore"]],
-                                 mode="markers", name="Latest", marker=dict(size=14, color="#ffffff")))
-    fig.update_xaxes(title="Rates Pressure", range=[-5, 5])
-    fig.update_yaxes(title="Financial Conditions Direction", range=[-5, 5])
-    return _style(fig, 360)
+                                 mode="markers", name="Current", marker=dict(size=15, color="rgba(0,0,0,0)",
+                                                                                symbol="circle-open", line=dict(width=2, color="#f8fafc"))))
+    fig.update_xaxes(title="Rates Pressure", range=[-5, 5], gridcolor="#263241", zeroline=False, color="#cbd5e1")
+    fig.update_yaxes(title="Financial Conditions Direction", range=[-5, 5], gridcolor="#263241", zeroline=False, color="#cbd5e1")
+    fig.update_layout(
+        template="plotly_dark", height=360, paper_bgcolor="#0f131a", plot_bgcolor="#0f131a",
+        font={"color": "#e5e7eb", "size": 11}, margin={"l": 58, "r": 40, "t": 58, "b": 44},
+        hovermode="closest", legend={"orientation": "h", "yanchor": "top", "y": -0.13, "xanchor": "left", "x": 0},
+    )
+    return fig
 
 
 def build_curve_chart(frame: pd.DataFrame, weeks: int) -> go.Figure:

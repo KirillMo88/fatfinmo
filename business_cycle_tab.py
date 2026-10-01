@@ -112,7 +112,7 @@ def render_business_cycle_tab(api_key: str | None) -> None:
     st.plotly_chart(build_primary_macro_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
 
     st.markdown("### Regime Dynamics")
-    map_col, lm_col = st.columns([1.05, 1.55])
+    map_col, lm_col = st.columns(2)
     with map_col:
         map_window = st.radio("Regime map window", ["13W", "26W", "52W"], index=1, horizontal=True, key="business_cycle_map_window")
         st.plotly_chart(build_regime_map_fig(history, map_window), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
@@ -131,14 +131,14 @@ def render_business_cycle_tab(api_key: str | None) -> None:
     with pillar_bottom[1]:
         st.plotly_chart(build_labor_score_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
 
-    inf_col, curve_col = st.columns(2)
-    with inf_col:
+    st.markdown("### Inflation Details")
+    direction_col, term_col = st.columns(2)
+    with direction_col:
         show_inflation_components = st.checkbox("Show inflation channel scores", value=False, key="business_cycle_show_inflation_components")
         st.plotly_chart(build_inflation_direction_fig(d, show_inflation_components), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
-    with curve_col:
+    with term_col:
         st.plotly_chart(build_expinf_curve_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
 
-    st.markdown("### Inflation Details")
     lead_col, structural_col = st.columns(2)
     with lead_col:
         st.plotly_chart(build_leading_realized_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
