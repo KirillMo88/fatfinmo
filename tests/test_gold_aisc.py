@@ -74,6 +74,16 @@ def test_daily_aisc_is_a_quarterly_step_function_and_actual_overrides_estimate()
     )
 
 
+def test_weekly_gold_bars_are_preserved_for_aisc_chart() -> None:
+    dates = pd.date_range("2000-01-07", periods=5, freq="W-FRI")
+    gold = pd.Series([280.0, 281.0, 279.0, 282.0, 285.0], index=dates)
+
+    valuation = build_gold_aisc_valuation(gold)
+
+    assert valuation["date"].tolist() == dates.tolist()
+    assert valuation["aisc"].tolist() == [250.0] * len(dates)
+
+
 def test_new_actual_quarter_replaces_estimate_and_state_thresholds_are_dynamic() -> None:
     dates = pd.date_range("2026-04-01", periods=2, freq="D")
     gold = pd.Series([4600.0, 4600.0], index=dates)
