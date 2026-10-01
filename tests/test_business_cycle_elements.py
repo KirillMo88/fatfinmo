@@ -15,17 +15,17 @@ from business_cycle_tab import (
 def test_element_interpretation_detects_improvement_that_stalled() -> None:
     text = describe_business_cycle_element(level=0.02, change_13w=0.01, change_52w=0.35)
 
-    assert "улучшение за 52 недели" in text
-    assert "рост остановился" in text
-    assert "около исторической нормы" in text
+    assert "52-week improvement" in text
+    assert "has stalled" in text
+    assert "near its historical norm" in text
 
 
 def test_element_interpretation_detects_recent_upward_turn() -> None:
     text = describe_business_cycle_element(level=0.40, change_13w=0.12, change_52w=-0.30)
 
-    assert "ухудшение за 52 недели" in text
-    assert "разворот вверх" in text
-    assert "умеренно выше исторической нормы" in text
+    assert "52-week deterioration" in text
+    assert "turned upward" in text
+    assert "moderately above its historical norm" in text
 
 
 def test_business_cycle_elements_use_exact_13w_and_52w_changes() -> None:
@@ -52,6 +52,7 @@ def test_regime_dynamics_pillar_charts_include_score_and_components() -> None:
             "date": pd.date_range("2026-01-02", periods=4, freq="W-FRI"),
             "SurveyScore": [0.1, 0.2, 0.3, 0.4],
             "ISM_Z": [0.0, 0.1, 0.2, 0.3],
+            "ISM_SERVICES_Z": [0.1, 0.2, 0.3, 0.4],
             "CFNAI_Z": [0.2, 0.3, 0.4, 0.5],
             "ProductionScore": [0.1, 0.0, -0.1, 0.0],
             "IndustrialProduction_Z": [0.1, 0.0, -0.1, 0.0],
@@ -72,8 +73,8 @@ def test_regime_dynamics_pillar_charts_include_score_and_components() -> None:
     demand = build_demand_income_score_fig(d)
     labor = build_labor_score_fig(d)
 
-    assert survey.layout.title.text == "Survey Score = 50% × ISM+50% × CFNAI"
-    assert [trace.name for trace in survey.data] == ["Survey Score", "ISM", "CFNAI"]
+    assert survey.layout.title.text == "Survey Score = 30% × ISM Manufacturing PMI+30% ×  ISM Services PMI + 40% × CFNAI"
+    assert [trace.name for trace in survey.data] == ["Survey Score", "ISM Manufacturing PMI", "ISM Services PMI", "CFNAI"]
     assert production.layout.title.text == "Production Score = Industrial Production"
     assert [trace.name for trace in production.data] == ["Production Score", "Industrial Production"]
     assert demand.layout.title.text == "Demand & Income Score = Retail Sales, Real PCE и Real Income"

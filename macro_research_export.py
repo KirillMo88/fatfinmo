@@ -360,8 +360,6 @@ def add_global_macro_series(dataset: pd.DataFrame, metadata: list[SeriesMeta], a
     specs.extend(gm._growth_specs(fred, market))
     specs.extend(gm._risk_specs(fred, market))
     for spec in specs:
-        if spec.instrument == "U.S. ISM Services PMI":
-            continue
         col = macro_column_name(spec.instrument)
         add_aligned_series(
             dataset,
@@ -1136,10 +1134,11 @@ def build_positioning_metadata(master: pd.DataFrame) -> pd.DataFrame:
 
 def build_model_metadata() -> pd.DataFrame:
     rows = [
-        ("Business Cycle", BUSINESS_CYCLE_MODEL_VERSION, "BusinessCycleLevel", "Real-economy cycle level", "0.30 * SurveyScore + 0.30 * ProductionScore + 0.25 * DemandIncomeScore + 0.15 * LaborScore", "ISM + CFNAI + labor + production + demand/income", "weekly", "build_business_cycle_snapshot()", "Expanding point-in-time z-scores; no liquidity or inflation inputs"),
+        ("Business Cycle", BUSINESS_CYCLE_MODEL_VERSION, "SurveyScore", "Survey pillar score", "0.30 * ISM_Manufacturing_Z + 0.30 * ISM_Services_Z + 0.40 * CFNAI_Z", "ISM Manufacturing PMI + ISM Services PMI + CFNAI", "weekly", "build_business_cycle_snapshot()", "Expanding point-in-time z-scores; service PMI history begins May 2009"),
+        ("Business Cycle", BUSINESS_CYCLE_MODEL_VERSION, "BusinessCycleLevel", "Real-economy cycle level", "0.30 * SurveyScore + 0.30 * ProductionScore + 0.25 * DemandIncomeScore + 0.15 * LaborScore", "Survey + labor + production + demand/income", "weekly", "build_business_cycle_snapshot()", "Expanding point-in-time z-scores; no liquidity or inflation inputs"),
         ("Business Cycle", BUSINESS_CYCLE_MODEL_VERSION, "BusinessCycleMomentum", "Real-economy cycle momentum", "Weighted 13W changes in pillar scores", "Survey + production + demand/income + labor pillars", "13W", "build_business_cycle_snapshot()", "2-week confirmation converts candidate phase into production state"),
         ("Inflation Layer", INFLATION_LAYER_MODEL_VERSION, "InflationDirectionScore", "Expectations-led inflation direction", "0.35 * MarketPricingScore + 0.40 * ModelImpliedInflationScore + 0.25 * SurveyInflationScore", "T5YIE + T10YIE + EXPINF1YR + EXPINF5YR + Michigan 1Y", "13-26W", "build_business_cycle_snapshot()", "Realized inflation is confirmation only, not the production state driver"),
-        ("Economy Regime", ECONOMY_REGIME_MODEL_VERSION, "EconomyRegime", "Growth direction plus inflation state", "BusinessCycleDirection x InflationState", "BUSINESS_CYCLE_V1 + INFLATION_LAYER_V1", "weekly", "build_business_cycle_snapshot()", "Interpretation layer; does not modify BusinessCycleState or InflationState"),
+        ("Economy Regime", ECONOMY_REGIME_MODEL_VERSION, "EconomyRegime", "Growth direction plus inflation state", "BusinessCycleDirection x InflationState", "BUSINESS_CYCLE_V2 + INFLATION_LAYER_V1", "weekly", "build_business_cycle_snapshot()", "Interpretation layer; does not modify BusinessCycleState or InflationState"),
         ("Market Regime", MARKET_REGIME_VERSION, "FastTransitionRisk", "Short-horizon transition risk", "Existing production function", "VIX + DXY", "1-4W", "calculate_fast_transition_risk_history()", "Recomputed over history using current model"),
         ("Market Regime", MARKET_REGIME_VERSION, "MacroTransitionRisk", "Medium-term macro transition risk", "Existing production function", "DXY + US2Y + Global M2 + liquidity", "8-26W", "calculate_macro_transition_risk_history()", "Recomputed over history using current model"),
         ("Market Regime", MARKET_REGIME_VERSION, "CreditRisk", "Credit stress state", "Existing production function", "HY OAS", "13W", "calculate_credit_stress_confirmation_history()", "Recomputed over history using current model"),
@@ -1758,6 +1757,7 @@ def add_derived_changes(dataset: pd.DataFrame, metadata: list[SeriesMeta], base_
 def add_business_cycle_derived(dataset: pd.DataFrame, metadata: list[SeriesMeta]) -> None:
     derived = {
         "ISM_Manufacturing_3M_Change": ("ISM_Manufacturing", 13),
+        "ISM_Services_3M_Change": ("ISM_Services", 13),
         "CFNAI_3M_Change": ("CFNAI", 13),
         "InitialClaims_13W_Change": ("InitialClaims", 13),
         "ContinuingClaims_13W_Change": ("ContinuingClaims", 13),

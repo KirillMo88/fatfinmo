@@ -410,46 +410,46 @@ BUSINESS_CYCLE_ELEMENTS = (
 def describe_business_cycle_element(level: float, change_13w: float, change_52w: float) -> str:
     values = [level, change_13w, change_52w]
     if not all(np.isfinite(value) for value in values):
-        return "Недостаточно данных для интерпретации."
+        return "Insufficient data for interpretation."
 
     if level >= 0.50:
-        level_text = "существенно выше исторической нормы"
+        level_text = "substantially above its historical norm"
     elif level >= 0.10:
-        level_text = "умеренно выше исторической нормы"
+        level_text = "moderately above its historical norm"
     elif level > -0.10:
-        level_text = "около исторической нормы"
+        level_text = "near its historical norm"
     elif level > -0.50:
-        level_text = "умеренно ниже исторической нормы"
+        level_text = "moderately below its historical norm"
     else:
-        level_text = "существенно ниже исторической нормы"
+        level_text = "substantially below its historical norm"
 
     annual_up = change_52w >= 0.20
     annual_down = change_52w <= -0.20
     recent_up = change_13w >= 0.05
     recent_down = change_13w <= -0.05
-    annual_strength = "Существенное" if abs(change_52w) >= 0.50 else "Заметное"
-    recent_strength = "сильное" if abs(change_13w) >= 0.20 else "умеренное"
+    annual_strength = "substantial" if abs(change_52w) >= 0.50 else "notable"
+    recent_strength = "strong" if abs(change_13w) >= 0.20 else "moderate"
 
     if annual_up and recent_up:
-        trend_text = f"{annual_strength} улучшение за 52 недели продолжается; за последние 13 недель — {recent_strength} улучшение"
+        trend_text = f"{annual_strength.capitalize()} 52-week improvement is continuing, with {recent_strength} improvement over the latest 13 weeks"
     elif annual_up and recent_down:
-        trend_text = f"{annual_strength} улучшение за 52 недели сменилось откатом в последние 13 недель"
+        trend_text = f"{annual_strength.capitalize()} 52-week improvement has pulled back over the latest 13 weeks"
     elif annual_up:
-        trend_text = f"{annual_strength} улучшение за 52 недели, но в последние 13 недель рост остановился"
+        trend_text = f"{annual_strength.capitalize()} 52-week improvement has stalled over the latest 13 weeks"
     elif annual_down and recent_up:
-        trend_text = f"{annual_strength} ухудшение за 52 недели, но в последние 13 недель произошёл разворот вверх"
+        trend_text = f"{annual_strength.capitalize()} 52-week deterioration has turned upward over the latest 13 weeks"
     elif annual_down and recent_down:
-        trend_text = f"{annual_strength} ухудшение за 52 недели продолжается; за последние 13 недель — {recent_strength} ухудшение"
+        trend_text = f"{annual_strength.capitalize()} 52-week deterioration is continuing, with {recent_strength} deterioration over the latest 13 weeks"
     elif annual_down:
-        trend_text = f"{annual_strength} ухудшение за 52 недели, но в последние 13 недель показатель стабилизировался"
+        trend_text = f"{annual_strength.capitalize()} 52-week deterioration has stabilized over the latest 13 weeks"
     elif recent_up:
-        trend_text = f"Без выраженного годового тренда, но за последние 13 недель наблюдается {recent_strength} улучшение"
+        trend_text = f"No pronounced 52-week trend, with {recent_strength} improvement over the latest 13 weeks"
     elif recent_down:
-        trend_text = f"Без выраженного годового тренда, но за последние 13 недель наблюдается {recent_strength} ухудшение"
+        trend_text = f"No pronounced 52-week trend, with {recent_strength} deterioration over the latest 13 weeks"
     else:
-        trend_text = "Без выраженного тренда за 52 и 13 недель"
+        trend_text = "No pronounced trend over the latest 52 or 13 weeks"
 
-    return f"{trend_text}; текущий уровень — {level_text}."
+    return f"{trend_text}; the current level is {level_text}."
 
 
 def build_business_cycle_elements(history: pd.DataFrame) -> list[dict[str, Any]]:
@@ -634,11 +634,15 @@ def build_pillar_score_fig(
 def build_survey_score_fig(d: pd.DataFrame) -> go.Figure:
     return build_pillar_score_fig(
         d,
-        "Survey Score = 50% × ISM+50% × CFNAI",
+        "Survey Score = 30% × ISM Manufacturing PMI+30% ×  ISM Services PMI + 40% × CFNAI",
         "SurveyScore",
         "Survey Score",
         "#60a5fa",
-        [("ISM_Z", "ISM", "#38bdf8"), ("CFNAI_Z", "CFNAI", "#a78bfa")],
+        [
+            ("ISM_Z", "ISM Manufacturing PMI", "#38bdf8"),
+            ("ISM_SERVICES_Z", "ISM Services PMI", "#22c55e"),
+            ("CFNAI_Z", "CFNAI", "#a78bfa"),
+        ],
     )
 
 

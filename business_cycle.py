@@ -12,7 +12,7 @@ from finance_core import download_completed_ohlcv
 from fred_client import FredApiError, download_fred_series
 
 
-BUSINESS_CYCLE_MODEL_VERSION = "BUSINESS_CYCLE_V1"
+BUSINESS_CYCLE_MODEL_VERSION = "BUSINESS_CYCLE_V2"
 INFLATION_LAYER_MODEL_VERSION = "INFLATION_LAYER_V1"
 ECONOMY_REGIME_MODEL_VERSION = "ECONOMY_REGIME_V1"
 
@@ -221,6 +221,32 @@ def load_business_cycle_fred(api_key: str | None = None, observation_start: str 
             )
         frames.append(frame)
 
+    cached_services = cache.loc[cache["Series_ID"].astype(str).str.upper().eq("NMFCI")].copy() if not cache.empty else pd.DataFrame()
+    services_history = load_ism_services_history(observation_start)
+    services_live = load_investing_ism_services_releases(observation_start)
+    services_frames = [frame for frame in [cached_services, services_history, services_live] if not frame.empty]
+    if services_frames:
+        services = pd.concat(services_frames, ignore_index=True)
+        services["Series_ID"] = "NMFCI"
+        services["Description"] = "ISM Services PMI"
+        services["IsReleaseDated"] = True
+        services["Date"] = pd.to_datetime(services["Date"], errors="coerce")
+        services["Value"] = pd.to_numeric(services["Value"], errors="coerce")
+        services = services.dropna(subset=["Date", "Value"]).sort_values("Date").drop_duplicates(["Series_ID", "Date"], keep="last")
+        frames.append(services)
+    else:
+        frames.append(
+            pd.DataFrame(
+                {
+                    "Series_ID": ["NMFCI"],
+                    "Date": [pd.NaT],
+                    "Value": [np.nan],
+                    "Description": ["ISM Services PMI"],
+                    "IsReleaseDated": [False],
+                }
+            )
+        )
+
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["Series_ID", "Date", "Value", "Description", "IsReleaseDated"])
     if "IsReleaseDated" not in out.columns:
         out["IsReleaseDated"] = False
@@ -289,6 +315,28 @@ def load_investing_ism_services_releases(observation_start: str = "1990-01-01") 
         )
     except Exception:
         return pd.DataFrame()
+
+
+def load_ism_services_history(observation_start: str = "1990-01-01") -> pd.DataFrame:
+    """Load the preserved ISM Services release history supplied by the user."""
+    path = Path("data") / "ism_services_history.csv"
+    columns = ["Series_ID", "Date", "Value", "Description", "IsReleaseDated"]
+    try:
+        source = pd.read_csv(path, parse_dates=["Date"])
+        source["Value"] = pd.to_numeric(source["Value"], errors="coerce")
+        source = source.dropna(subset=["Date", "Value"])
+        source = source.loc[source["Date"].ge(pd.Timestamp(observation_start))]
+        return pd.DataFrame(
+            {
+                "Series_ID": "NMFCI",
+                "Date": source["Date"].to_numpy(),
+                "Value": source["Value"].to_numpy(),
+                "Description": "ISM Services PMI (user-supplied historical release data)",
+                "IsReleaseDated": True,
+            }
+        ).sort_values("Date").drop_duplicates(["Series_ID", "Date"], keep="last")
+    except Exception:
+        return pd.DataFrame(columns=columns)
 
 
 def load_pmi_release_fallback(observation_start: str) -> pd.DataFrame:
@@ -366,13 +414,22 @@ def build_business_cycle_history(calendar: pd.DatetimeIndex, fred: pd.DataFrame)
             release_dated=fred_series_is_release_dated(fred, series_id),
         ).to_numpy()
 
+    history["NMFCI"] = align_fred_series_to_weekly(
+        fred_series(fred, "NMFCI"),
+        calendar,
+        "NMFCI",
+        release_dated=fred_series_is_release_dated(fred, "NMFCI"),
+    ).to_numpy()
+
     history["ISM_3MMA"] = num(history["NAPM"]).rolling(13, min_periods=4).mean()
+    history["ISM_SERVICES_3MMA"] = num(history["NMFCI"]).rolling(13, min_periods=4).mean()
     history["CFNAI_3MMA"] = num(history["CFNAI"]).rolling(13, min_periods=4).mean()
     for col in ["INDPRO", "RSAFS", "PCEC96", "W875RX1", "PAYEMS"]:
         history[f"{col}_YoY"] = num(history[col]).pct_change(52, fill_method=None) * 100.0
         history[f"{col}_YoY_3MMA"] = history[f"{col}_YoY"].rolling(13, min_periods=4).mean()
 
     history["ISM_Z"] = expanding_z(history["ISM_3MMA"])
+    history["ISM_SERVICES_Z"] = expanding_z(history["ISM_SERVICES_3MMA"])
     history["CFNAI_Z"] = expanding_z(history["CFNAI_3MMA"])
     history["InitialClaims_Z_INV"] = -expanding_z(history["ICSA"])
     history["ContinuingClaims_Z_INV"] = -expanding_z(history["CCSA"])
@@ -383,7 +440,10 @@ def build_business_cycle_history(calendar: pd.DatetimeIndex, fred: pd.DataFrame)
     history["RealPCE_Z"] = expanding_z(history["PCEC96_YoY_3MMA"])
     history["RealPersonalIncome_Z"] = expanding_z(history["W875RX1_YoY_3MMA"])
 
-    history["SurveyScore"] = weighted_mean([history["ISM_Z"], history["CFNAI_Z"]], [0.5, 0.5])
+    history["SurveyScore"] = weighted_mean(
+        [history["ISM_Z"], history["ISM_SERVICES_Z"], history["CFNAI_Z"]],
+        [0.30, 0.30, 0.40],
+    )
     history["LaborScore"] = weighted_mean(
         [history["InitialClaims_Z_INV"], history["ContinuingClaims_Z_INV"], history["Unemployment_Z_INV"], history["Payrolls_Z"]],
         [0.35, 0.15, 0.25, 0.25],
@@ -826,6 +886,17 @@ def build_data_quality(fred: pd.DataFrame, history: pd.DataFrame) -> pd.DataFram
                 "Status": "OK" if not source.empty else "MISSING",
             }
         )
+    services = fred_series(fred, "NMFCI")
+    rows.append(
+        {
+            "Series": "NMFCI",
+            "Description": "ISM Services PMI (preserved workbook history + live release updates)",
+            "FirstDate": services.index.min().date() if not services.empty else "",
+            "LastDate": services.index.max().date() if not services.empty else "",
+            "Observations": int(services.count()),
+            "Status": "OK" if not services.empty else "MISSING",
+        }
+    )
     for column in ["BusinessCycleLevel", "BusinessCycleMomentum", "InflationDirectionScore", "RealizedInflationMomentum", "EconomyRegime"]:
         rows.append(
             {
