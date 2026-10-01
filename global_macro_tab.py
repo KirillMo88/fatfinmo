@@ -693,18 +693,24 @@ def _investing_ism_series_or_fallback(fallback_series: pd.Series | None) -> tupl
 
 def _investing_ism_services_series_or_fallback(fallback_series: pd.Series | None) -> tuple[pd.Series, str, str]:
     try:
-        from business_cycle import load_investing_ism_services_releases
+        from business_cycle import load_investing_ism_services_releases, load_ism_services_history
 
+        history = load_ism_services_history("2010-01-01")
         live = load_investing_ism_services_releases("2010-01-01")
+        history_series = pd.Series(
+            pd.to_numeric(history["Value"], errors="coerce").values,
+            index=pd.to_datetime(history["Date"], errors="coerce"),
+        ).dropna()
         live_series = pd.Series(
             pd.to_numeric(live["Value"], errors="coerce").values,
             index=pd.to_datetime(live["Date"], errors="coerce"),
         ).dropna()
+        history_series.index = pd.to_datetime(history_series.index).tz_localize(None)
         live_series.index = pd.to_datetime(live_series.index).tz_localize(None)
-        combined = pd.concat([_clean_series(fallback_series), _clean_series(live_series)]).sort_index()
+        combined = pd.concat([_clean_series(fallback_series), _clean_series(history_series), _clean_series(live_series)]).sort_index()
         combined = combined[~combined.index.duplicated(keep="last")]
         if not combined.empty:
-            return combined, "Investing.com / ISM Services PMI + preserved history", "OK"
+            return combined, "Workbook history / Investing.com releases", "OK"
     except Exception:
         pass
     series = _clean_series(fallback_series)
