@@ -12,7 +12,12 @@ from market_cycle import (
     latest_current_risk_signal,
     overlay_latest_daily_current_risk,
 )
-from market_cycle_tab import build_top_level_analytics, range_domain
+from market_cycle_tab import (
+    build_top_level_analytics,
+    chart_rsi_divergence_score,
+    current_risk_with_historical_outlook,
+    range_domain,
+)
 from market_cycle_multiples import format_fundamental_outlook_rows
 
 
@@ -40,6 +45,46 @@ def test_forward_drawdown_handles_windows_without_any_future_values() -> None:
     result = forward_max_drawdown(close, 2)
 
     assert result.isna().all()
+
+
+def test_current_risk_drawdown_uses_historical_outlook_3m_probability() -> None:
+    current = {"CurrentRiskDrawdownRisk": 8.0, "CurrentRiskDrawdownRiskState": "LOW"}
+    outlook = pd.DataFrame(
+        {
+            "Horizon": ["3M", "6M"],
+            "Risk of >15% Drawdown": [0.05, 0.20],
+            "Independent Analog N": [40, 40],
+        }
+    )
+
+    result = current_risk_with_historical_outlook(current, outlook)
+
+    assert result["CurrentRiskDrawdownRisk"] == 5.0
+    assert result["CurrentRiskDrawdownRiskState"] == "LOW"
+    assert result["HistoricalOutlook3MAnalogN"] == 40
+    assert current["CurrentRiskDrawdownRisk"] == 8.0
+
+
+def test_chart_rsi_divergence_uses_separate_five_percent_thresholds() -> None:
+    assert chart_rsi_divergence_score(
+        daily_close=95.0, daily_high20=100.0, daily_rsi=50.0, daily_rsi_high20=65.0,
+        weekly_close=95.0, weekly_high26=100.0, weekly_rsi=50.0, weekly_rsi_high26=60.0,
+    ) == 100.0
+    assert chart_rsi_divergence_score(
+        daily_close=94.99, daily_high20=100.0, daily_rsi=50.0, daily_rsi_high20=65.0,
+        weekly_close=94.99, weekly_high26=100.0, weekly_rsi=50.0, weekly_rsi_high26=60.0,
+    ) == 0.0
+
+
+def test_chart_rsi_divergence_adds_blowoff_and_caps_at_100() -> None:
+    assert chart_rsi_divergence_score(
+        daily_close=100.0, daily_high20=100.0, daily_rsi=78.0, daily_rsi_high20=78.0,
+        weekly_close=100.0, weekly_high26=100.0, weekly_rsi=60.0, weekly_rsi_high26=60.0,
+    ) == 55.0
+    assert chart_rsi_divergence_score(
+        daily_close=100.0, daily_high20=100.0, daily_rsi=78.0, daily_rsi_high20=93.0,
+        weekly_close=100.0, weekly_high26=100.0, weekly_rsi=50.0, weekly_rsi_high26=60.0,
+    ) == 100.0
 
 
 def test_structural_and_medium_term_momentum_windows_are_calculated() -> None:
