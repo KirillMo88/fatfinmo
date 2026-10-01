@@ -116,7 +116,7 @@ def render_business_cycle_tab(api_key: str | None) -> None:
         map_window = st.radio("Regime map window", ["13W", "26W", "52W"], index=1, horizontal=True, key="business_cycle_map_window")
         st.plotly_chart(build_regime_map_fig(history, map_window), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
     with lm_col:
-        show_components = st.checkbox("Show pillar scores", value=False, key="business_cycle_show_pillars")
+        show_components = st.checkbox("Show pillar scores", value=True, key="business_cycle_show_pillars")
         st.plotly_chart(build_level_momentum_fig(d, show_components), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
 
     inf_col, curve_col = st.columns(2)
