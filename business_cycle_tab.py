@@ -98,6 +98,7 @@ def render_business_cycle_tab(api_key: str | None) -> None:
         st.warning("Some required macro series are incomplete: " + ", ".join(missing["Series"].astype(str).head(8).tolist()))
 
     render_current_status(current)
+    render_business_cycle_elements_card(history)
 
     st.markdown("### Primary Macro View")
     chart_range = st.radio(
@@ -385,6 +386,115 @@ def render_current_status(current: dict[str, Any]) -> None:
                 ("Model", fmt_text(current.get("EconomyRegimeModelVersion"))),
             ],
         )
+
+
+BUSINESS_CYCLE_ELEMENTS = (
+    ("Survey", "SurveyScore"),
+    ("Production", "ProductionScore"),
+    ("Demand / Income", "DemandIncomeScore"),
+    ("Labor", "LaborScore"),
+)
+
+
+def describe_business_cycle_element(level: float, change_13w: float, change_52w: float) -> str:
+    values = [level, change_13w, change_52w]
+    if not all(np.isfinite(value) for value in values):
+        return "Недостаточно данных для интерпретации."
+
+    if level >= 0.50:
+        level_text = "существенно выше исторической нормы"
+    elif level >= 0.10:
+        level_text = "умеренно выше исторической нормы"
+    elif level > -0.10:
+        level_text = "около исторической нормы"
+    elif level > -0.50:
+        level_text = "умеренно ниже исторической нормы"
+    else:
+        level_text = "существенно ниже исторической нормы"
+
+    annual_up = change_52w >= 0.20
+    annual_down = change_52w <= -0.20
+    recent_up = change_13w >= 0.05
+    recent_down = change_13w <= -0.05
+    annual_strength = "Существенное" if abs(change_52w) >= 0.50 else "Заметное"
+    recent_strength = "сильное" if abs(change_13w) >= 0.20 else "умеренное"
+
+    if annual_up and recent_up:
+        trend_text = f"{annual_strength} улучшение за 52 недели продолжается; за последние 13 недель — {recent_strength} улучшение"
+    elif annual_up and recent_down:
+        trend_text = f"{annual_strength} улучшение за 52 недели сменилось откатом в последние 13 недель"
+    elif annual_up:
+        trend_text = f"{annual_strength} улучшение за 52 недели, но в последние 13 недель рост остановился"
+    elif annual_down and recent_up:
+        trend_text = f"{annual_strength} ухудшение за 52 недели, но в последние 13 недель произошёл разворот вверх"
+    elif annual_down and recent_down:
+        trend_text = f"{annual_strength} ухудшение за 52 недели продолжается; за последние 13 недель — {recent_strength} ухудшение"
+    elif annual_down:
+        trend_text = f"{annual_strength} ухудшение за 52 недели, но в последние 13 недель показатель стабилизировался"
+    elif recent_up:
+        trend_text = f"Без выраженного годового тренда, но за последние 13 недель наблюдается {recent_strength} улучшение"
+    elif recent_down:
+        trend_text = f"Без выраженного годового тренда, но за последние 13 недель наблюдается {recent_strength} ухудшение"
+    else:
+        trend_text = "Без выраженного тренда за 52 и 13 недель"
+
+    return f"{trend_text}; текущий уровень — {level_text}."
+
+
+def build_business_cycle_elements(history: pd.DataFrame) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for label, column in BUSINESS_CYCLE_ELEMENTS:
+        values = pd.to_numeric(history.get(column, pd.Series(index=history.index, dtype="float64")), errors="coerce")
+        level = float(values.iloc[-1]) if not values.empty else np.nan
+        change_13w = float(values.diff(13).iloc[-1]) if len(values) > 13 else np.nan
+        change_52w = float(values.diff(52).iloc[-1]) if len(values) > 52 else np.nan
+        rows.append(
+            {
+                "Pillar": label,
+                "Level": level,
+                "Change13W": change_13w,
+                "Change52W": change_52w,
+                "Interpretation": describe_business_cycle_element(level, change_13w, change_52w),
+            }
+        )
+    return rows
+
+
+def render_business_cycle_elements_card(history: pd.DataFrame) -> None:
+    rows = build_business_cycle_elements(history)
+    body = "".join(
+        "<tr>"
+        f"<td style='padding:0.42rem 0.45rem;border-bottom:1px solid #1f2937;font-weight:800;color:#f8fafc;white-space:nowrap'>{html.escape(str(row['Pillar']))}</td>"
+        f"<td style='padding:0.42rem 0.45rem;border-bottom:1px solid #1f2937;text-align:right;color:#cbd5e1;white-space:nowrap'>{html.escape(fmt_number(row['Level'], 2))}</td>"
+        f"<td style='padding:0.42rem 0.45rem;border-bottom:1px solid #1f2937;text-align:right;color:#cbd5e1;white-space:nowrap'>{html.escape(fmt_number(row['Change13W'], 2))}</td>"
+        f"<td style='padding:0.42rem 0.45rem;border-bottom:1px solid #1f2937;text-align:right;color:#cbd5e1;white-space:nowrap'>{html.escape(fmt_number(row['Change52W'], 2))}</td>"
+        f"<td style='padding:0.42rem 0.45rem;border-bottom:1px solid #1f2937;color:#f8fafc'>{html.escape(str(row['Interpretation']))}</td>"
+        "</tr>"
+        for row in rows
+    )
+    st.markdown(
+        f"""
+<div style="border:1px solid #263241; border-radius:8px; padding:0.75rem 0.85rem; background:#0f131a; margin-top:0.75rem;">
+  <div style="font-size:0.72rem; color:#94a3b8; font-weight:800; text-transform:uppercase; margin-bottom:0.55rem;">Business Cycle Elements</div>
+  <div style="overflow-x:auto;">
+    <table style="width:100%; border-collapse:collapse; font-size:0.78rem;">
+      <thead>
+        <tr style="color:#94a3b8; border-bottom:1px solid #263241; text-align:left;">
+          <th style="padding:0.35rem 0.45rem;">Pillar</th>
+          <th style="padding:0.35rem 0.45rem; text-align:right;">Level</th>
+          <th style="padding:0.35rem 0.45rem; text-align:right;">13W Change</th>
+          <th style="padding:0.35rem 0.45rem; text-align:right;">52W Change</th>
+          <th style="padding:0.35rem 0.45rem;">Interpretation</th>
+        </tr>
+      </thead>
+      <tbody>{body}</tbody>
+    </table>
+  </div>
+  <div style="font-size:0.68rem; color:#64748b; margin-top:0.5rem;">Level is the current historical Z-score; changes are differences in pillar score over 13 and 52 weeks.</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def render_status_card(title: str, headline: str, rows: list[tuple[str, str]]) -> None:
