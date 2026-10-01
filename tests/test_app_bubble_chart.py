@@ -1,6 +1,17 @@
 import pandas as pd
 
-from app import _prepare_performance_sma200w_bubble_frame
+from app import (
+    CHARTS_BAR_HEIGHT,
+    CHARTS_CATEGORY_LABEL_LIMIT,
+    CHARTS_RSI_HEIGHT,
+    _prepare_performance_sma200w_bubble_frame,
+)
+
+
+def test_categorical_charts_keep_enough_vertical_plot_area():
+    assert CHARTS_BAR_HEIGHT >= 360
+    assert CHARTS_RSI_HEIGHT >= 390
+    assert CHARTS_CATEGORY_LABEL_LIMIT <= 130
 
 
 def test_bubble_frame_filters_only_selected_negative_performance():

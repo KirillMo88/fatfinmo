@@ -5351,11 +5351,16 @@ def _build_chart_frame(df: pd.DataFrame) -> pd.DataFrame:
     return chart_df
 
 
+CHARTS_BAR_HEIGHT = 360
+CHARTS_RSI_HEIGHT = 390
+CHARTS_CATEGORY_LABEL_LIMIT = 130
+
+
 def _render_bar_chart(
     chart_df: pd.DataFrame,
     metric: str,
     title: str,
-    height: int = 220,
+    height: int = CHARTS_BAR_HEIGHT,
     dot_metric: str = None,
 ) -> None:
     cols = ["TickerAxis", "Ticker", "Group", "Subgroup", metric]
@@ -5372,7 +5377,12 @@ def _render_bar_chart(
         x=alt.X(
             "TickerAxis:N",
             sort=x_sort,
-            axis=alt.Axis(title=None, labelAngle=-90, labelFontSize=9, labelLimit=180),
+            axis=alt.Axis(
+                title=None,
+                labelAngle=-90,
+                labelFontSize=9,
+                labelLimit=CHARTS_CATEGORY_LABEL_LIMIT,
+            ),
         ),
         y=alt.Y(f"{metric}:Q", axis=alt.Axis(title="%", format=".0f")),
         tooltip=[
@@ -5412,7 +5422,7 @@ def _render_bar_chart(
     st.altair_chart(chart, use_container_width=True)
 
 
-def _render_rsi_chart(chart_df: pd.DataFrame, height: int = 250) -> None:
+def _render_rsi_chart(chart_df: pd.DataFrame, height: int = CHARTS_RSI_HEIGHT) -> None:
     d = chart_df[["TickerAxis", "Ticker", "Group", "Subgroup", "RSI_14"]].dropna(subset=["RSI_14"]).copy()
     if d.empty:
         st.info("No RSI data to chart.")
@@ -5423,7 +5433,12 @@ def _render_rsi_chart(chart_df: pd.DataFrame, height: int = 250) -> None:
         x=alt.X(
             "TickerAxis:N",
             sort=x_sort,
-            axis=alt.Axis(title=None, labelAngle=-90, labelFontSize=9, labelLimit=180),
+            axis=alt.Axis(
+                title=None,
+                labelAngle=-90,
+                labelFontSize=9,
+                labelLimit=CHARTS_CATEGORY_LABEL_LIMIT,
+            ),
         ),
         y=alt.Y("RSI_14:Q", axis=alt.Axis(title="RSI", format=".0f")),
         tooltip=[
