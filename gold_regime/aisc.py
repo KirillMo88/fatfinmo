@@ -138,11 +138,11 @@ def build_quarterly_aisc(
     return pd.DataFrame(rows)
 
 
-def _normalize_gold_daily(gold_daily: pd.Series | pd.DataFrame) -> pd.DataFrame:
-    if isinstance(gold_daily, pd.Series):
-        frame = pd.DataFrame({"date": pd.to_datetime(gold_daily.index, errors="coerce"), "gold_close": gold_daily.to_numpy()})
+def _normalize_gold_bars(gold_prices: pd.Series | pd.DataFrame) -> pd.DataFrame:
+    if isinstance(gold_prices, pd.Series):
+        frame = pd.DataFrame({"date": pd.to_datetime(gold_prices.index, errors="coerce"), "gold_close": gold_prices.to_numpy()})
     else:
-        source = gold_daily.copy()
+        source = gold_prices.copy()
         date_column = "date" if "date" in source.columns else "Date" if "Date" in source.columns else None
         price_column = "gold_close" if "gold_close" in source.columns else "close" if "close" in source.columns else "Close" if "Close" in source.columns else None
         if date_column is None:
@@ -158,36 +158,36 @@ def _normalize_gold_daily(gold_daily: pd.Series | pd.DataFrame) -> pd.DataFrame:
 
 
 def build_gold_aisc_valuation(
-    gold_daily: pd.Series | pd.DataFrame,
+    gold_prices: pd.Series | pd.DataFrame,
     actual_quarterly: dict[str | pd.Period, float] | None = None,
     qoq_growth: float = AISC_QOQ_GROWTH,
     normal_multiple: float = NORMAL_AISC_MULTIPLE,
     regime_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Join daily Gold with a quarterly step-function AISC valuation series."""
-    daily = _normalize_gold_daily(gold_daily)
+    """Join Gold price bars with a quarterly step-function AISC valuation series."""
+    prices = _normalize_gold_bars(gold_prices)
     columns = [
         "date", "gold_close", "quarter", "aisc", "aisc_source", "gold_aisc_ratio",
         "normal_gold_value", "premium_discount_pct", "regime",
     ]
-    if daily.empty:
+    if prices.empty:
         return pd.DataFrame(columns=columns)
 
-    daily["quarter_period"] = daily["date"].dt.to_period("Q")
-    quarterly = build_quarterly_aisc(daily["quarter_period"].max(), actual_quarterly, qoq_growth)
+    prices["quarter_period"] = prices["date"].dt.to_period("Q")
+    quarterly = build_quarterly_aisc(prices["quarter_period"].max(), actual_quarterly, qoq_growth)
     lookup = quarterly.set_index("quarter_period") if not quarterly.empty else pd.DataFrame()
     if quarterly.empty:
-        daily["quarter"] = daily["quarter_period"].map(lambda period: f"{period.year} Q{period.quarter}")
-        daily["aisc"] = np.nan
-        daily["aisc_source"] = pd.NA
+        prices["quarter"] = prices["quarter_period"].map(lambda period: f"{period.year} Q{period.quarter}")
+        prices["aisc"] = np.nan
+        prices["aisc_source"] = pd.NA
     else:
-        daily["quarter"] = daily["quarter_period"].map(lookup["quarter"])
-        daily["aisc"] = daily["quarter_period"].map(lookup["aisc"])
-        daily["aisc_source"] = daily["quarter_period"].map(lookup["aisc_source"])
+        prices["quarter"] = prices["quarter_period"].map(lookup["quarter"])
+        prices["aisc"] = prices["quarter_period"].map(lookup["aisc"])
+        prices["aisc_source"] = prices["quarter_period"].map(lookup["aisc_source"])
 
-    daily["gold_aisc_ratio"] = daily["gold_close"] / daily["aisc"]
-    daily["normal_gold_value"] = daily["aisc"] * float(normal_multiple)
-    daily["premium_discount_pct"] = (daily["gold_close"] / daily["normal_gold_value"] - 1.0) * 100.0
+    prices["gold_aisc_ratio"] = prices["gold_close"] / prices["aisc"]
+    prices["normal_gold_value"] = prices["aisc"] * float(normal_multiple)
+    prices["premium_discount_pct"] = (prices["gold_close"] / prices["normal_gold_value"] - 1.0) * 100.0
 
     if regime_history is not None and not regime_history.empty and "gold_regime" in regime_history.columns:
         regime = regime_history.copy()
@@ -198,13 +198,13 @@ def build_gold_aisc_valuation(
             regime = regime[[regime_date, "gold_regime"]].rename(
                 columns={regime_date: "date", "gold_regime": "regime"}
             )
-            daily = pd.merge_asof(daily.sort_values("date"), regime, on="date", direction="backward")
+            prices = pd.merge_asof(prices.sort_values("date"), regime, on="date", direction="backward")
         else:
-            daily["regime"] = pd.NA
+            prices["regime"] = pd.NA
     else:
-        daily["regime"] = pd.NA
+        prices["regime"] = pd.NA
 
-    return daily.drop(columns=["quarter_period"]).reindex(columns=columns)
+    return prices.drop(columns=["quarter_period"]).reindex(columns=columns)
 
 
 def aisc_valuation_state(ratio: float) -> str:
