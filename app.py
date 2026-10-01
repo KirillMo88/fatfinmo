@@ -6810,8 +6810,8 @@ def main():
         "Table",
         "Charts",
         "Graphs",
-        "Technical Outlook v3",
         "AI Dashboard",
+        "Technical Outlook",
         "Market Cycle",
         "Liquidity Cycle",
         "Business Cycle",
@@ -6832,9 +6832,9 @@ def main():
         "Description",
         "Tester",
     ]
-    # Migrate sessions that were left on a retired Technical Outlook tab.
-    if st.session_state.get("active_main_view") in {"Technical Outlook", "Technical Outlook v0"}:
-        st.session_state["active_main_view"] = "Technical Outlook v3"
+    # Migrate sessions that still reference the previous tab label.
+    if st.session_state.get("active_main_view") in {"Technical Outlook v3", "Technical Outlook v0"}:
+        st.session_state["active_main_view"] = "Technical Outlook"
     active_view = st.radio(
         "View",
         options=view_options,
@@ -7052,7 +7052,7 @@ def main():
         else:
             graph_ordered_df = base_df
         render_graphs_tab(graph_ordered_df.drop(columns=["__row_id__"], errors="ignore"), selected_universe, selected_universe_name)
-    elif active_view == "Technical Outlook v3":
+    elif active_view == "Technical Outlook":
         render_technical_outlook_simple_v3_tab(table_df.get("Ticker", pd.Series(dtype="object")).dropna().astype(str).tolist())
     elif active_view == "AI Dashboard":
         render_ai_dashboard_tab()
