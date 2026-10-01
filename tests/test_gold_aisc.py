@@ -6,10 +6,10 @@ import pandas as pd
 from gold_regime.aisc import (
     ANNUAL_AISC_HISTORY,
     AISC_QUARTERLY_STATUS,
-    NORMAL_AISC_MULTIPLE,
     aisc_valuation_state,
     build_gold_aisc_valuation,
     build_quarterly_aisc,
+    median_gold_aisc_ratio,
 )
 from gold_regime.aisc_view import build_gold_aisc_valuation_fig, filter_aisc_range
 from gold_regime.demand_structure import DEMAND_CATEGORIES, build_demand_structure_frame
@@ -48,10 +48,12 @@ def test_historical_annual_aisc_values_appear_in_gold_chart_with_readable_source
     dates = pd.to_datetime(["2000-01-03", "2010-01-04", "2012-01-03"])
     gold = pd.Series([280.0, 1100.0, 1600.0], index=dates)
     valuation = build_gold_aisc_valuation(gold)
-    figure = build_gold_aisc_valuation_fig(valuation)
+    figure = build_gold_aisc_valuation_fig(valuation, median_multiple=median_gold_aisc_ratio(valuation))
     historical = next(trace for trace in figure.data if trace.name == "Historical AISC")
 
     assert historical.y.tolist() == [250.0, 801.0, 1112.0]
+    assert historical.type == "bar"
+    assert len(historical.x) == 3
     assert [row[1] for row in historical.customdata] == [
         "Reconstructed", "Metals Focus retrospective", "Metals Focus"
     ]
@@ -68,9 +70,11 @@ def test_daily_aisc_is_a_quarterly_step_function_and_actual_overrides_estimate()
     assert valuation["aisc"].tolist() == [1785.0, 1785.0, 1800.0, 1800.0]
     assert valuation["aisc_source"].tolist() == ["ACTUAL", "ACTUAL", "ACTUAL", "ACTUAL"]
     assert np.isclose(valuation.loc[1, "gold_aisc_ratio"], 4671.792 / 1785.0)
+    median_ratio = valuation["gold_aisc_ratio"].median()
+    assert np.allclose(valuation["normal_gold_value"], valuation["aisc"] * median_ratio)
     assert np.isclose(
         valuation.loc[1, "premium_discount_pct"],
-        (4671.792 / (1785.0 * NORMAL_AISC_MULTIPLE) - 1.0) * 100.0,
+        (4671.792 / (1785.0 * median_ratio) - 1.0) * 100.0,
     )
 
 

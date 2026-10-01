@@ -97,7 +97,6 @@ def build_gold_regime_snapshot(
         gold_price,
         actual_quarterly=aisc_cfg.get("actual_quarterly"),
         qoq_growth=float(aisc_cfg.get("qoq_growth", 0.025)),
-        normal_multiple=float(aisc_cfg.get("normal_multiple", 1.625)),
         regime_history=history,
     )
     aisc_current = aisc_history.iloc[-1].to_dict() if not aisc_history.empty else {}

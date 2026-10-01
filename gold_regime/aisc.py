@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 
 
-NORMAL_AISC_MULTIPLE = 1.625
 AISC_QOQ_GROWTH = 0.025
 AISC_ZONE_THRESHOLDS = (1.25, 1.45, 1.80, 2.10, 2.40)
 
@@ -77,7 +76,6 @@ AISC_QUARTERLY_STATUS: dict[pd.Period, str] = {
 
 AISC_DEFAULT_CONFIG = {
     "qoq_growth": AISC_QOQ_GROWTH,
-    "normal_multiple": NORMAL_AISC_MULTIPLE,
     "actual_quarterly": ACTUAL_AISC_QUARTERLY,
 }
 
@@ -157,11 +155,19 @@ def _normalize_gold_bars(gold_prices: pd.Series | pd.DataFrame) -> pd.DataFrame:
     return frame.dropna(subset=["date", "gold_close"]).sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
 
 
+def median_gold_aisc_ratio(history: pd.DataFrame) -> float:
+    """Return the median positive Gold/AISC ratio across all available bars."""
+    if "gold_aisc_ratio" not in history.columns:
+        return float("nan")
+    ratios = pd.to_numeric(history["gold_aisc_ratio"], errors="coerce")
+    ratios = ratios.loc[np.isfinite(ratios) & ratios.gt(0)]
+    return float(ratios.median()) if not ratios.empty else float("nan")
+
+
 def build_gold_aisc_valuation(
     gold_prices: pd.Series | pd.DataFrame,
     actual_quarterly: dict[str | pd.Period, float] | None = None,
     qoq_growth: float = AISC_QOQ_GROWTH,
-    normal_multiple: float = NORMAL_AISC_MULTIPLE,
     regime_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Join Gold price bars with a quarterly step-function AISC valuation series."""
@@ -186,7 +192,8 @@ def build_gold_aisc_valuation(
         prices["aisc_source"] = prices["quarter_period"].map(lookup["aisc_source"])
 
     prices["gold_aisc_ratio"] = prices["gold_close"] / prices["aisc"]
-    prices["normal_gold_value"] = prices["aisc"] * float(normal_multiple)
+    median_ratio = median_gold_aisc_ratio(prices)
+    prices["normal_gold_value"] = prices["aisc"] * median_ratio
     prices["premium_discount_pct"] = (prices["gold_close"] / prices["normal_gold_value"] - 1.0) * 100.0
 
     if regime_history is not None and not regime_history.empty and "gold_regime" in regime_history.columns:

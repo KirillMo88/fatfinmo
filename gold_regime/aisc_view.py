@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from .aisc import AISC_ZONE_THRESHOLDS, NORMAL_AISC_MULTIPLE, aisc_valuation_state
+from .aisc import AISC_ZONE_THRESHOLDS, aisc_valuation_state, median_gold_aisc_ratio
 from .models import GoldAISCValuationSnapshot
 
 
@@ -78,28 +78,35 @@ def render_gold_aisc_valuation(
 
     current = snapshot.current or data.iloc[-1].to_dict()
     ratio = _number(current.get("gold_aisc_ratio"))
+    median_ratio = median_gold_aisc_ratio(snapshot.history)
     gold = _number(current.get("gold_close"))
     aisc = _number(current.get("aisc"))
     source = str(current.get("aisc_source") or "N/A")
     quarter = str(current.get("quarter") or "N/A")
     state = aisc_valuation_state(ratio)
 
-    cards = st.columns(6)
+    cards = st.columns(7)
     with cards[0]:
         st.metric("Gold / AISC", "N/A" if not np.isfinite(ratio) else f"{ratio:.2f}×")
     with cards[1]:
-        st.metric("Interpretation", state)
+        st.metric("Median Gold / AISC", "N/A" if not np.isfinite(median_ratio) else f"{median_ratio:.2f}×")
     with cards[2]:
-        st.metric("Gold Price", "N/A" if not np.isfinite(gold) else f"${gold:,.0f}")
+        st.metric("Interpretation", state)
     with cards[3]:
-        st.metric("Current AISC", "N/A" if not np.isfinite(aisc) else f"${aisc:,.0f}")
+        st.metric("Gold Price", "N/A" if not np.isfinite(gold) else f"${gold:,.0f}")
     with cards[4]:
-        st.metric("AISC Source", AISC_SOURCE_LABELS.get(source.upper(), source.title()))
+        st.metric("Current AISC", "N/A" if not np.isfinite(aisc) else f"${aisc:,.0f}")
     with cards[5]:
+        st.metric("AISC Source", AISC_SOURCE_LABELS.get(source.upper(), source.title()))
+    with cards[6]:
         st.metric("Quarter", quarter)
 
     st.plotly_chart(
-        build_gold_aisc_valuation_fig(data, aisc_range_window(snapshot.history, selected_range, range_end)),
+        build_gold_aisc_valuation_fig(
+            data,
+            aisc_range_window(snapshot.history, selected_range, range_end),
+            median_multiple=median_ratio,
+        ),
         use_container_width=True,
         config={"displayModeBar": False, "responsive": True},
     )
@@ -108,6 +115,7 @@ def render_gold_aisc_valuation(
 def build_gold_aisc_valuation_fig(
     frame: pd.DataFrame,
     x_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
+    median_multiple: float | None = None,
 ) -> go.Figure:
     data = frame.sort_values("date").copy()
     data["date"] = pd.to_datetime(data["date"], errors="coerce")
@@ -116,6 +124,9 @@ def build_gold_aisc_valuation_fig(
     data["gold_aisc_ratio"] = pd.to_numeric(data["gold_aisc_ratio"], errors="coerce")
     data["premium_discount_pct"] = pd.to_numeric(data["premium_discount_pct"], errors="coerce")
     data = data.dropna(subset=["date", "aisc", "gold_aisc_ratio"])
+    if median_multiple is None:
+        median_multiple = median_gold_aisc_ratio(data)
+    multiple_label = f"{median_multiple:.2f}×" if np.isfinite(median_multiple) else "Median multiple"
 
     fig = make_subplots(
         rows=3,
@@ -125,7 +136,9 @@ def build_gold_aisc_valuation_fig(
         vertical_spacing=0.045,
         subplot_titles=(
             "Gold Price / Global AISC",
-            f"Gold Premium / Discount vs {NORMAL_AISC_MULTIPLE:g}× AISC",
+            f"Gold Premium / Discount vs {multiple_label} AISC"
+            if np.isfinite(median_multiple)
+            else "Gold Premium / Discount vs median × AISC",
             "Global AISC",
         ),
     )
@@ -172,9 +185,7 @@ def build_gold_aisc_valuation_fig(
 
     premium = data["premium_discount_pct"]
     premium_colors = np.where(premium.ge(0.0), "#ff3b30", "#00e676")
-    premium_custom = np.column_stack(
-        [data["gold_close"].to_numpy(), (data["aisc"] * NORMAL_AISC_MULTIPLE).to_numpy()]
-    )
+    premium_custom = np.column_stack([data["gold_close"].to_numpy(), data["normal_gold_value"].to_numpy()])
     fig.add_trace(
         go.Bar(
             x=data["date"],
@@ -184,7 +195,7 @@ def build_gold_aisc_valuation_fig(
             customdata=premium_custom,
             hovertemplate=(
                 "Date: %{x|%Y-%m-%d}<br>Gold Close: $%{customdata[0]:,.0f}<br>"
-                f"{NORMAL_AISC_MULTIPLE:g}× AISC: $%{{customdata[1]:,.0f}}<br>Premium / Discount: %{{y:+.1f}}%<extra></extra>"
+                f"{multiple_label} AISC: $%{{customdata[1]:,.0f}}<br>Premium / Discount: %{{y:+.1f}}%<extra></extra>"
             ),
         ),
         row=2,
@@ -192,25 +203,28 @@ def build_gold_aisc_valuation_fig(
     )
     fig.add_hline(y=0.0, line={"color": "#f8fafc", "width": 1.2, "dash": "dot"}, row=2, col=1)
 
-    for source_name, selector, dash, color in (
-        ("Historical", source.ne("ESTIMATED"), "solid", "#38bdf8"),
-        ("Estimated", source.eq("ESTIMATED"), "dash", "#f59e0b"),
+    quarterly = data.sort_values("date").groupby("quarter", as_index=False, sort=True).tail(1)
+    quarterly_source = quarterly["aisc_source"].fillna("N/A").astype(str)
+    bar_width_ms = 70 * 24 * 60 * 60 * 1000
+    for source_name, selector, color in (
+        ("Historical", quarterly_source.ne("ESTIMATED"), "#38bdf8"),
+        ("Estimated", quarterly_source.eq("ESTIMATED"), "#f59e0b"),
     ):
-        segment = data[selector]
+        segment = quarterly.loc[selector]
         if segment.empty:
             continue
         source_labels = segment["aisc_source"].fillna("N/A").astype(str).map(
             lambda value: AISC_SOURCE_LABELS.get(value.upper(), value.title())
         )
         fig.add_trace(
-            go.Scatter(
+            go.Bar(
                 x=segment["date"],
                 y=segment["aisc"],
-                mode="lines",
+                width=bar_width_ms,
                 name=f"{source_name} AISC",
-                line={"color": color, "width": 2.2, "dash": dash, "shape": "hv"},
+                marker={"color": color, "line": {"color": color, "width": 0.5}},
                 customdata=np.column_stack([segment["quarter"].astype(str), source_labels]),
-                hovertemplate="Date: %{x|%Y-%m-%d}<br>Quarter: %{customdata[0]}<br>AISC: $%{y:,.0f}<br>%{customdata[1]}<extra></extra>",
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>Quarter: %{customdata[0]}<br>AISC: $%{y:,.0f}<br>Source: %{customdata[1]}<extra></extra>",
             ),
             row=3,
             col=1,
@@ -230,6 +244,7 @@ def build_gold_aisc_valuation_fig(
         margin={"l": 70, "r": 25, "t": 60, "b": 45},
         legend={"orientation": "h", "y": 1.02, "x": 0},
         hovermode="x unified",
+        barmode="overlay",
     )
     return fig
 
