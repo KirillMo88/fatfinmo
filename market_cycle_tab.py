@@ -13,6 +13,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from ta.momentum import RSIIndicator
 
 from current_risk import classify_component_state, current_risk_new_event
 from market_cycle import MarketCycleSnapshot, build_market_cycle_snapshot
@@ -315,11 +316,13 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
         render_spy_macro_outlook(spy_macro_outlook, history)
 
     st.markdown("### Current Risk")
+    current_risk = current_risk_with_historical_outlook(current, snapshot.outlook)
+    current_risk = current_risk_with_chart_rsi_divergence(current_risk, snapshot.daily)
     risk_col, confirm_col = st.columns([1.05, 1.25])
     with risk_col:
-        st.plotly_chart(build_current_risk_components_fig(current), use_container_width=True, config=MARKET_CYCLE_PLOTLY_CONFIG)
+        st.plotly_chart(build_current_risk_components_fig(current_risk), use_container_width=True, config=MARKET_CYCLE_PLOTLY_CONFIG)
     with confirm_col:
-        render_current_risk_signal_table(current)
+        render_current_risk_signal_table(current_risk)
     risk_range_start, risk_range_end = range_domain(snapshot.daily, market_cycle_range)
     risk_history_start = max(pd.Timestamp("2015-01-01"), pd.Timestamp(risk_range_start))
     st.plotly_chart(
@@ -604,6 +607,98 @@ def build_top_level_analytics(
     if fundamental_outlook is not None:
         cards.append(("Fundamental Outlook", format_fundamental_outlook_rows(fundamental_outlook)))
     return cards
+
+
+def current_risk_with_historical_outlook(current: dict[str, Any], outlook: pd.DataFrame) -> dict[str, Any]:
+    """Use the 3M Historical Outlook drawdown probability in Current Risk displays."""
+    result = dict(current)
+    result["CurrentRiskDrawdownRisk"] = np.nan
+    result["CurrentRiskDrawdownRiskState"] = "DATA INCOMPLETE"
+    result["HistoricalOutlook3MAnalogN"] = 0
+    if outlook is None or outlook.empty or "Horizon" not in outlook:
+        return result
+
+    rows = outlook.loc[outlook["Horizon"].astype(str).eq("3M")]
+    if rows.empty:
+        return result
+
+    row = rows.iloc[0]
+    probability = safe_float(row.get("Risk of >15% Drawdown"))
+    sample_n = safe_float(row.get("Independent Analog N"))
+    result["CurrentRiskDrawdownRisk"] = probability * 100 if np.isfinite(probability) else np.nan
+    result["CurrentRiskDrawdownRiskState"] = classify_component_state(result["CurrentRiskDrawdownRisk"])
+    result["HistoricalOutlook3MAnalogN"] = int(sample_n) if np.isfinite(sample_n) else 0
+    return result
+
+
+def current_risk_with_chart_rsi_divergence(current: dict[str, Any], daily: pd.DataFrame) -> dict[str, Any]:
+    """Override RSI Divergence Risk for its Current Risk visual only; PVC/model remain untouched."""
+    result = dict(current)
+    result["CurrentRiskRSIDivergenceRisk"] = np.nan
+    result["CurrentRiskRSIDivergenceRiskState"] = "DATA INCOMPLETE"
+
+    required = ["CurrentRiskSPYRawClose", "CurrentRiskSPY20DHigh", "CurrentRiskDailyRSI14", "CurrentRiskDailyRSI20DMax"]
+    daily_values = [safe_float(current.get(key)) for key in required]
+    if not all(np.isfinite(value) for value in daily_values):
+        return result
+    if daily is None or "SPY_RawClose" not in daily:
+        return result
+
+    close = pd.to_numeric(daily["SPY_RawClose"], errors="coerce")
+    if close.empty:
+        return result
+    close.index = pd.to_datetime(daily.index, errors="coerce")
+    close = close.loc[~close.index.isna()].sort_index().dropna()
+    if close.empty:
+        return result
+
+    weekly_close = close.resample("W-FRI").last().dropna()
+    as_of = pd.to_datetime(current.get("CurrentRiskAsOfDate", current.get("Date")), errors="coerce")
+    if pd.notna(as_of):
+        weekly_close = weekly_close.loc[weekly_close.index <= as_of]
+    if weekly_close.empty:
+        return result
+
+    weekly_rsi = RSIIndicator(close=weekly_close, window=14).rsi()
+    weekly_high26 = weekly_close.rolling(26, min_periods=26).max()
+    weekly_rsi_max26 = weekly_rsi.rolling(26, min_periods=13).max()
+    weekly_values = [weekly_close.iloc[-1], weekly_high26.iloc[-1], weekly_rsi.iloc[-1], weekly_rsi_max26.iloc[-1]]
+    if not all(np.isfinite(safe_float(value)) for value in weekly_values):
+        return result
+
+    score = chart_rsi_divergence_score(
+        daily_close=daily_values[0],
+        daily_high20=daily_values[1],
+        daily_rsi=daily_values[2],
+        daily_rsi_high20=daily_values[3],
+        weekly_close=safe_float(weekly_values[0]),
+        weekly_high26=safe_float(weekly_values[1]),
+        weekly_rsi=safe_float(weekly_values[2]),
+        weekly_rsi_high26=safe_float(weekly_values[3]),
+    )
+    result["CurrentRiskRSIDivergenceRisk"] = score
+    result["CurrentRiskRSIDivergenceRiskState"] = classify_component_state(score)
+    return result
+
+
+def chart_rsi_divergence_score(
+    *,
+    daily_close: float,
+    daily_high20: float,
+    daily_rsi: float,
+    daily_rsi_high20: float,
+    weekly_close: float,
+    weekly_high26: float,
+    weekly_rsi: float,
+    weekly_rsi_high26: float,
+) -> float:
+    values = [daily_close, daily_high20, daily_rsi, daily_rsi_high20, weekly_close, weekly_high26, weekly_rsi, weekly_rsi_high26]
+    if not all(np.isfinite(safe_float(value)) for value in values):
+        return np.nan
+    daily_divergence = daily_close >= 0.95 * daily_high20 and daily_rsi_high20 - daily_rsi >= 15.0
+    weekly_divergence = weekly_close >= 0.95 * weekly_high26 and weekly_rsi_high26 - weekly_rsi >= 10.0
+    blowoff = daily_rsi >= 78.0
+    return float(min(100, 55 * int(daily_divergence) + 45 * int(weekly_divergence) + 55 * int(blowoff)))
 
 
 def render_top_level_panel(title: str, rows: list[tuple[str, str]]) -> None:
@@ -1713,10 +1808,10 @@ def strip_colors_for_domain(domain: list[str]) -> list[list[Any]]:
 
 def build_current_risk_components_fig(current: dict[str, Any]) -> go.Figure:
     rows = [
-        ("Risk of >15% Drawdown", "CurrentRiskDrawdownRisk", f"Existing Market Cycle probability; N={num(current.get('SPX_1M_DD20_AnalogN'), 0)}"),
+        ("Risk of >15% Drawdown", "CurrentRiskDrawdownRisk", f"Historical Outlook 3M probability; N={num(current.get('HistoricalOutlook3MAnalogN'), 0)}"),
         ("Price Cycle Vulnerability Risk", "CurrentRiskPriceCycleVulnerabilityRisk", f"PVC MAX10D; current PVC={num(current.get('PVC_V2'))}"),
         ("Breadth Risk", "CurrentRiskBreadthRisk", f"S5FI={num(current.get('SPXAboveSMA50D'))}; 5D change={num(current.get('CurrentRiskBreadth5DChange'))}pp"),
-        ("RSI Divergence Risk", "CurrentRiskRSIDivergenceRisk", f"Daily divergence={text(current.get('PVC_DailyRSIDivergence'))}; weekly={text(current.get('PVC_WeeklyRSIDivergence'))}"),
+        ("RSI Divergence Risk", "CurrentRiskRSIDivergenceRisk", "Visual-only: daily/weekly divergence + RSI blowoff; PVC unchanged"),
         ("VIX Risk", "CurrentRiskVIXRisk", f"VIX={num(current.get('VIX'))}; 3D change={pct(current.get('CurrentRiskVIX3DChange'))}"),
         ("High Beta Risk (QQQ)", "CurrentRiskHighBetaRisk", f"QQQ/SPY depth={pct(current.get('CurrentRiskQQQDivergenceDepth'))}"),
         ("HY Risk (BAMLH0A0HYM2)", "CurrentRiskHYRisk", f"HY OAS={num(current.get('HY_OAS'), 2)}; 5D change={num(current.get('CurrentRiskHY5DChange'), 2)}"),
