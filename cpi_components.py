@@ -319,6 +319,14 @@ def build_cpi_components_chart(breakdown: pd.DataFrame, horizon: str) -> go.Figu
     labels = [f"{name}<br>{CPI_SERIES[name]['weight_2026']:.1f}%" for name in CPI_SERIES]
     colors = [CPI_SERIES[name]["color"] for name in CPI_SERIES]
     values = pd.to_numeric(data["InflationRate"], errors="coerce").to_numpy(dtype=float)
+    contributions = [
+        value * float(weight) / 100 if group == "component" and np.isfinite(value) else np.nan
+        for value, weight, group in zip(values, data["Weight_2026"], data["Group"])
+    ]
+    bar_labels = [
+        f"{value:.1f}% ({contribution:+.2f} pp)" if np.isfinite(contribution) else f"{value:.1f}%"
+        for value, contribution in zip(values, contributions)
+    ]
     customdata = np.column_stack(
         [
             data["Category"].astype(str),
@@ -328,6 +336,7 @@ def build_cpi_components_chart(breakdown: pd.DataFrame, horizon: str) -> go.Figu
             data["ComparisonIndex"].map(lambda value: f"{float(value):.3f}"),
             pd.to_datetime(data["ReferenceMonth"]).dt.strftime("%b %Y"),
             data["Series_ID"].astype(str),
+            [f"{value:+.2f} pp" if np.isfinite(value) else "Not applicable" for value in contributions],
         ]
     )
     ref_month = pd.Timestamp(data["ReferenceMonth"].iloc[0]).strftime("%b %Y")
@@ -345,7 +354,7 @@ def build_cpi_components_chart(breakdown: pd.DataFrame, horizon: str) -> go.Figu
             y=values,
             width=0.72,
             marker={"color": colors, "line": {"color": "#0f131a", "width": 0.8}},
-            text=[f"{value:.1f}%" for value in values],
+            text=bar_labels,
             textposition="outside",
             cliponaxis=False,
             customdata=customdata,
@@ -353,6 +362,7 @@ def build_cpi_components_chart(breakdown: pd.DataFrame, horizon: str) -> go.Figu
                 "<b>%{customdata[0]}</b><br>2026 weight: %{customdata[1]}<br>Period: %{customdata[2]}<br>"
                 f"{rate_label}: %{{y:.1f}}%<br>Current index: %{{customdata[3]}}<br>"
                 "Index at comparison month: %{customdata[4]}<br>Observation: %{customdata[5]}<br>"
+                "Estimated headline CPI contribution: %{customdata[7]}<br>"
                 "BLS series: %{customdata[6]}<extra></extra>"
             ),
             name="Annualized inflation",

@@ -212,7 +212,9 @@ def render_cpi_components_breakdown(refresh_nonce: int = 0) -> None:
     st.caption(
         f"Source: [U.S. Bureau of Labor Statistics]({source}) · Latest common observation: {observation}. "
         "First four bars are CPI components; CPI and Core CPI are benchmark indexes. "
-        "Reference weights are fixed 2026 basket weights and are not used to reconstruct the indexes."
+        "For each component, the value in parentheses is its estimated contribution to headline CPI in percentage points "
+        "(inflation rate × fixed 2026 basket weight); CPI and Core CPI are not additive contributions. "
+        "Reference weights are not used to reconstruct the indexes."
     )
 
 

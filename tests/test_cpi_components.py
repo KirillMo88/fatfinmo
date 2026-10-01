@@ -96,8 +96,19 @@ def test_negative_inflation_renders_below_zero_with_signed_bar_label() -> None:
     breakdown = cpi.calculate_cpi_breakdown(sample_raw(), "12M")
     breakdown.loc[breakdown["Category"].eq("Energy"), "InflationRate"] = -1.4
     fig = cpi.build_cpi_components_chart(breakdown, "12M")
-    assert fig.data[0].text[1] == "-1.4%"
+    assert fig.data[0].text[1] == "-1.4% (-0.09 pp)"
     assert fig.layout.yaxis.range[0] < 0 < fig.layout.yaxis.range[1]
+
+
+def test_component_bar_shows_weighted_headline_cpi_contribution() -> None:
+    breakdown = cpi.calculate_cpi_breakdown(sample_raw(), "12M")
+    breakdown.loc[breakdown["Category"].eq("Energy"), "InflationRate"] = 16.3
+    fig = cpi.build_cpi_components_chart(breakdown, "12M")
+
+    assert fig.data[0].text[1] == "16.3% (+1.04 pp)"
+    assert fig.data[0].text[4:] == (f"{fig.data[0].y[4]:.1f}%", f"{fig.data[0].y[5]:.1f}%")
+    assert fig.data[0].customdata[1][7] == "+1.04 pp"
+    assert fig.data[0].customdata[4][7] == "Not applicable"
 
 
 def test_component_order_and_fixed_2026_weights() -> None:
