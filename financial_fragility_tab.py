@@ -15,6 +15,7 @@ from global_dashboard_tab import _load_snapshots
 
 PLOT_CONFIG = {"displayModeBar": False, "responsive": True}
 STATE_COLORS = {
+    "LOW": "#22c55e",
     "NORMAL": "#22c55e",
     "WATCH": "#facc15",
     "HIGH": "#f97316",
@@ -35,21 +36,34 @@ def _fmt(value: Any, digits: int = 1, suffix: str = "") -> str:
     return f"{number:.{digits}f}{suffix}" if np.isfinite(number) else "n/a"
 
 
-def _state_color(value: Any) -> str:
+def _state_color(value: Any, overrides: dict[str, str] | None = None) -> str:
     text = str(value).upper()
+    if overrides and text in overrides:
+        return overrides[text]
     return STATE_COLORS.get(text, "#64748b")
 
 
-def _card(title: str, subtitle: str, state: Any, score: Any, rows: list[tuple[str, Any]], *, wide: bool = False) -> None:
+def _card(
+    title: str,
+    subtitle: str,
+    state: Any,
+    score: Any,
+    rows: list[tuple[str, Any]],
+    *,
+    wide: bool = False,
+    score_suffix: str = "/100",
+    score_digits: int = 0,
+    status_color_overrides: dict[str, str] | None = None,
+) -> None:
     detail = "".join(
         f"<div class='ff-row'><span>{html.escape(str(label))}</span><strong>{html.escape(str(value))}</strong></div>"
         for label, value in rows
     )
     st.markdown(
         f"""
-        <div class='ff-card{' ff-wide' if wide else ''}' style='border-top-color:{_state_color(state)}'>
+        <div class='ff-card{' ff-wide' if wide else ''}' style='border-top-color:{_state_color(state, status_color_overrides)}'>
           <div class='ff-card-head'><div><div class='ff-title'>{html.escape(title)}</div><div class='ff-subtitle'>{html.escape(subtitle)}</div></div>
-          <div class='ff-score'><span>{html.escape(str(state))}</span><b>{_fmt(score, 0)} /100</b></div></div>
+          <div class='ff-score'><span>{html.escape(str(state))}</span><b>{_fmt(score, score_digits)} {html.escape(score_suffix)}</b></div></div>
           <div class='ff-details'>{detail}</div>
         </div>
         """,
@@ -129,6 +143,7 @@ def _render_methodology() -> None:
         "Macro Pressure": "0.60 Liquidity Pressure Risk + 0.20 Rates Pressure Risk + 0.20 Core FC Pressure. Liquidity uses the production forecast state and pressure score; rates and FC levels use trailing point-in-time percentiles.",
         "Market Vulnerability": "0.55 SMA200W Stretch + 0.20 ROC Momentum 3M Risk + 0.10 Positioning Vulnerability + 0.05 Reserve Vulnerability + 0.10 reduced Current Risk Vulnerability. Structural SMA200M extension is excluded.",
         "Credit Stress": "HY OAS 3Y point-in-time percentile only. IG OAS and HY direction remain diagnostics and do not receive an independent score weight.",
+        "Financial Stress Layer": "Escalation sequence: Rates Pressure Risk and the 26-week yield-curve regime → Collateral Instability classified from the raw MOVE index (<50 Low, 50–80 Normal, >80–110 Elevated, >110–141 High, >141 Extreme) → Funding Stress. The MOVE z-score remains a separate diagnostic; these status labels do not change the overall regime calculation.",
         "Funding Stress": "max(25 x Funding Core, Funding State floor), clipped to 0-100. Reserve Vulnerability is kept separate from actual Funding Stress.",
         "Market Volatility Stress": "0.30 VIX Level + 0.30 VIX Momentum + 0.25 VIX/VIX3M Term Structure + 0.15 Realized Volatility 20D, with PIT percentiles where applicable.",
         "Transition Risk": "0.30 Liquidity + 0.25 Market Cycle + 0.20 Business Cycle + 0.15 Rates/FC + 0.10 Cross-Cycle Divergence. It measures instability and turning points, not stress itself.",
@@ -189,15 +204,35 @@ def render_financial_fragility_tab(api_key: str | None, liquidity_regime: pd.Dat
             ("Breadth / Beta / RSI", f"{_fmt(current.get('BreadthRisk'), 0)} / {_fmt(current.get('HighBetaRisk'), 0)} / {_fmt(current.get('RSIDivergenceRisk'), 0)}"),
         ])
 
+    st.markdown("### FINANCIAL STRESS LAYER")
+    st.caption("Escalation sequence from rate/curve pressure through collateral instability to funding stress")
+    rate_col, arrow_one, collateral_col, arrow_two, funding_col = st.columns([1.0, 0.10, 1.0, 0.10, 1.0])
+    with rate_col:
+        _card("Rates and Curve Slope", "Rates pressure and 26-week curve regime", current.get("RatesPressureStatus", "UNAVAILABLE"), current.get("RatesPressureRisk"), [
+            ("Rates Pressure Risk", _fmt(current.get("RatesPressureRisk"), 1)),
+            ("Curve 26W", current.get("Curve26W", "n/a")),
+            ("Data As Of", pd.Timestamp(current["RatesDataAsOf"]).strftime("%Y-%m-%d") if pd.notna(current.get("RatesDataAsOf")) else "n/a"),
+        ], status_color_overrides={"HIGH": "#ef4444"})
+    with arrow_one:
+        st.markdown("<div style='padding-top:76px;text-align:center;font-size:2rem;color:#8ea4bd'>→</div>", unsafe_allow_html=True)
+    with collateral_col:
+        _card("Collateral Instability", "Status classified from the raw MOVE Index", current.get("CollateralStressStatus", "UNAVAILABLE"), current.get("MOVE"), [
+            ("MOVE Index", _fmt(current.get("MOVE"), 2)),
+            ("MOVE z-score (model diagnostic)", _fmt(current.get("MOVE_Z"), 2)),
+            ("Data As Of", pd.Timestamp(current["FundingDataAsOf"]).strftime("%Y-%m-%d") if pd.notna(current.get("FundingDataAsOf")) else "n/a"),
+        ], score_suffix="MOVE", score_digits=2, status_color_overrides={"HIGH": "#ef4444"})
+    with arrow_two:
+        st.markdown("<div style='padding-top:76px;text-align:center;font-size:2rem;color:#8ea4bd'>→</div>", unsafe_allow_html=True)
+    with funding_col:
+        _card("Funding Stress", "Funding system and money-market strain", current.get("FundingStressState"), current.get("FundingStress"), [("Funding Core", _fmt(current.get("FundingCore"), 2)), ("Money Market Stress", _fmt(current.get("MoneyMarketStress"), 2)), ("Funding State", current.get("FundingState", "n/a")), ("Persistent Flag", current.get("PersistentFundingFlag", "n/a")), ("Data As Of", pd.Timestamp(current["FundingDataAsOf"]).strftime("%Y-%m-%d") if pd.notna(current.get("FundingDataAsOf")) else "n/a")])
+
     st.markdown("### STRESS REALIZATION LAYER")
     st.caption("Bottom-up confirmation through actual market stress channels")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
-        _card("Credit Stress", "Stress transmission through HY credit", current.get("CreditStressState"), current.get("CreditStress"), [("HY OAS 3Y Percentile", _fmt(current.get("HYOAS_3Y_Percentile"), 1)), ("Current HY OAS", _fmt(current.get("HY_OAS"), 2)), ("Interpretation", "Credit market does not confirm stress." if _number(current.get("CreditStress")) < 50 else "Credit stress is transmitting.")])
+        _card("Credit Stress", "Stress transmission through HY credit", current.get("CreditStressState"), current.get("CreditStress"), [("HY OAS 3Y Percentile", _fmt(current.get("HYOAS_3Y_Percentile"), 1)), ("Current HY OAS", _fmt(current.get("HY_OAS"), 2)), ("Data As Of", pd.Timestamp(current["CreditDataAsOf"]).strftime("%Y-%m-%d") if pd.notna(current.get("CreditDataAsOf")) else "n/a"), ("Interpretation", "Credit market does not confirm stress." if _number(current.get("CreditStress")) < 50 else "Credit stress is transmitting.")])
     with col2:
-        _card("Funding Stress", "Funding system and money-market strain", current.get("FundingStressState"), current.get("FundingStress"), [("Funding Core", _fmt(current.get("FundingCore"), 2)), ("Money Market Stress", _fmt(current.get("MoneyMarketStress"), 2)), ("Funding State", current.get("FundingState", "n/a")), ("Persistent Flag", current.get("PersistentFundingFlag", "n/a"))])
-    with col3:
-        _card("Market Volatility Stress", "Fast market shock channel", current.get("MarketVolatilityStressState"), current.get("MarketVolatilityStress"), [("VIX", _fmt(current.get("VIX"), 2)), ("VIX / VIX3M", _fmt(current.get("VIX_VIX3M_Ratio"), 3)), ("VIX Momentum Risk", _fmt(current.get("VIXMomentumRisk"), 1)), ("Realized Volatility", _fmt(current.get("RealizedVolatility20D"), 3))])
+        _card("Market Volatility Stress", "Fast market shock channel", current.get("MarketVolatilityStressState"), current.get("MarketVolatilityStress"), [("VIX", _fmt(current.get("VIX"), 2)), ("VIX / VIX3M", _fmt(current.get("VIX_VIX3M_Ratio"), 3)), ("VIX Momentum Risk", _fmt(current.get("VIXMomentumRisk"), 1)), ("Realized Volatility", _fmt(current.get("RealizedVolatility20D"), 3)), ("Data As Of", pd.Timestamp(current["MarketDataAsOf"]).strftime("%Y-%m-%d") if pd.notna(current.get("MarketDataAsOf")) else "n/a")])
 
     st.markdown("### TRANSITION RISK")
     _card("Transition Risk", "How stable the current regime configuration is", current.get("TransitionRiskState"), current.get("TransitionRisk"), [
