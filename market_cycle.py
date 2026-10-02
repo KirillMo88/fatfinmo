@@ -421,10 +421,11 @@ def overlay_latest_daily_current_risk(current: dict[str, Any], daily: pd.DataFra
 
 
 def latest_current_risk_signal(daily: pd.DataFrame) -> dict[str, Any]:
-    """Return the latest plotted new Current Risk signal and its observation date."""
+    """Return the latest emitted event milestone marker and its observation date."""
     empty = {
         "CurrentRiskLastSignal": "N/A",
         "CurrentRiskLastSignalDate": pd.NaT,
+        "CurrentRiskLastSignalReason": "N/A",
     }
     if daily.empty:
         return empty
@@ -436,26 +437,35 @@ def latest_current_risk_signal(daily: pd.DataFrame) -> dict[str, Any]:
     else:
         d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
     d = d.dropna(subset=["Date"]).sort_values("Date")
-    if d.empty or "CurrentRiskSignalClass" not in d:
+    if d.empty:
         return empty
-    if "CurrentRiskNewEvent" not in d:
+    if "CurrentRiskEventMarker" in d and "CurrentRiskEventMarkerClass" in d:
+        marker_col = "CurrentRiskEventMarker"
+        class_col = "CurrentRiskEventMarkerClass"
+    elif "CurrentRiskSignalClass" in d:
         if "CurrentRiskActivation" not in d:
             return empty
-        d["CurrentRiskNewEvent"] = current_risk_new_event(d["CurrentRiskActivation"], lookback_sessions=5)
+        marker_col = "CurrentRiskNewEvent"
+        class_col = "CurrentRiskSignalClass"
+        if marker_col not in d:
+            d[marker_col] = current_risk_new_event(d["CurrentRiskActivation"], lookback_sessions=5)
+    else:
+        return empty
 
     events = d[
-        d["CurrentRiskNewEvent"].fillna(False).astype(bool)
-        & d["CurrentRiskSignalClass"].astype(str).ne("INACTIVE")
+        d[marker_col].fillna(False).astype(bool)
+        & d[class_col].astype(str).ne("INACTIVE")
     ]
     if events.empty:
         return empty
     latest = events.iloc[-1]
-    signal = str(latest.get("CurrentRiskSignalClass", "")).strip()
+    signal = str(latest.get(class_col, "")).strip()
     if not signal or signal.lower() == "nan":
         return empty
     return {
         "CurrentRiskLastSignal": signal,
         "CurrentRiskLastSignalDate": pd.Timestamp(latest["Date"]),
+        "CurrentRiskLastSignalReason": str(latest.get("CurrentRiskEventMarkerReason", "EVENT_START")),
     }
 
 

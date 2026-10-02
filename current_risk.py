@@ -81,8 +81,6 @@ def calculate_current_risk_v1(frame: pd.DataFrame) -> pd.DataFrame:
         & spy.ge(0.95 * high20)
         & activation_available
     )
-    new_event = current_risk_new_event(activation, lookback_sessions=5)
-
     calm_vix = vix.shift(10).le(16.0)
     hy_level = hy_oas.ge(3.25)
     hy_widening = hy_5d_change.gt(0.0)
@@ -177,7 +175,6 @@ def calculate_current_risk_v1(frame: pd.DataFrame) -> pd.DataFrame:
     out["CurrentRiskVIXPrevious3DHigh"] = vix_previous3_high
     out["CurrentRiskVIX3DChange"] = vix_3d_change
     out["CurrentRiskActivation"] = activation
-    out["CurrentRiskNewEvent"] = new_event
     out["CurrentRiskCalmVIXBase"] = calm_vix
     out["CurrentRiskHYLevelConfirmation"] = hy_level
     out["CurrentRiskHYWidening"] = hy_widening
@@ -188,6 +185,7 @@ def calculate_current_risk_v1(frame: pd.DataFrame) -> pd.DataFrame:
     out["CurrentRiskEscalationScoreRaw"] = escalation_raw
     out["CurrentRiskEscalationScoreV2"] = escalation_active
     out["CurrentRiskSignalClass"] = signal_class
+    out["CurrentRiskActivationAvailable"] = activation_available
 
     out["CurrentRiskDrawdownRisk"] = drawdown_risk.clip(0.0, 100.0)
     out["CurrentRiskPriceCycleVulnerabilityRisk"] = pvc_max10.clip(0.0, 100.0)
@@ -227,7 +225,121 @@ def calculate_current_risk_v1(frame: pd.DataFrame) -> pd.DataFrame:
     out["HistoricalVIXMomentumRisk"] = out["CurrentRiskVIXRisk"]
     out["HistoricalVIXTermStructureRisk"] = out["CurrentRiskVIXRisk"]
     out["HistoricalCombinedVIXRisk"] = out["CurrentRiskVIXRisk"]
+    event_state = calculate_current_risk_event_engine(out)
+    for column in event_state.columns:
+        out[column] = event_state[column].to_numpy()
     return out
+
+
+def calculate_current_risk_event_engine(frame: pd.DataFrame) -> pd.DataFrame:
+    """Derive risk-event lifecycle and milestone markers from frozen daily model outputs."""
+    dates = pd.to_datetime(frame.get("Date", pd.Series(pd.NaT, index=frame.index)), errors="coerce")
+    activation = frame.get("CurrentRiskActivation", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
+    activation_available = frame.get("CurrentRiskActivationAvailable", pd.Series(True, index=frame.index)).fillna(False).astype(bool)
+    daily_status = frame.get("CurrentMarketRiskState", pd.Series("DATA INCOMPLETE", index=frame.index)).fillna("DATA INCOMPLETE").astype(str)
+    daily_signal = frame.get("CurrentRiskSignalClass", pd.Series("INACTIVE", index=frame.index)).fillna("INACTIVE").astype(str)
+    credit = frame.get("CurrentRiskCreditConfirmation", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
+
+    severity_by_status = {
+        "LOW CONFIRMATION": 1,
+        "MODERATE": 2,
+        "HIGH RISK": 3,
+        "RED FLAG": 4,
+    }
+    daily_severity = [severity_by_status.get(status, 0) if is_active else 0 for status, is_active in zip(daily_status, activation)]
+
+    output: dict[str, list[Any]] = {
+        "CurrentRiskDailyStatus": [],
+        "CurrentRiskDailySeverity": [],
+        "CurrentRiskNewEvent": [],
+        "CurrentRiskEventMarker": [],
+        "CurrentRiskEventMarkerClass": [],
+        "CurrentRiskEventMarkerReason": [],
+        "CurrentRiskEventId": [],
+        "CurrentRiskEventState": [],
+        "CurrentRiskEventStartDate": [],
+        "CurrentRiskEventLastActivationDate": [],
+        "CurrentRiskEventMaxSeverity": [],
+        "CurrentRiskEventPeakStatus": [],
+        "CurrentRiskEventCreditConfirmed": [],
+        "CurrentRiskEventNoActivationSessions": [],
+    }
+
+    event_id: str | None = None
+    event_start: Any = pd.NaT
+    last_activation: Any = pd.NaT
+    event_max_severity = 0
+    event_credit_confirmed = False
+    no_activation_sessions = 0
+
+    def peak_status(severity: int) -> str:
+        return {0: "NORMAL", 1: "LOW CONFIRMATION", 2: "MODERATE", 3: "HIGH RISK", 4: "RED FLAG"}.get(severity, "NORMAL")
+
+    for position, (date, is_active, inputs_available, status, signal, severity, credit_confirmed) in enumerate(
+        zip(dates, activation, activation_available, daily_status, daily_signal, daily_severity, credit)
+    ):
+        marker = False
+        marker_class = "INACTIVE"
+        marker_reason = ""
+        is_new_event = False
+
+        if event_id is None and is_active:
+            event_start = pd.Timestamp(date) if pd.notna(date) else pd.NaT
+            event_id = f"RISK-{event_start:%Y%m%d}" if pd.notna(event_start) else f"RISK-{position}"
+            last_activation = event_start
+            event_max_severity = int(severity)
+            event_credit_confirmed = bool(severity == 4 and credit_confirmed)
+            no_activation_sessions = 0
+            marker = True
+            marker_class = signal
+            marker_reason = "EVENT_START"
+            is_new_event = True
+        elif event_id is not None and is_active:
+            no_activation_sessions = 0
+            last_activation = pd.Timestamp(date) if pd.notna(date) else last_activation
+            if severity > event_max_severity:
+                event_max_severity = int(severity)
+                marker = True
+                marker_class = signal
+                marker_reason = "SEVERITY_ESCALATION"
+                if severity == 4 and credit_confirmed:
+                    event_credit_confirmed = True
+            elif severity == 4 and credit_confirmed and not event_credit_confirmed:
+                marker = True
+                marker_class = "RED FLAG + CREDIT CONFIRMATION"
+                marker_reason = "CREDIT_ESCALATION"
+                event_credit_confirmed = True
+        elif event_id is not None and not inputs_available:
+            # Unknown activation is not a confirmed inactive session; require five
+            # consecutive sessions with enough data to evaluate the activation gate.
+            no_activation_sessions = 0
+        elif event_id is not None:
+            no_activation_sessions += 1
+            if no_activation_sessions >= 5:
+                event_id = None
+                event_start = pd.NaT
+                last_activation = pd.NaT
+                event_max_severity = 0
+                event_credit_confirmed = False
+                no_activation_sessions = 0
+
+        event_state = "ACTIVE" if event_id is not None else "CLOSED"
+        output["CurrentRiskDailyStatus"].append(status)
+        output["CurrentRiskDailySeverity"].append(int(severity))
+        output["CurrentRiskNewEvent"].append(bool(is_new_event))
+        output["CurrentRiskEventMarker"].append(bool(marker))
+        output["CurrentRiskEventMarkerClass"].append(marker_class)
+        output["CurrentRiskEventMarkerReason"].append(marker_reason)
+        output["CurrentRiskEventId"].append(event_id)
+        output["CurrentRiskEventState"].append(event_state)
+        output["CurrentRiskEventStartDate"].append(event_start)
+        output["CurrentRiskEventLastActivationDate"].append(last_activation)
+        output["CurrentRiskEventMaxSeverity"].append(int(event_max_severity))
+        output["CurrentRiskEventPeakStatus"].append(peak_status(event_max_severity))
+        output["CurrentRiskEventCreditConfirmed"].append(bool(event_credit_confirmed))
+        output["CurrentRiskEventNoActivationSessions"].append(int(no_activation_sessions))
+
+    return pd.DataFrame(output, index=frame.index)
 
 
 def current_risk_new_event(activation: pd.Series, lookback_sessions: int = 5) -> pd.Series:
