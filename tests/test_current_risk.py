@@ -282,6 +282,26 @@ def test_event_engine_marks_late_credit_confirmation_once() -> None:
     assert result.loc[2, "CurrentRiskEventMarkerReason"] == "CREDIT_ESCALATION"
 
 
+def test_credit_confirmation_without_activation_does_not_create_marker() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2024-09-03")],
+            "CurrentRiskActivation": [False],
+            "CurrentRiskActivationAvailable": [True],
+            "CurrentMarketRiskState": ["NORMAL"],
+            "CurrentRiskSignalClass": ["INACTIVE"],
+            "CurrentRiskCreditConfirmation": [True],
+            "PVC_MAX10D": [60.0],
+        }
+    )
+
+    result = calculate_current_risk_event_engine(frame)
+
+    assert not bool(result.loc[0, "CurrentRiskEventMarker"])
+    assert result.loc[0, "CurrentRiskEventState"] == "CLOSED"
+    assert result.loc[0, "CurrentRiskEventMarkerClass"] == "INACTIVE"
+
+
 def test_2021_12_20_credit_confirmation_regression() -> None:
     frame = current_risk_fixture()
     frame["Date"] = pd.bdate_range(end="2021-12-20", periods=len(frame))
