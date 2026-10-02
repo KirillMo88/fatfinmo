@@ -15,10 +15,6 @@ def build_us_debt_m2_history(fred_data: pd.DataFrame) -> pd.DataFrame:
         "FederalDebtUSD_Bn",
         "M2USD_Bn",
         "DebtM2Ratio",
-        "SMA20",
-        "SMA50",
-        "SMA100",
-        "SMA200",
         "Support",
         "Resistance",
     ]
@@ -55,9 +51,6 @@ def build_us_debt_m2_history(fred_data: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return pd.DataFrame(columns=columns)
 
-    for window in (20, 50, 100, 200):
-        out[f"SMA{window}"] = out["DebtM2Ratio"].rolling(window, min_periods=window).mean()
-
     out["Support"] = np.nan
     out["Resistance"] = np.nan
     channel = out.loc[out["Date"].ge(DEBT_M2_CHANNEL_START)]
@@ -78,24 +71,6 @@ def build_us_debt_m2_figure(frame: pd.DataFrame):
     fig = go.Figure()
     if frame.empty:
         return fig
-
-    colors = {
-        "SMA20": "#3b82f6",
-        "SMA50": "#2dd4bf",
-        "SMA100": "#f59e0b",
-        "SMA200": "#a78bfa",
-    }
-    for name, color in colors.items():
-        fig.add_trace(
-            go.Scatter(
-                x=frame["Date"],
-                y=frame[name],
-                mode="lines",
-                name=name.replace("SMA", "SMA "),
-                line={"color": color, "width": 1.15},
-                hovertemplate=f"%{{x|%Y-%m}}<br>{name.replace('SMA', 'SMA ')}: %{{y:.3f}}<extra></extra>",
-            )
-        )
 
     fig.add_trace(
         go.Scatter(

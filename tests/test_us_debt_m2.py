@@ -37,11 +37,10 @@ def debt_m2_history_fixture() -> pd.DataFrame:
     return build_us_debt_m2_history(pd.concat([debt, m2], ignore_index=True))
 
 
-def test_debt_m2_history_computes_moving_averages_and_channel() -> None:
+def test_debt_m2_history_computes_channel() -> None:
     history = debt_m2_history_fixture()
 
-    assert history["SMA20"].notna().any()
-    assert history["SMA200"].notna().any()
+    assert not any(column.startswith("SMA") for column in history.columns)
     assert history["Support"].notna().all()
     assert history["Resistance"].notna().all()
     assert (history["Support"] < history["Resistance"]).all()
@@ -51,6 +50,8 @@ def test_debt_m2_figure_includes_channel_and_event_comments() -> None:
     history = debt_m2_history_fixture()
     figure = build_us_debt_m2_figure(history)
 
+    trace_names = {trace.name for trace in figure.data}
+    assert trace_names == {"(GFDEBTN / 1,000) / M2SL", "Long-term support", "Long-term resistance"}
     assert "Long-term support" in [trace.name for trace in figure.data]
     assert "Long-term resistance" in [trace.name for trace in figure.data]
     assert {"ASIAN CRISIS", "DOT-COM BUBBLE", "GFC + EURO CRISIS", "EVERYTHING BUBBLE"}.issubset(
