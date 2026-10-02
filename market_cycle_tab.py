@@ -732,7 +732,13 @@ def format_last_signal(current: dict[str, Any]) -> str:
     signal_date = pd.to_datetime(current.get("CurrentRiskLastSignalDate"), errors="coerce")
     if signal == "N/A" or pd.isna(signal_date):
         return "N/A"
-    return f"{signal} — {signal_date.strftime('%Y-%m-%d')}"
+    reason = {
+        "EVENT_START": "new event",
+        "SEVERITY_ESCALATION": "severity escalation",
+        "CREDIT_ESCALATION": "credit confirmation",
+    }.get(text(current.get("CurrentRiskLastSignalReason")), "")
+    suffix = f" · {reason}" if reason else ""
+    return f"{signal}{suffix} — {signal_date.strftime('%Y-%m-%d')}"
 
 
 def render_card(title: str, headline: str, rows: list[tuple[str, str]]) -> None:
@@ -1864,8 +1870,16 @@ def render_current_risk_signal_table(current: dict[str, Any]) -> None:
         height=300,
     )
     activation = "ACTIVE" if is_true_flag(current.get("CurrentRiskActivation")) else "OFF"
+    event_start = pd.to_datetime(current.get("CurrentRiskEventStartDate"), errors="coerce")
+    event_start_text = event_start.strftime("%Y-%m-%d") if pd.notna(event_start) else "—"
     st.caption(
-        f"VIX Risk Activation: {activation} | Escalation Score V2: {num(current.get('CurrentRiskEscalationScoreV2'), 0)}/6 | "
+        f"Daily Status: {text(current.get('CurrentRiskDailyStatus', current.get('CurrentMarketRiskState')))} "
+        f"(severity {num(current.get('CurrentRiskDailySeverity'), 0)}) | "
+        f"Event: {text(current.get('CurrentRiskEventState'))} from {event_start_text} | "
+        f"Event peak: {text(current.get('CurrentRiskEventPeakStatus'))} "
+        f"(severity {num(current.get('CurrentRiskEventMaxSeverity'), 0)}) | "
+        f"Credit confirmed: {'YES' if is_true_flag(current.get('CurrentRiskEventCreditConfirmed')) else 'NO'} | "
+        f"Activation: {activation} | Confirmations: {num(current.get('CurrentRiskEscalationScoreV2'), 0)}/6 | "
         f"Model: {text(current.get('CurrentRiskModelVersion'))}"
     )
 
@@ -1896,21 +1910,28 @@ def build_current_risk_signals_fig(history: pd.DataFrame, start: pd.Timestamp, e
     ]
     for category, color, symbol, size in categories:
         points = d[
-            d["CurrentRiskNewEvent"].fillna(False).astype(bool)
-            & d["CurrentRiskSignalClass"].eq(category)
+            d["CurrentRiskEventMarker"].fillna(False).astype(bool)
+            & d["CurrentRiskEventMarkerClass"].eq(category)
         ].copy()
         if points.empty:
             continue
-        custom = np.column_stack(
+        custom = np.empty((len(points), 11), dtype=object)
+        for index, column in enumerate(
             [
-                points["PVC_MAX10D"],
-                points["CurrentRiskEscalationScoreV2"],
-                points["VIX"],
-                points["SPXAboveSMA50D"],
-                points["HY_OAS"],
-                points["CurrentRiskQQQSPY"],
+                "PVC_MAX10D",
+                "CurrentRiskEscalationScoreV2",
+                "VIX",
+                "SPXAboveSMA50D",
+                "HY_OAS",
+                "CurrentRiskQQQSPY",
+                "CurrentRiskEventMarkerReason",
+                "CurrentRiskEventId",
+                "CurrentRiskDailyStatus",
+                "CurrentRiskEventPeakStatus",
+                "CurrentRiskEventStartDate",
             ]
-        )
+        ):
+            custom[:, index] = points[column].astype(str).to_numpy() if index >= 6 else points[column].to_numpy()
         fig.add_trace(
             go.Scatter(
                 x=points["Date"],
@@ -1923,7 +1944,10 @@ def build_current_risk_signals_fig(history: pd.DataFrame, start: pd.Timestamp, e
                     f"{category}<br>Date: %{{x|%Y-%m-%d}}<br>SPY raw: %{{y:,.2f}}<br>"
                     "PVC MAX10D: %{customdata[0]:.0f}<br>Escalation: %{customdata[1]:.0f}/6<br>"
                     "VIX: %{customdata[2]:.1f}<br>S5FI: %{customdata[3]:.1f}<br>"
-                    "HY OAS: %{customdata[4]:.2f}<br>QQQ/SPY: %{customdata[5]:.4f}<extra></extra>"
+                    "HY OAS: %{customdata[4]:.2f}<br>QQQ/SPY: %{customdata[5]:.4f}<br>"
+                    "Milestone: %{customdata[6]}<br>Event: %{customdata[7]}<br>"
+                    "Daily status: %{customdata[8]}<br>Event peak: %{customdata[9]}<br>"
+                    "Event start: %{customdata[10]}<extra></extra>"
                 ),
             )
         )
@@ -2199,6 +2223,22 @@ def current_risk_history_frame(history: pd.DataFrame, start: pd.Timestamp, end: 
         d["CurrentRiskNewEvent"] = d["CurrentRiskNewEvent"].fillna(False).astype(bool)
     if "CurrentRiskSignalClass" not in d:
         d["CurrentRiskSignalClass"] = "INACTIVE"
+    if "CurrentRiskEventMarker" not in d:
+        d["CurrentRiskEventMarker"] = d["CurrentRiskNewEvent"]
+    else:
+        d["CurrentRiskEventMarker"] = d["CurrentRiskEventMarker"].fillna(False).astype(bool)
+    if "CurrentRiskEventMarkerClass" not in d:
+        d["CurrentRiskEventMarkerClass"] = d["CurrentRiskSignalClass"]
+    if "CurrentRiskEventMarkerReason" not in d:
+        d["CurrentRiskEventMarkerReason"] = np.where(d["CurrentRiskEventMarker"], "EVENT_START", "")
+    if "CurrentRiskEventId" not in d:
+        d["CurrentRiskEventId"] = "N/A"
+    if "CurrentRiskDailyStatus" not in d:
+        d["CurrentRiskDailyStatus"] = d.get("CurrentMarketRiskState", "N/A")
+    if "CurrentRiskEventPeakStatus" not in d:
+        d["CurrentRiskEventPeakStatus"] = d.get("CurrentMarketRiskState", "N/A")
+    if "CurrentRiskEventStartDate" not in d:
+        d["CurrentRiskEventStartDate"] = pd.NaT
     return d
 
 

@@ -3,7 +3,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from current_risk import calculate_current_risk_v1, classify_component_state, current_risk_new_event
+from current_risk import (
+    calculate_current_risk_event_engine,
+    calculate_current_risk_v1,
+    classify_component_state,
+    current_risk_new_event,
+)
 
 
 def current_risk_fixture() -> pd.DataFrame:
@@ -157,6 +162,144 @@ def test_current_risk_new_event_clusters_previous_five_sessions() -> None:
     )
 
     pd.testing.assert_series_equal(current_risk_new_event(activation), expected)
+
+
+def _event_engine_fixture(
+    activations: list[bool],
+    severities: list[int],
+    credit_confirmed: list[bool] | None = None,
+) -> pd.DataFrame:
+    states = {0: "NORMAL", 1: "LOW CONFIRMATION", 2: "MODERATE", 3: "HIGH RISK", 4: "RED FLAG"}
+    signals = []
+    for active, severity, credit in zip(activations, severities, credit_confirmed or [False] * len(activations)):
+        if not active:
+            signals.append("INACTIVE")
+        elif severity == 4 and credit:
+            signals.append("RED FLAG + CREDIT CONFIRMATION")
+        else:
+            signals.append(states[severity])
+    return pd.DataFrame(
+        {
+            "Date": pd.bdate_range("2026-09-01", periods=len(activations)),
+            "CurrentRiskActivation": activations,
+            "CurrentMarketRiskState": [states[severity] if active else "NORMAL" for active, severity in zip(activations, severities)],
+            "CurrentRiskSignalClass": signals,
+            "CurrentRiskCreditConfirmation": credit_confirmed or [False] * len(activations),
+        }
+    )
+
+
+def test_event_engine_marks_event_start_and_severity_escalation_across_short_gaps() -> None:
+    frame = _event_engine_fixture(
+        [True, True, False, False, False, False, True],
+        [3, 3, 0, 0, 0, 0, 4],
+    )
+
+    result = calculate_current_risk_event_engine(frame)
+
+    assert result["CurrentRiskEventMarker"].tolist() == [True, False, False, False, False, False, True]
+    assert result.loc[0, "CurrentRiskEventMarkerReason"] == "EVENT_START"
+    assert result.loc[6, "CurrentRiskEventMarkerReason"] == "SEVERITY_ESCALATION"
+    assert result.loc[0, "CurrentRiskEventMarkerClass"] == "HIGH RISK"
+    assert result.loc[6, "CurrentRiskEventMarkerClass"] == "RED FLAG"
+    assert result.loc[6, "CurrentRiskEventId"] == result.loc[0, "CurrentRiskEventId"]
+    assert result.loc[6, "CurrentRiskEventState"] == "ACTIVE"
+    assert result.loc[6, "CurrentRiskEventMaxSeverity"] == 4
+
+
+def test_event_engine_closes_after_five_false_sessions_then_starts_new_event() -> None:
+    frame = _event_engine_fixture(
+        [True, False, False, False, False, False, True],
+        [2, 0, 0, 0, 0, 0, 1],
+    )
+
+    result = calculate_current_risk_event_engine(frame)
+
+    assert result.loc[4, "CurrentRiskEventState"] == "ACTIVE"
+    assert result.loc[5, "CurrentRiskEventState"] == "CLOSED"
+    assert pd.isna(result.loc[5, "CurrentRiskEventId"])
+    assert result.loc[5, "CurrentRiskEventMaxSeverity"] == 0
+    assert result.loc[6, "CurrentRiskEventMarkerReason"] == "EVENT_START"
+    assert result.loc[6, "CurrentRiskEventId"] != result.loc[0, "CurrentRiskEventId"]
+
+
+def test_event_engine_does_not_treat_missing_activation_inputs_as_confirmed_inactive() -> None:
+    frame = _event_engine_fixture(
+        [True, False, False, False, False, False, True],
+        [3, 0, 0, 0, 0, 0, 4],
+    )
+    frame["CurrentRiskActivationAvailable"] = [True, True, True, False, True, True, True]
+
+    result = calculate_current_risk_event_engine(frame)
+
+    assert result.loc[5, "CurrentRiskEventState"] == "ACTIVE"
+    assert result.loc[6, "CurrentRiskEventMarkerReason"] == "SEVERITY_ESCALATION"
+    assert result.loc[6, "CurrentRiskEventId"] == result.loc[0, "CurrentRiskEventId"]
+
+
+def test_event_engine_emits_single_combined_red_flag_credit_marker() -> None:
+    frame = _event_engine_fixture(
+        [True, True, True, True],
+        [3, 4, 4, 4],
+        [False, True, True, True],
+    )
+
+    result = calculate_current_risk_event_engine(frame)
+
+    assert result["CurrentRiskEventMarker"].tolist() == [True, True, False, False]
+    assert result.loc[1, "CurrentRiskEventMarkerClass"] == "RED FLAG + CREDIT CONFIRMATION"
+    assert result.loc[1, "CurrentRiskEventMarkerReason"] == "SEVERITY_ESCALATION"
+    assert result.loc[1, "CurrentRiskEventCreditConfirmed"]
+
+
+def test_event_engine_keeps_peak_after_daily_severity_falls() -> None:
+    frame = _event_engine_fixture(
+        [True, True, True, True],
+        [3, 4, 3, 2],
+    )
+
+    result = calculate_current_risk_event_engine(frame)
+
+    assert result["CurrentRiskEventMarker"].tolist() == [True, True, False, False]
+    assert result["CurrentRiskDailySeverity"].tolist() == [3, 4, 3, 2]
+    assert result["CurrentRiskEventMaxSeverity"].tolist() == [3, 4, 4, 4]
+    assert result["CurrentRiskEventPeakStatus"].tolist() == ["HIGH RISK", "RED FLAG", "RED FLAG", "RED FLAG"]
+
+
+def test_event_engine_marks_late_credit_confirmation_once() -> None:
+    frame = _event_engine_fixture(
+        [True, True, True, True],
+        [4, 4, 4, 4],
+        [False, False, True, True],
+    )
+    frame.loc[0, "CurrentRiskSignalClass"] = "RED FLAG"
+    frame.loc[1, "CurrentRiskSignalClass"] = "RED FLAG"
+
+    result = calculate_current_risk_event_engine(frame)
+
+    assert result["CurrentRiskEventMarker"].tolist() == [True, False, True, False]
+    assert result.loc[2, "CurrentRiskEventMarkerClass"] == "RED FLAG + CREDIT CONFIRMATION"
+    assert result.loc[2, "CurrentRiskEventMarkerReason"] == "CREDIT_ESCALATION"
+
+
+def test_credit_confirmation_without_activation_does_not_create_marker() -> None:
+    frame = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2024-09-03")],
+            "CurrentRiskActivation": [False],
+            "CurrentRiskActivationAvailable": [True],
+            "CurrentMarketRiskState": ["NORMAL"],
+            "CurrentRiskSignalClass": ["INACTIVE"],
+            "CurrentRiskCreditConfirmation": [True],
+            "PVC_MAX10D": [60.0],
+        }
+    )
+
+    result = calculate_current_risk_event_engine(frame)
+
+    assert not bool(result.loc[0, "CurrentRiskEventMarker"])
+    assert result.loc[0, "CurrentRiskEventState"] == "CLOSED"
+    assert result.loc[0, "CurrentRiskEventMarkerClass"] == "INACTIVE"
 
 
 def test_2021_12_20_credit_confirmation_regression() -> None:
