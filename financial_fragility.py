@@ -73,7 +73,9 @@ def _normalise(frame: pd.DataFrame, date_column: str | None = None) -> pd.DataFr
     if date_column is None:
         return pd.DataFrame()
     out["Date"] = pd.to_datetime(out[date_column], errors="coerce").dt.tz_localize(None).dt.normalize()
-    out = out.dropna(subset=["Date"]).sort_values("Date")
+    # The source may have a DatetimeIndex also named "Date". Keep the
+    # normalized observation date as the sole Date label before sorting.
+    out = out.reset_index(drop=True).dropna(subset=["Date"]).sort_values("Date")
     return out.drop_duplicates("Date", keep="last").reset_index(drop=True)
 
 

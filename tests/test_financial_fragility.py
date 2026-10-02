@@ -3,7 +3,17 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from financial_fragility import _move_status, _rates_pressure_status, build_financial_fragility_snapshot
+from financial_fragility import _move_status, _normalise, _rates_pressure_status, build_financial_fragility_snapshot
+
+
+def test_normalise_handles_datetime_index_named_date():
+    dates = pd.date_range("2026-10-01", periods=2, freq="D", name="Date")
+    frame = pd.DataFrame({"MOVE": [100.0, 101.0]}, index=dates)
+
+    normalized = _normalise(frame)
+
+    assert normalized["Date"].tolist() == list(dates)
+    assert normalized["MOVE"].tolist() == [100.0, 101.0]
 
 
 def test_stress_layer_uses_latest_daily_market_and_funding_values():
@@ -31,6 +41,7 @@ def test_stress_layer_uses_latest_daily_market_and_funding_values():
         "RealizedVol20D": 0.22,
         "HY_OAS": 6.0,
     }, index=daily_dates)
+    market_daily.index.name = "Date"
     rates = pd.DataFrame({
         "Date": dates,
         "BAMLH0A0HYM2": 3.5,
