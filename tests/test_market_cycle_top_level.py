@@ -16,6 +16,7 @@ from market_cycle_tab import (
     build_top_level_analytics,
     chart_rsi_divergence_score,
     current_risk_with_historical_outlook,
+    format_last_signal,
     range_domain,
 )
 from market_cycle_multiples import format_fundamental_outlook_rows
@@ -63,6 +64,16 @@ def test_current_risk_drawdown_uses_historical_outlook_3m_probability() -> None:
     assert result["CurrentRiskDrawdownRiskState"] == "LOW"
     assert result["HistoricalOutlook3MAnalogN"] == 40
     assert current["CurrentRiskDrawdownRisk"] == 8.0
+
+
+def test_last_signal_displays_only_status_and_date() -> None:
+    assert format_last_signal(
+        {
+            "CurrentRiskLastSignal": "RED FLAG",
+            "CurrentRiskLastSignalDate": pd.Timestamp("2026-09-10"),
+            "CurrentRiskLastSignalReason": "SEVERITY_ESCALATION",
+        }
+    ) == "RED FLAG — 2026-09-10"
 
 
 def test_chart_rsi_divergence_uses_separate_five_percent_thresholds() -> None:

@@ -733,13 +733,7 @@ def format_last_signal(current: dict[str, Any]) -> str:
     signal_date = pd.to_datetime(current.get("CurrentRiskLastSignalDate"), errors="coerce")
     if signal == "N/A" or pd.isna(signal_date):
         return "N/A"
-    reason = {
-        "EVENT_START": "new event",
-        "SEVERITY_ESCALATION": "severity escalation",
-        "CREDIT_ESCALATION": "credit confirmation",
-    }.get(text(current.get("CurrentRiskLastSignalReason")), "")
-    suffix = f" · {reason}" if reason else ""
-    return f"{signal}{suffix} — {signal_date.strftime('%Y-%m-%d')}"
+    return f"{signal} — {signal_date.strftime('%Y-%m-%d')}"
 
 
 def render_card(title: str, headline: str, rows: list[tuple[str, str]]) -> None:
