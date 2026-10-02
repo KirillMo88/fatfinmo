@@ -48,7 +48,8 @@ from spy_macro_outlook import (
 
 MARKET_CYCLE_TTL_SECONDS = 21600
 MARKET_CYCLE_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
-MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v3"
+# Bump when the snapshot's calculated fields or their semantics change.
+MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v4"
 SPY_MACRO_CACHE_SCHEMA = "spy-macro-outlook-v1"
 MARKET_CYCLE_PERSISTENT_CACHE_DIR = Path(
     os.getenv("MARKET_CYCLE_CACHE_DIR", Path(__file__).resolve().parent / "persistent" / "snapshots")
