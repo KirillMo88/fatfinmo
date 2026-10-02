@@ -70,6 +70,7 @@ from financial_fragility_tab import render_financial_fragility_tab
 from treasury_fiscal_regime_tab import render_treasury_fiscal_regime_tab
 from treasury_funding_policy import read_snapshot as read_treasury_funding_policy_snapshot
 from gold_regime_tab import render_gold_regime_tab
+from knowledge_base_tab import render_knowledge_base_tab
 from btc_cycle_tab import render_btc_cycle_tab
 from market_cycle_tab import load_market_cycle_snapshot_cached, render_market_cycle_tab
 from technical_outlook_simple_v3_tab import render_technical_outlook_simple_v3_tab
@@ -6861,6 +6862,7 @@ def main():
         "Market Regime",
         "Inputs",
         "Description",
+        "Knowledge Base",
         "Tester",
     ]
     # Migrate sessions that still reference the previous tab label.
@@ -7168,6 +7170,8 @@ def main():
         render_inputs_tab(universe_map)
     elif active_view == "Description":
         render_description_tab()
+    elif active_view == "Knowledge Base":
+        render_knowledge_base_tab()
     elif active_view == "Tester":
         render_tester_tab()
 
