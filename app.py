@@ -35,6 +35,7 @@ from finance_core import (
     extract_ohlcv_frame,
     is_krw_quoted_ticker,
 )
+from fred_client import FredApiError, download_fred_series_batch
 from fund_flows import get_fund_flow_metrics
 from btc_data import load_btc_etf_flow_history, load_btc_weekly_price
 from market_model import (
@@ -85,6 +86,7 @@ from global_liquidity import (
     start_background_update_if_stale as start_global_liquidity_update_if_stale,
     update_global_liquidity,
 )
+from us_debt_m2 import DEBT_M2_SERIES_START, build_us_debt_m2_figure, build_us_debt_m2_history
 from bybit_derivatives import (
     BYBIT_ASSET_MAP,
     BYBIT_STORAGE_PATH,
@@ -2047,6 +2049,16 @@ def _render_liquidity_regime_summary(
             _liquidity_fmt_trillions(latest.get("us_net_liquidity_usd_bn")),
             usnl_rows,
         )
+@st.cache_data(show_spinner=False, ttl=21600)
+def _load_us_debt_m2_history(api_key: str | None) -> pd.DataFrame:
+    fred_data = download_fred_series_batch(
+        ("GFDEBTN", "M2SL"),
+        api_key=api_key,
+        observation_start=DEBT_M2_SERIES_START,
+    )
+    return build_us_debt_m2_history(fred_data)
+
+
 def render_global_liquidity_dashboard_tab() -> None:
     st.subheader("Global Liquidity Regime")
 
@@ -2134,6 +2146,25 @@ def render_global_liquidity_dashboard_tab() -> None:
 
     st.markdown("### What Global Liquidity Regime Means for Markets")
     st.dataframe(_build_liquidity_asset_impact_table(latest), use_container_width=True, hide_index=True)
+
+    st.markdown("### U.S. Federal Debt / M2")
+    try:
+        debt_m2 = _load_us_debt_m2_history(get_fred_api_key_for_app())
+        if debt_m2.empty:
+            st.info("No overlapping FRED observations are available for Federal Debt / M2.")
+        else:
+            st.plotly_chart(
+                build_us_debt_m2_figure(debt_m2),
+                use_container_width=True,
+                config=LIQUIDITY_PLOTLY_CONFIG,
+            )
+            st.caption(
+                "GFDEBTN is quarterly end-of-period debt in millions of dollars; M2SL is monthly in billions. "
+                "Both are aligned to period-end, with the latest debt observation carried forward between quarters. "
+                "Support/resistance show the 10th/90th-percentile envelope around the long-run trend since 1990."
+            )
+    except FredApiError as exc:
+        st.info(f"Federal Debt / M2 is temporarily unavailable: {exc}")
 
     range_start = pd.to_datetime(chart_frame["date"], errors="coerce").min() if not chart_frame.empty else None
     render_liquidity_forecast(range_start=range_start)
