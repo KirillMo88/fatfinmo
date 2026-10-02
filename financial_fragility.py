@@ -67,6 +67,9 @@ def _normalise(frame: pd.DataFrame, date_column: str | None = None) -> pd.DataFr
         return pd.DataFrame()
     out = frame.copy()
     date_column = date_column or _date_column(out)
+    if date_column is None and isinstance(out.index, pd.DatetimeIndex):
+        out["Date"] = pd.to_datetime(out.index, errors="coerce").tz_localize(None).normalize()
+        date_column = "Date"
     if date_column is None:
         return pd.DataFrame()
     out["Date"] = pd.to_datetime(out[date_column], errors="coerce").dt.tz_localize(None).dt.normalize()
@@ -102,6 +105,115 @@ def _asof(source: pd.DataFrame, dates: pd.DatetimeIndex, candidates: tuple[str, 
     return values.reindex(values.index.union(dates)).sort_index().ffill().reindex(dates)
 
 
+def _current_percentile(history: pd.Series, value: Any) -> float:
+    number = _number(value)
+    sample = pd.to_numeric(history, errors="coerce").dropna().tail(PIT_WINDOW_WEEKS - 1)
+    if not np.isfinite(number) or len(sample) < PIT_MIN_PERIODS - 1:
+        return np.nan
+    return float((sample.le(number).sum() + 1) / (len(sample) + 1) * 100.0)
+
+
+def _weighted_current(values: dict[str, Any], weights: dict[str, float]) -> float:
+    valid = [(_number(values.get(name)), weight) for name, weight in weights.items()]
+    valid = [(value, weight) for value, weight in valid if np.isfinite(value)]
+    if not valid:
+        return np.nan
+    return float(np.clip(sum(value * weight for value, weight in valid) / sum(weight for _, weight in valid), 0.0, 100.0))
+
+
+def _latest_value(frame: pd.DataFrame, column: str) -> tuple[float, pd.Timestamp | pd.NaT]:
+    if frame.empty or column not in frame.columns:
+        return np.nan, pd.NaT
+    values = pd.to_numeric(frame[column], errors="coerce")
+    valid = values.notna()
+    if not valid.any():
+        return np.nan, pd.NaT
+    index = values.index[valid][-1]
+    row = frame.loc[index]
+    return _number(row[column]), _date(row.get("Date", index))
+
+
+def _overlay_current_stress(
+    current: dict[str, Any],
+    history: pd.DataFrame,
+    market_daily: pd.DataFrame,
+    funding_daily: pd.DataFrame,
+    rates_history: pd.DataFrame,
+) -> dict[str, Any]:
+    """Use the latest source observations for current cards without changing the weekly history."""
+    result = dict(current)
+    market_fields = {
+        "VIX": "VIX",
+        "VIX3M": "VIX3M",
+        "RealizedVolatility20D": "RealizedVol20D",
+        "HY_OAS": "HY_OAS",
+    }
+    market_dates = []
+    for output, source_column in market_fields.items():
+        value, date = _latest_value(market_daily, source_column)
+        if np.isfinite(value):
+            result[output] = value
+        if pd.notna(date):
+            market_dates.append(date)
+
+    if not np.isfinite(_number(result.get("HY_OAS"))):
+        value, date = _latest_value(rates_history, "BAMLH0A0HYM2")
+        if np.isfinite(value):
+            result["HY_OAS"] = value
+            result["CreditDataAsOf"] = date
+    credit_value, credit_date = _latest_value(market_daily, "HY_OAS")
+    if np.isfinite(credit_value):
+        result["CreditDataAsOf"] = credit_date
+    elif pd.isna(result.get("CreditDataAsOf")):
+        result["CreditDataAsOf"] = _latest_value(rates_history, "BAMLH0A0HYM2")[1]
+
+    result["MarketDataAsOf"] = max(market_dates) if market_dates else pd.NaT
+    result["HYOAS_3Y_Percentile"] = _current_percentile(history.get("HY_OAS", pd.Series(dtype=float)), result.get("HY_OAS"))
+    result["CreditStress"] = result["HYOAS_3Y_Percentile"]
+    result["CreditStressState"] = _risk_state(result["CreditStress"])
+
+    vix_values = pd.to_numeric(market_daily.get("VIX", pd.Series(dtype=float)), errors="coerce").dropna()
+    vix_change = float(vix_values.iloc[-1] - vix_values.iloc[-21]) if len(vix_values) >= 21 else np.nan
+    result["VIX20DChange"] = vix_change
+    vix_value = _number(result.get("VIX"))
+    vix3m_value = _number(result.get("VIX3M"))
+    ratio = vix_value / vix3m_value if np.isfinite(vix_value) and np.isfinite(vix3m_value) and vix3m_value != 0 else np.nan
+    result["VIX_VIX3M_Ratio"] = ratio
+    result["VIXLevelRisk"] = np.select([vix_value <= 15, vix_value <= 20, vix_value <= 25, vix_value <= 35], [10.0, 30.0, 55.0, 80.0], default=100.0) if np.isfinite(vix_value) else np.nan
+    result["VIXMomentumRisk"] = _current_percentile(history.get("VIX20DChange", pd.Series(dtype=float)), vix_change)
+    result["VIXTermStructureRisk"] = np.select([ratio < 0.85, ratio < 0.95, ratio < 1.0, ratio < 1.10], [10.0, 30.0, 55.0, 80.0], default=100.0) if np.isfinite(ratio) else np.nan
+    result["RealizedVolRisk"] = _current_percentile(history.get("RealizedVolatility20D", pd.Series(dtype=float)), result.get("RealizedVolatility20D"))
+    result["MarketVolatilityStress"] = _weighted_current(
+        {"vix": result["VIXLevelRisk"], "momentum": result["VIXMomentumRisk"], "term": result["VIXTermStructureRisk"], "realized": result["RealizedVolRisk"]},
+        {"vix": 0.30, "momentum": 0.30, "term": 0.25, "realized": 0.15},
+    )
+    result["MarketVolatilityStressState"] = _risk_state(result["MarketVolatilityStress"], volatility=True)
+
+    funding_latest = funding_daily.iloc[-1] if not funding_daily.empty else pd.Series(dtype=object)
+    for column in ("FundingCore", "MoneyMarketStress", "FundingState", "PersistentFundingFlag", "ReservePressure", "CollateralStress", "MOVE", "MOVE_Z"):
+        if column in funding_latest and pd.notna(funding_latest.get(column)):
+            result[column] = funding_latest.get(column)
+    result["FundingDataAsOf"] = _date(funding_latest.get("Date")) if not funding_latest.empty else pd.NaT
+    move_history = pd.to_numeric(funding_daily.get("MOVE", pd.Series(dtype=float)), errors="coerce").dropna()
+    if len(move_history) >= 2:
+        result["MOVEMean"] = float(move_history.mean())
+        result["MOVEStd"] = float(move_history.std(ddof=0))
+        if result["MOVEStd"] > 0 and np.isfinite(_number(result.get("MOVE"))):
+            result["MOVE_Z"] = float((float(result["MOVE"]) - result["MOVEMean"]) / result["MOVEStd"])
+    funding_base = 25.0 * _number(result.get("FundingCore"))
+    funding_floor = {
+        "NORMAL": 0.0,
+        "TECHNICAL FUNDING PRESSURE": 25.0,
+        "TREASURY VOLATILITY": 30.0,
+        "PERSISTENT FUNDING PRESSURE": 65.0,
+        "SYSTEMIC FUNDING STRESS": 90.0,
+    }.get(_text(result.get("FundingState"), "").upper(), np.nan)
+    funding_components = [value for value in (funding_base, funding_floor) if np.isfinite(value)]
+    result["FundingStress"] = float(np.clip(max(funding_components), 0.0, 100.0)) if funding_components else np.nan
+    result["FundingStressState"] = _risk_state(result["FundingStress"])
+    return result
+
+
 def pit_percentile(values: pd.Series, window: int = PIT_WINDOW_WEEKS, minimum: int = PIT_MIN_PERIODS) -> pd.Series:
     numeric = pd.to_numeric(values, errors="coerce")
 
@@ -131,6 +243,34 @@ def _risk_state(value: Any, *, volatility: bool = False) -> str:
     if number < 60:
         return "WATCH"
     if number < 80:
+        return "HIGH"
+    return "EXTREME"
+
+
+def _rates_pressure_status(value: Any) -> str:
+    number = _number(value)
+    if not np.isfinite(number):
+        return "UNAVAILABLE"
+    if number <= 25:
+        return "LOW"
+    if number <= 50:
+        return "ELEVATED"
+    if number <= 75:
+        return "HIGH"
+    return "EXTREME"
+
+
+def _move_status(value: Any) -> str:
+    number = _number(value)
+    if not np.isfinite(number):
+        return "UNAVAILABLE"
+    if number < 50:
+        return "LOW"
+    if number <= 80:
+        return "NORMAL"
+    if number <= 110:
+        return "ELEVATED"
+    if number <= 141:
         return "HIGH"
     return "EXTREME"
 
@@ -273,9 +413,11 @@ def build_financial_fragility_snapshot(
         "liquidity": _normalise(liquidity_regime, "date"),
         "forecast": _normalise(forecast_frame),
         "market": _normalise(_source_frame(market_snapshot, ("history",))),
+        "market_daily": _normalise(_source_frame(market_snapshot, ("daily",))),
         "business": _normalise(_source_frame(business_snapshot, ("history",)), "date"),
         "rates": _normalise(_source_frame(rates_snapshot, ("history",))),
         "funding": _normalise(_source_frame(funding_snapshot, ("weekly", "history"))),
+        "funding_daily": _normalise(_source_frame(funding_snapshot, ("daily",))),
         "treasury": _normalise(_source_frame(treasury_snapshot, ("weekly", "history"))),
     }
     date_values = [frame["Date"].min() for frame in sources.values() if not frame.empty]
@@ -297,6 +439,7 @@ def build_financial_fragility_snapshot(
     history["LiquidityPressure"] = _asof(sources["forecast"], idx, ("LiquidityPressureScore", "LiquidityPressure"))
     history["LiquidityForecastScore"] = _asof(sources["liquidity"], idx, ("global_liquidity_score", "GlobalLiquidityScore"))
     history["RatesPressure"] = _asof(sources["rates"], idx, ("RatesPressureScore", "RatesPressure"))
+    history["Curve26W"] = _asof(sources["rates"], idx, ("YieldCurveRegime_26W",), numeric=False)
     history["RatesDirection"] = _asof(sources["rates"], idx, ("RatesDirection",), numeric=False)
     history["CoreFCLevel"] = _asof(sources["rates"], idx, ("FinancialConditionsLevel", "CoreFCLevel"))
     history["CoreFCDirection"] = _asof(sources["rates"], idx, ("FinancialConditionsDirection", "CoreFCDirection"), numeric=False)
@@ -322,6 +465,8 @@ def build_financial_fragility_snapshot(
     history["PersistentFundingFlag"] = _asof(sources["funding"], idx, ("PersistentFundingFlag",), numeric=False)
     history["ReservePressure"] = _asof(sources["funding"], idx, ("ReservePressure",))
     history["CollateralStress"] = _asof(sources["funding"], idx, ("CollateralStress",))
+    history["MOVE"] = _asof(sources["funding"], idx, ("MOVE",))
+    history["MOVE_Z"] = _asof(sources["funding"], idx, ("MOVE_Z",))
 
     history["VIX"] = _asof(sources["market"], idx, ("VIX",))
     history["VIX3M"] = _asof(sources["market"], idx, ("VIX3M",))
@@ -337,6 +482,8 @@ def build_financial_fragility_snapshot(
     history["ForecastRisk"] = liquidity_map
     history["LiquidityPressureRisk"] = (0.65 * liquidity_map + 0.35 * pd.to_numeric(history["LiquidityPressure"], errors="coerce")).clip(0, 100)
     history["RatesPressureRisk"] = pit_percentile(history["RatesPressure"])
+    history["RatesPressureStatus"] = history["RatesPressureRisk"].map(_rates_pressure_status)
+    history["CollateralStressStatus"] = history["MOVE"].map(_move_status)
     level_risk = pit_percentile(history["CoreFCLevel"])
     direction_risk = _direction_risk(history["CoreFCDirection"], history["CoreFCDirectionScore"])
     history["CoreFCLevelRisk"] = level_risk
@@ -433,6 +580,24 @@ def build_financial_fragility_snapshot(
         "Interpretation": _interpretation(latest),
         "DataCoverage": _number(latest.get("DataCoverage")),
     })
+    current = _overlay_current_stress(
+        current,
+        history,
+        sources["market_daily"],
+        sources["funding_daily"],
+        sources["rates"],
+    )
+    current["RatesDataAsOf"] = sources["rates"]["Date"].max() if not sources["rates"].empty else pd.NaT
+    current["RatesPressureStatus"] = _rates_pressure_status(current.get("RatesPressureRisk"))
+    current["CollateralStressStatus"] = _move_status(current.get("MOVE"))
+    current["GeneralRegime"] = _regime_row(pd.Series(current))
+    current["Interpretation"] = _interpretation(pd.Series(current))
+    current["PrimaryDrivers"] = _top_names(pd.Series(current), driver_map)
+    current["PrimaryStabilizers"] = ", ".join(
+        label
+        for column, label in (("CreditStress", "Credit calm"), ("FundingStress", "Funding normal"), ("MarketVolatilityStress", "Volatility subdued"), ("LiquidityPressureRisk", "Liquidity pressure contained"))
+        if np.isfinite(_number(current.get(column))) and _number(current.get(column)) < 35
+    ) or "UNAVAILABLE"
     quality = pd.DataFrame([{"Component": column, "Available": bool(pd.to_numeric(history[column], errors="coerce").notna().any()), "Latest": bool(pd.notna(latest.get(column)))} for column in ("MacroPressure", "MarketVulnerability", "CreditStress", "FundingStress", "MarketVolatilityStress", "TransitionRisk")])
     return FinancialFragilitySnapshot(history, current, quality, _date(latest.get("Date")))
 
