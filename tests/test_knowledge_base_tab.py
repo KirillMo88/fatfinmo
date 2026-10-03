@@ -2,12 +2,10 @@ from pathlib import Path
 import re
 import unittest
 
-from knowledge_base.presentation_layout import group_slides
-
-
 ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_BASE = ROOT / "knowledge_base" / "michael_howell_debt_liquidity_cycle.md"
 APP_SOURCE = ROOT / "app.py"
+TAB_SOURCE = ROOT / "knowledge_base_tab.py"
 PRESENTATION_DIR = ROOT / "knowledge_base" / "presentation"
 
 
@@ -43,11 +41,15 @@ class KnowledgeBaseContentTests(unittest.TestCase):
     def test_infographic_is_included(self):
         self.assertTrue((ROOT / "knowledge_base" / "howell_debt_liquidity_cycle.png").is_file())
 
-    def test_presentation_is_grouped_four_slides_per_screen(self):
+    def test_infographic_is_half_width_and_all_presentation_slides_render_without_a_selector(self):
+        tab = TAB_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("infographic_column, _ = st.columns(2)", tab)
+        self.assertIn("for row_start in range(0, len(slide_paths), 2):", tab)
+        self.assertNotIn("st.selectbox", tab)
+
         slides = sorted(PRESENTATION_DIR.glob("slide-*.jpg"))
         self.assertEqual(len(slides), 15)
-        groups = group_slides(slides, slides_per_screen=4)
-        self.assertEqual([len(group) for group in groups], [4, 4, 4, 3])
+        self.assertIn('HOWELL_PRESENTATION_DIR.glob("slide-*.jpg")', tab)
 
 
 if __name__ == "__main__":
