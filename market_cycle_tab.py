@@ -49,7 +49,7 @@ from spy_macro_outlook import (
 MARKET_CYCLE_TTL_SECONDS = 21600
 MARKET_CYCLE_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
 # Bump when the snapshot's calculated fields or their semantics change.
-MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v5"
+MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v6"
 SPY_MACRO_CACHE_SCHEMA = "spy-macro-outlook-v1"
 MARKET_CYCLE_PERSISTENT_CACHE_DIR = Path(
     os.getenv("MARKET_CYCLE_CACHE_DIR", Path(__file__).resolve().parent / "persistent" / "snapshots")
@@ -263,7 +263,7 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
         )
         st.caption(
             "SPX, the ~41M primary market cycle, the ~80-95M long extension cycle, and actual structural extension are separate layers. "
-            "SPX/Commodities Cycle is ln(SPX / FRED PPIACO). Trough and peak markers are historical context, not deterministic buy/sell dates."
+            "SPX/Commodities Cycle is ln(FRED PPIACO / SPX). Trough and peak markers are historical context, not deterministic buy/sell dates."
         )
     with cycle_summary_col:
         render_multi_layer_cycle_summary(current)
@@ -1148,12 +1148,12 @@ def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Ti
     add_structural_marker_trace(fig, visible, mode="trough")
     add_structural_marker_trace(fig, visible, mode="peak")
 
-    spx_ppiaco_log = pd.to_numeric(
-        visible.get("SPX_PPIACO_Log", pd.Series(np.nan, index=visible.index)),
+    ppiaco_spx_log = pd.to_numeric(
+        visible.get("PPIACO_SPX_Log", pd.Series(np.nan, index=visible.index)),
         errors="coerce",
     )
-    spx_ppiaco_ratio = pd.to_numeric(
-        visible.get("SPX_PPIACO_Ratio", pd.Series(np.nan, index=visible.index)),
+    ppiaco_spx_ratio = pd.to_numeric(
+        visible.get("PPIACO_SPX_Ratio", pd.Series(np.nan, index=visible.index)),
         errors="coerce",
     )
     ppiaco = pd.to_numeric(
@@ -1163,15 +1163,15 @@ def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Ti
     fig.add_trace(
         go.Scatter(
             x=visible["Date"],
-            y=spx_ppiaco_log,
+            y=ppiaco_spx_log,
             mode="lines",
             name="SPX/Commodities Cycle",
             line={"color": "#22d3ee", "width": 1.9},
             showlegend=False,
-            customdata=np.column_stack([spx_ppiaco_ratio, ppiaco]),
+            customdata=np.column_stack([ppiaco_spx_ratio, ppiaco]),
             hovertemplate=(
-                "Date: %{x|%Y-%m-%d}<br>log(SPX / PPIACO): %{y:.3f}<br>"
-                "SPX / PPIACO: %{customdata[0]:.2f}<br>PPIACO: %{customdata[1]:.1f}<extra></extra>"
+                "Date: %{x|%Y-%m-%d}<br>log(PPIACO / SPX): %{y:.3f}<br>"
+                "PPIACO / SPX: %{customdata[0]:.4f}<br>PPIACO: %{customdata[1]:.1f}<extra></extra>"
             ),
         ),
         row=5,

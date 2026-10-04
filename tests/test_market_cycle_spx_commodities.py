@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 import market_cycle
-from market_cycle import build_weekly_frame, calculate_log_spx_ppiaco
+from market_cycle import build_weekly_frame, calculate_log_ppiaco_spx
 from market_cycle_tab import build_multi_layer_market_cycles_fig
 
 
@@ -12,14 +12,14 @@ def _close_frame(dates: pd.DatetimeIndex, values: list[float]) -> pd.DataFrame:
     return pd.DataFrame({"Close": values, "Low": values}, index=dates)
 
 
-def test_log_spx_ppiaco_uses_natural_log_and_preserves_missing_values() -> None:
-    result = calculate_log_spx_ppiaco(
-        pd.Series([100.0, 200.0, np.nan, 400.0]),
+def test_log_ppiaco_spx_uses_natural_log_and_preserves_missing_values() -> None:
+    result = calculate_log_ppiaco_spx(
         pd.Series([50.0, 100.0, 100.0, 0.0]),
+        pd.Series([100.0, 200.0, np.nan, 400.0]),
     )
 
-    assert np.isclose(result.iloc[0], np.log(2.0))
-    assert np.isclose(result.iloc[1], np.log(2.0))
+    assert np.isclose(result.iloc[0], np.log(0.5))
+    assert np.isclose(result.iloc[1], np.log(0.5))
     assert result.iloc[2:].isna().all()
 
 
@@ -35,8 +35,8 @@ def test_weekly_market_cycle_aligns_fred_ppiaco_and_calculates_log_ratio(monkeyp
     weekly = build_weekly_frame(raw, pd.Timestamp("2025-02-28"))
 
     assert weekly["PPIACO"].notna().any()
-    valid = weekly.dropna(subset=["SPX_PPIACO_Log"]).iloc[-1]
-    assert np.isclose(valid["SPX_PPIACO_Log"], np.log(valid["SPX_Close"] / valid["PPIACO"]))
+    valid = weekly.dropna(subset=["PPIACO_SPX_Log"]).iloc[-1]
+    assert np.isclose(valid["PPIACO_SPX_Log"], np.log(valid["PPIACO"] / valid["SPX_Close"]))
 
 
 def test_multi_layer_figure_places_spx_commodities_cycle_after_structural_extension() -> None:
@@ -51,18 +51,18 @@ def test_multi_layer_figure_places_spx_commodities_cycle_after_structural_extens
     assert figure.layout.height == 900
 
 
-def test_multi_layer_figure_plots_log_spx_ppiaco_in_fifth_panel() -> None:
+def test_multi_layer_figure_plots_log_ppiaco_spx_in_fifth_panel() -> None:
     dates = pd.date_range("2024-01-31", periods=24, freq="ME")
     spx = pd.Series(np.linspace(4_000.0, 6_000.0, len(dates)))
     ppiaco = pd.Series(np.linspace(245.0, 265.0, len(dates)))
-    ratio = spx / ppiaco
+    ratio = ppiaco / spx
     history = pd.DataFrame(
         {
             "Date": dates,
             "SPX_Close": spx,
             "PPIACO": ppiaco,
-            "SPX_PPIACO_Ratio": ratio,
-            "SPX_PPIACO_Log": np.log(ratio),
+            "PPIACO_SPX_Ratio": ratio,
+            "PPIACO_SPX_Log": np.log(ratio),
             "PrimaryMarketCycle": np.sin(np.linspace(0.0, 4.0, len(dates))),
             "LongMarketExtensionCycle": np.cos(np.linspace(0.0, 3.0, len(dates))),
             "StructuralExtensionSmooth": np.linspace(20.0, 80.0, len(dates)),
