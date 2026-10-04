@@ -27,6 +27,19 @@ class GoldAISCValuationSnapshot:
 
 
 @dataclass(frozen=True)
+class LukeGromenGoldSnapshot:
+    current: dict[str, Any]
+    us_coverage_history: pd.DataFrame = field(default_factory=pd.DataFrame)
+    wgc_annual: pd.DataFrame = field(default_factory=pd.DataFrame)
+    wgc_ytd: pd.DataFrame = field(default_factory=pd.DataFrame)
+    global_ca_history: pd.DataFrame = field(default_factory=pd.DataFrame)
+    static_scenarios: pd.DataFrame = field(default_factory=pd.DataFrame)
+    adaptive_matrix: pd.DataFrame = field(default_factory=pd.DataFrame)
+    convergence: pd.DataFrame = field(default_factory=pd.DataFrame)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class GoldRegimeSnapshot:
     current: dict[str, Any]
     history: pd.DataFrame
@@ -36,4 +49,5 @@ class GoldRegimeSnapshot:
     freshness: dict[str, Freshness] = field(default_factory=dict)
     structural_macro2: GoldStructuralMacro2Snapshot | None = None
     aisc_valuation: GoldAISCValuationSnapshot | None = None
+    luke_gromen: LukeGromenGoldSnapshot | None = None
     gold_cycle_history: pd.DataFrame = field(default_factory=pd.DataFrame)

@@ -127,6 +127,7 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
     render_gold_structural_macro2(
         snapshot.structural_macro2,
         snapshot.aisc_valuation,
+        snapshot.luke_gromen,
         selected_range,
         global_range_end,
     )
