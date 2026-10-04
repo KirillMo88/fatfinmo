@@ -260,3 +260,15 @@ def test_luke_gromen_block_is_immediately_after_demand_structure():
     gromen = source.index("    render_luke_gromen_gold_models(luke_gromen_snapshot)")
     diagnostics = source.index("    render_macro2_diagnostics(current)")
     assert demand < gromen < diagnostics
+
+
+def test_luke_gromen_view_uses_requested_compact_layout():
+    source = Path("gold_regime/gromen_view.py").read_text(encoding="utf-8")
+    assert "Model 1 — U.S. Debt held by external Investors Gold Coverage" in source
+    assert "Monetary Demand Share" not in source
+    assert "Static Monetary-Density Scenarios" not in source
+    assert "Convergence Panel" not in source
+    assert "WGC Annualized YTD — display only" not in source
+    gmar = source.index("st.plotly_chart(_gmar_figure(annual)")
+    adaptive = source.index("_render_adaptive_matrix(snapshot)", gmar)
+    assert gmar < adaptive
