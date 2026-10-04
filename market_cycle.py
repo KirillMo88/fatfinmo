@@ -384,19 +384,19 @@ def build_weekly_frame(raw: dict[str, pd.DataFrame], end: pd.Timestamp) -> pd.Da
     for ticker, col in [("SPY", "SPY"), ("^VIX", "VIX"), ("^VIX3M", "VIX3M"), ("QQQ", "QQQ"), ("GLD", "GLD"), ("BTC-USD", "BTC"), ("RSP", "RSP"), ("IWM", "IWM"), ("XLI", "XLI"), ("XLP", "XLP")]:
         w[col] = align_to_target(close.get(ticker, pd.Series(dtype="float64")))
     w["PPIACO"] = align_to_target(close.get("PPIACO", pd.Series(dtype="float64")))
-    w["SPX_PPIACO_Ratio"] = pd.to_numeric(w["SPX_Close"], errors="coerce") / pd.to_numeric(w["PPIACO"], errors="coerce")
-    w["SPX_PPIACO_Log"] = calculate_log_spx_ppiaco(w["SPX_Close"], w["PPIACO"])
+    w["PPIACO_SPX_Ratio"] = pd.to_numeric(w["PPIACO"], errors="coerce") / pd.to_numeric(w["SPX_Close"], errors="coerce")
+    w["PPIACO_SPX_Log"] = calculate_log_ppiaco_spx(w["PPIACO"], w["SPX_Close"])
     for symbol, col in MARKET_CYCLE_TRADINGVIEW_BREADTH.items():
         w[col] = np.clip(align_to_target(close.get(symbol, pd.Series(dtype="float64"))), 0.0, 100.0)
     return w.loc[w["Date"].le(end)].reset_index(drop=True)
 
 
-def calculate_log_spx_ppiaco(spx: pd.Series, ppiaco: pd.Series) -> pd.Series:
-    spx_values = pd.to_numeric(spx, errors="coerce")
+def calculate_log_ppiaco_spx(ppiaco: pd.Series, spx: pd.Series) -> pd.Series:
     ppi_values = pd.to_numeric(ppiaco, errors="coerce")
+    spx_values = pd.to_numeric(spx, errors="coerce")
     valid = spx_values.gt(0) & ppi_values.gt(0)
     result = pd.Series(np.nan, index=spx_values.index, dtype="float64")
-    result.loc[valid] = np.log(spx_values.loc[valid] / ppi_values.loc[valid])
+    result.loc[valid] = np.log(ppi_values.loc[valid] / spx_values.loc[valid])
     return result
 
 
