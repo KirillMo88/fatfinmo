@@ -49,7 +49,7 @@ from spy_macro_outlook import (
 MARKET_CYCLE_TTL_SECONDS = 21600
 MARKET_CYCLE_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
 # Bump when the snapshot's calculated fields or their semantics change.
-MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v4"
+MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v5"
 SPY_MACRO_CACHE_SCHEMA = "spy-macro-outlook-v1"
 MARKET_CYCLE_PERSISTENT_CACHE_DIR = Path(
     os.getenv("MARKET_CYCLE_CACHE_DIR", Path(__file__).resolve().parent / "persistent" / "snapshots")
@@ -263,7 +263,7 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
         )
         st.caption(
             "SPX, the ~41M primary market cycle, the ~80-95M long extension cycle, and actual structural extension are separate layers. "
-            "Trough and peak markers are historical context, not deterministic buy/sell dates."
+            "SPX/Commodities Cycle is ln(SPX / FRED PPIACO). Trough and peak markers are historical context, not deterministic buy/sell dates."
         )
     with cycle_summary_col:
         render_multi_layer_cycle_summary(current)
@@ -983,16 +983,22 @@ def add_cycle_risk_regime_legend_traces(fig: go.Figure) -> None:
 def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> go.Figure:
     full = add_combined_cycle_risk_regime(monthly_context_frame(full_history))
     fig = make_subplots(
-        rows=4,
+        rows=5,
         cols=1,
         shared_xaxes=True,
-        row_heights=[0.42, 0.19, 0.19, 0.20],
-        vertical_spacing=0.035,
-        specs=[[{}], [{}], [{}], [{"secondary_y": True}]],
-        subplot_titles=("SPX Log", "Primary Market Cycle (~41M)", "Long Extension Cycle (~80-95M)", "Structural Extension"),
+        row_heights=[0.34, 0.15, 0.15, 0.18, 0.18],
+        vertical_spacing=0.03,
+        specs=[[{}], [{}], [{}], [{"secondary_y": True}], [{}]],
+        subplot_titles=(
+            "SPX Log",
+            "Primary Market Cycle (~41M)",
+            "Long Extension Cycle (~80-95M)",
+            "Structural Extension",
+            "SPX/Commodities Cycle",
+        ),
     )
     if full.empty:
-        return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension</sup>", 760)
+        return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension | SPX/Commodities Cycle</sup>", 900)
     full["Date"] = pd.to_datetime(full["Date"], errors="coerce")
     visible = full.loc[full["Date"].between(start, end)].copy()
     if visible.empty:
@@ -1142,6 +1148,36 @@ def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Ti
     add_structural_marker_trace(fig, visible, mode="trough")
     add_structural_marker_trace(fig, visible, mode="peak")
 
+    spx_ppiaco_log = pd.to_numeric(
+        visible.get("SPX_PPIACO_Log", pd.Series(np.nan, index=visible.index)),
+        errors="coerce",
+    )
+    spx_ppiaco_ratio = pd.to_numeric(
+        visible.get("SPX_PPIACO_Ratio", pd.Series(np.nan, index=visible.index)),
+        errors="coerce",
+    )
+    ppiaco = pd.to_numeric(
+        visible.get("PPIACO", pd.Series(np.nan, index=visible.index)),
+        errors="coerce",
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=visible["Date"],
+            y=spx_ppiaco_log,
+            mode="lines",
+            name="SPX/Commodities Cycle",
+            line={"color": "#22d3ee", "width": 1.9},
+            showlegend=False,
+            customdata=np.column_stack([spx_ppiaco_ratio, ppiaco]),
+            hovertemplate=(
+                "Date: %{x|%Y-%m-%d}<br>log(SPX / PPIACO): %{y:.3f}<br>"
+                "SPX / PPIACO: %{customdata[0]:.2f}<br>PPIACO: %{customdata[1]:.1f}<extra></extra>"
+            ),
+        ),
+        row=5,
+        col=1,
+    )
+
     fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1}, row=2, col=1)
     fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1}, row=3, col=1)
     fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot", "width": 1}, row=4, col=1)
@@ -1151,8 +1187,9 @@ def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Ti
     fig.update_yaxes(title_text="Normalized", row=3, col=1)
     fig.update_yaxes(title_text="Extension %", row=4, col=1, secondary_y=False)
     fig.update_yaxes(title_text="Reference 0-100", row=4, col=1, secondary_y=True, range=[0, 105], showgrid=False)
+    fig.update_yaxes(title_text="log ratio", row=5, col=1)
     fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikecolor="#94a3b8", spikethickness=1)
-    return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension</sup>", 760)
+    return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension | SPX/Commodities Cycle</sup>", 900)
 
 
 def render_multi_layer_cycle_summary(current: dict[str, Any]) -> None:

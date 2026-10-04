@@ -23,6 +23,7 @@ warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 MARKET_CYCLE_MODEL_VERSION = "MARKET_CYCLE_V1"
 MARKET_CYCLE_TICKERS = ("^GSPC", "SPY", "^VIX", "^VIX3M", "QQQ", "GLD", "BTC-USD", "RSP", "IWM", "XLI", "XLP")
+MARKET_CYCLE_FRED_SERIES = ("PPIACO",)
 MARKET_CYCLE_SPX_REFERENCE_PATH = Path(__file__).with_name("data") / "SPCFD_SPX_1W_reference.csv"
 CURRENT_RISK_RAW_TICKERS = {"SPY": "SPY_RAW", "QQQ": "QQQ_RAW"}
 MARKET_CYCLE_TRADINGVIEW_BREADTH = {"S5FI": "SPXAboveSMA50D", "S5TH": "SPXAboveSMA200D"}
@@ -153,7 +154,28 @@ def download_market_cycle_prices(end: pd.Timestamp) -> dict[str, pd.DataFrame]:
             out[output_key] = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
     for symbol in MARKET_CYCLE_TRADINGVIEW_BREADTH:
         out[symbol] = load_tradingview_breadth_series(symbol, end)
+    for series_id in MARKET_CYCLE_FRED_SERIES:
+        out[series_id] = load_fred_market_series(series_id, end)
     return out
+
+
+def load_fred_market_series(series_id: str, end: pd.Timestamp) -> pd.DataFrame:
+    try:
+        frame = download_fred_series(
+            series_id,
+            observation_start="1900-01-01",
+            observation_end=pd.Timestamp(end).date().isoformat(),
+        )
+    except Exception:
+        return pd.DataFrame(columns=["Close"])
+    if frame.empty:
+        return pd.DataFrame(columns=["Close"])
+    result = pd.DataFrame(
+        {"Close": pd.to_numeric(frame["Value"], errors="coerce").to_numpy()},
+        index=pd.to_datetime(frame["Date"], errors="coerce"),
+    )
+    result.index.name = "Date"
+    return result.loc[result.index.notna()].dropna(subset=["Close"]).sort_index()
 
 
 def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
@@ -318,6 +340,9 @@ def build_weekly_frame(raw: dict[str, pd.DataFrame], end: pd.Timestamp) -> pd.Da
         if frame.empty:
             close[ticker] = pd.Series(dtype="float64")
             low[ticker] = pd.Series(dtype="float64")
+        elif ticker in MARKET_CYCLE_FRED_SERIES:
+            close[ticker] = pd.to_numeric(frame["Close"], errors="coerce").dropna().sort_index()
+            low[ticker] = pd.Series(dtype="float64")
         else:
             close_weekly = pd.to_numeric(frame["Close"], errors="coerce").resample("W-FRI").last()
             low_weekly = pd.to_numeric(frame["Low"], errors="coerce").resample("W-FRI").min() if "Low" in frame else pd.Series(dtype="float64")
@@ -358,9 +383,21 @@ def build_weekly_frame(raw: dict[str, pd.DataFrame], end: pd.Timestamp) -> pd.Da
 
     for ticker, col in [("SPY", "SPY"), ("^VIX", "VIX"), ("^VIX3M", "VIX3M"), ("QQQ", "QQQ"), ("GLD", "GLD"), ("BTC-USD", "BTC"), ("RSP", "RSP"), ("IWM", "IWM"), ("XLI", "XLI"), ("XLP", "XLP")]:
         w[col] = align_to_target(close.get(ticker, pd.Series(dtype="float64")))
+    w["PPIACO"] = align_to_target(close.get("PPIACO", pd.Series(dtype="float64")))
+    w["SPX_PPIACO_Ratio"] = pd.to_numeric(w["SPX_Close"], errors="coerce") / pd.to_numeric(w["PPIACO"], errors="coerce")
+    w["SPX_PPIACO_Log"] = calculate_log_spx_ppiaco(w["SPX_Close"], w["PPIACO"])
     for symbol, col in MARKET_CYCLE_TRADINGVIEW_BREADTH.items():
         w[col] = np.clip(align_to_target(close.get(symbol, pd.Series(dtype="float64"))), 0.0, 100.0)
     return w.loc[w["Date"].le(end)].reset_index(drop=True)
+
+
+def calculate_log_spx_ppiaco(spx: pd.Series, ppiaco: pd.Series) -> pd.Series:
+    spx_values = pd.to_numeric(spx, errors="coerce")
+    ppi_values = pd.to_numeric(ppiaco, errors="coerce")
+    valid = spx_values.gt(0) & ppi_values.gt(0)
+    result = pd.Series(np.nan, index=spx_values.index, dtype="float64")
+    result.loc[valid] = np.log(spx_values.loc[valid] / ppi_values.loc[valid])
+    return result
 
 
 def build_monthly_frame(raw: dict[str, pd.DataFrame], end: pd.Timestamp) -> pd.DataFrame:
@@ -1845,7 +1882,7 @@ def build_category_validation(w: pd.DataFrame, current: dict[str, Any]) -> pd.Da
 
 def build_data_quality(raw: dict[str, pd.DataFrame], w: pd.DataFrame, monthly: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for ticker in MARKET_CYCLE_TICKERS:
+    for ticker in (*MARKET_CYCLE_TICKERS, *MARKET_CYCLE_FRED_SERIES):
         frame = raw.get(ticker, pd.DataFrame())
         rows.append(
             {
