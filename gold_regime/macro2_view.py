@@ -11,7 +11,8 @@ import streamlit as st
 from .macro2 import HORIZONS
 from .aisc_view import render_gold_aisc_valuation
 from .demand_structure_view import render_demand_structure
-from .models import GoldAISCValuationSnapshot, GoldStructuralMacro2Snapshot
+from .gromen_view import render_luke_gromen_gold_models
+from .models import GoldAISCValuationSnapshot, GoldStructuralMacro2Snapshot, LukeGromenGoldSnapshot
 
 
 SCORE_COLORS = {
@@ -26,6 +27,7 @@ SCORE_COLORS = {
 def render_gold_structural_macro2(
     snapshot: GoldStructuralMacro2Snapshot | None,
     aisc_snapshot: GoldAISCValuationSnapshot | None = None,
+    luke_gromen_snapshot: LukeGromenGoldSnapshot | None = None,
     selected_range: str = "5Y",
     range_end: pd.Timestamp | None = None,
 ) -> None:
@@ -40,6 +42,7 @@ def render_gold_structural_macro2(
     render_formula_details()
     render_gold_aisc_valuation(aisc_snapshot, selected_range, range_end)
     render_demand_structure(selected_range, range_end)
+    render_luke_gromen_gold_models(luke_gromen_snapshot)
     render_macro2_diagnostics(current)
     render_macro2_model_details(current)
 

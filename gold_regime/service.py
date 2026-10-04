@@ -19,9 +19,10 @@ from .config import GOLD_REGIME_CONFIG
 from .cot import calculate_cot_momentum_score, download_cftc_cot, extract_comex_gold_cot, load_comex_gold_cot_from_positioning
 from .cycles import build_gold_cycle_history
 from .etf_flows import aggregate_gold_etf_flows, load_gold_etf_flows
+from .gromen import build_luke_gromen_snapshot
 from .macro import calculate_gold_macro_from_fred
 from .macro2 import calculate_gold_structural_macro2_history
-from .models import Freshness, GoldAISCValuationSnapshot, GoldRegimeSnapshot, GoldStructuralMacro2Snapshot
+from .models import Freshness, GoldAISCValuationSnapshot, GoldRegimeSnapshot, GoldStructuralMacro2Snapshot, LukeGromenGoldSnapshot
 from .regime import (
     additional_structural_demand_context,
     apply_gold_regime_history,
@@ -122,6 +123,17 @@ def build_gold_regime_snapshot(
         )
     except Exception:
         structural_macro2 = GoldStructuralMacro2Snapshot(current={}, history=pd.DataFrame())
+    try:
+        luke_gromen = build_luke_gromen_snapshot(
+            gold_price=gold_price,
+            fred_api_key=fred_api_key,
+            cache_dir=cache,
+        )
+    except Exception as exc:
+        luke_gromen = LukeGromenGoldSnapshot(
+            current={},
+            warnings=[f"Luke Gromen block unavailable: {exc}"],
+        )
     gold_cycle_history = build_gold_cycle_history(gold_price)
 
     return GoldRegimeSnapshot(
@@ -133,6 +145,7 @@ def build_gold_regime_snapshot(
         freshness=freshness,
         structural_macro2=structural_macro2,
         aisc_valuation=GoldAISCValuationSnapshot(current=aisc_current, history=aisc_history),
+        luke_gromen=luke_gromen,
         gold_cycle_history=gold_cycle_history,
     )
 

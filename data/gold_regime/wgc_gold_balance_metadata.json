@@ -1,0 +1,11 @@
+{
+  "dataset": "World Gold Council gold supply and demand presentation",
+  "source_file": "Gold Balance Q2 2026.xlsx",
+  "source_sha256": "80da5bcf720dd570c44e3ba5b3a39d4fc501fb698d82ffb5846ac97e675f32ef",
+  "data_as_of": "30 June, 2026",
+  "source": "Metals Focus, Refinitiv GFMS, ICE Benchmark Administration, World Gold Council",
+  "annual_first_year": 2010,
+  "annual_last_year": 2025,
+  "latest_published_quarter": "2026Q2",
+  "runtime_dependency_on_source_file": false
+}
