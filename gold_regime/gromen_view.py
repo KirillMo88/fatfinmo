@@ -7,7 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from .gromen import ADAPTIVE_THETAS, STATIC_TARGET_SHARES
+from .gromen import STATIC_TARGET_SHARES
 from .models import LukeGromenGoldSnapshot
 
 
@@ -20,7 +20,6 @@ def render_luke_gromen_gold_models(snapshot: LukeGromenGoldSnapshot | None) -> N
 
     render_us_coverage_model(snapshot)
     render_global_reset_model(snapshot)
-    render_convergence(snapshot)
     if snapshot.warnings:
         with st.expander("Data warnings"):
             for warning in snapshot.warnings:
@@ -29,7 +28,7 @@ def render_luke_gromen_gold_models(snapshot: LukeGromenGoldSnapshot | None) -> N
 
 
 def render_us_coverage_model(snapshot: LukeGromenGoldSnapshot) -> None:
-    st.markdown("##### Model 1 — U.S. Gold Coverage")
+    st.markdown("##### Model 1 — U.S. Debt held by external Investors Gold Coverage")
     current = snapshot.current or {}
     cols = st.columns(4)
     cols[0].metric("Gold Price", _money(current.get("gold_price")))
@@ -114,9 +113,9 @@ def render_global_reset_model(snapshot: LukeGromenGoldSnapshot) -> None:
     if not annual.empty:
         charts = st.columns(2)
         with charts[0]:
-            st.plotly_chart(_mds_figure(annual), use_container_width=True, config={"displayModeBar": False, "responsive": True})
-        with charts[1]:
             st.plotly_chart(_gmar_figure(annual), use_container_width=True, config={"displayModeBar": False, "responsive": True})
+        with charts[1]:
+            _render_adaptive_matrix(snapshot)
 
     balance_ok = current.get("balance_valid")
     balance_text = "PASS" if balance_ok is True else "FAIL" if balance_ok is False else "n/a"
@@ -124,42 +123,6 @@ def render_global_reset_model(snapshot: LukeGromenGoldSnapshot) -> None:
         f"WGC reconciliation: {balance_text}; gap {_tonnes(current.get('balance_gap_tonnes'))}, "
         f"tolerance {_tonnes(current.get('balance_tolerance_tonnes'))}."
     )
-
-    if not snapshot.wgc_ytd.empty:
-        row = snapshot.wgc_ytd.iloc[-1]
-        st.markdown("###### WGC Annualized YTD — display only")
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    ["Through", row.get("through_period")],
-                    ["Published Quarters", _integer(row.get("published_quarters"))],
-                    ["Annualized Total Supply", _tonnes(row.get("total_supply_tonnes"))],
-                    ["Annualized Investment", _tonnes(row.get("investment_tonnes"))],
-                    ["Annualized Central Banks", _tonnes(row.get("central_banks_tonnes"))],
-                    ["YTD Average LBMA Price", _money(row.get("lbma_gold_price_usd_oz"))],
-                ],
-                columns=["Metric", "Value"],
-            ),
-            hide_index=True,
-            use_container_width=True,
-        )
-        st.caption("Flow annualization = YTD × 4 / published quarters. This display-only row is never a calibration year.")
-
-    if not snapshot.static_scenarios.empty:
-        st.markdown("###### Static Monetary-Density Scenarios")
-        view = snapshot.static_scenarios.copy()
-        view["Target Share"] = view["target_share"].map(_percent)
-        view["Implied Gold Price"] = view["implied_gold_price"].map(_money)
-        st.dataframe(view[["scenario", "Target Share", "Implied Gold Price"]].rename(columns={"scenario": "Scenario"}), hide_index=True, use_container_width=True)
-
-    if not snapshot.adaptive_matrix.empty:
-        st.markdown("###### Adaptive Reset Matrix")
-        matrix = snapshot.adaptive_matrix.set_index("theta")[[*STATIC_TARGET_SHARES]].copy()
-        matrix.index = [f"θ {value:.0%}" for value in matrix.index]
-        matrix.columns = [f"s {value:.0%}" for value in matrix.columns]
-        styled = matrix.style.format(lambda value: "n/a" if not np.isfinite(value) else f"${value:,.0f}")
-        st.dataframe(styled, use_container_width=True)
-        st.caption("Rows are the monetizable-gold-flow share θ; columns are the target share s of GlobalPositiveCA.")
 
     if not snapshot.global_ca_history.empty:
         ca = snapshot.global_ca_history.sort_values("year").tail(8).copy()
@@ -180,15 +143,17 @@ def render_global_reset_model(snapshot: LukeGromenGoldSnapshot) -> None:
             st.dataframe(ca[columns], hide_index=True, use_container_width=True)
 
 
-def render_convergence(snapshot: LukeGromenGoldSnapshot) -> None:
-    st.markdown("##### Convergence Panel")
-    if snapshot.convergence.empty:
-        st.info("Convergence cannot be calculated until both model inputs are available.")
+def _render_adaptive_matrix(snapshot: LukeGromenGoldSnapshot) -> None:
+    st.markdown("###### Adaptive Reset Matrix")
+    if snapshot.adaptive_matrix.empty:
+        st.info("Adaptive reset values are unavailable.")
         return
-    view = snapshot.convergence.copy()
-    view["Implied Gold Price"] = view["implied_gold_price"].map(_money)
-    view["vs Current"] = view["vs_current_pct"].map(_signed_percent)
-    st.dataframe(view[["valuation", "Implied Gold Price", "vs Current"]].rename(columns={"valuation": "Valuation"}), hide_index=True, use_container_width=True)
+    matrix = snapshot.adaptive_matrix.set_index("theta")[[*STATIC_TARGET_SHARES]].copy()
+    matrix.index = [f"θ {value:.0%}" for value in matrix.index]
+    matrix.columns = [f"s {value:.0%}" for value in matrix.columns]
+    styled = matrix.style.format(lambda value: "n/a" if not np.isfinite(value) else f"${value:,.0f}")
+    st.dataframe(styled, use_container_width=True)
+    st.caption("Rows are the monetizable-gold-flow share θ; columns are the target share s of GlobalPositiveCA.")
 
 
 def render_methodology() -> None:
@@ -205,18 +170,6 @@ def render_methodology() -> None:
 - Adaptive demand elasticities: jewellery −0.77, recycling +0.44; jewellery floor 400 t and recycling cap 3,000 t.
             """
         )
-
-
-def _mds_figure(annual: pd.DataFrame) -> go.Figure:
-    data = annual.loc[pd.to_numeric(annual["year"], errors="coerce") >= 2010]
-    fig = go.Figure()
-    for column, label, color in (
-        ("core_mds", "Core MDS", "#60a5fa"),
-        ("broad_mds", "Broad MDS", "#fbbf24"),
-    ):
-        fig.add_trace(go.Scatter(x=data["year"], y=data[column] * 100.0, name=label, mode="lines+markers", line={"color": color}))
-    fig.update_layout(title="Monetary Demand Share", height=300, margin={"l": 40, "r": 15, "t": 45, "b": 30}, template="plotly_dark", paper_bgcolor="#0b0e14", plot_bgcolor="#11161f", yaxis_ticksuffix="%")
-    return fig
 
 
 def _gmar_figure(annual: pd.DataFrame) -> go.Figure:
