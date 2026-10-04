@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -43,6 +44,9 @@ def render_gold_structural_macro2(
     render_gold_aisc_valuation(aisc_snapshot, selected_range, range_end)
     render_demand_structure(selected_range, range_end)
     render_luke_gromen_gold_models(luke_gromen_snapshot)
+    survey_image = Path(__file__).resolve().parent.parent / "assets" / "wgc_central_bank_gold_reserves_survey_2026.png"
+    if survey_image.exists():
+        st.image(str(survey_image), width=697)
     render_macro2_diagnostics(current)
     render_macro2_model_details(current)
 

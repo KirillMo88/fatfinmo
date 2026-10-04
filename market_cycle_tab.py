@@ -263,7 +263,7 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
         )
         st.caption(
             "SPX, the ~41M primary market cycle, the ~80-95M long extension cycle, and actual structural extension are separate layers. "
-            "SPX/Commodities Cycle is ln(FRED PPIACO / SPX). Trough and peak markers are historical context, not deterministic buy/sell dates."
+            "The lower panel shows the natural log of FRED PPIACO. Trough and peak markers are historical context, not deterministic buy/sell dates."
         )
     with cycle_summary_col:
         render_multi_layer_cycle_summary(current)
@@ -994,11 +994,11 @@ def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Ti
             "Primary Market Cycle (~41M)",
             "Long Extension Cycle (~80-95M)",
             "Structural Extension",
-            "SPX/Commodities Cycle",
+            "Log PPI",
         ),
     )
     if full.empty:
-        return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension | SPX/Commodities Cycle</sup>", 900)
+        return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension | Log PPI</sup>", 900)
     full["Date"] = pd.to_datetime(full["Date"], errors="coerce")
     visible = full.loc[full["Date"].between(start, end)].copy()
     if visible.empty:
@@ -1148,31 +1148,24 @@ def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Ti
     add_structural_marker_trace(fig, visible, mode="trough")
     add_structural_marker_trace(fig, visible, mode="peak")
 
-    ppiaco_spx_log = pd.to_numeric(
-        visible.get("PPIACO_SPX_Log", pd.Series(np.nan, index=visible.index)),
-        errors="coerce",
-    )
-    ppiaco_spx_ratio = pd.to_numeric(
-        visible.get("PPIACO_SPX_Ratio", pd.Series(np.nan, index=visible.index)),
-        errors="coerce",
-    )
     ppiaco = pd.to_numeric(
         visible.get("PPIACO", pd.Series(np.nan, index=visible.index)),
         errors="coerce",
     )
+    log_ppiaco = np.log(ppiaco.where(ppiaco.gt(0)))
     fig.add_trace(
         go.Scatter(
             x=visible["Date"],
-            y=ppiaco_spx_log,
+            y=log_ppiaco,
             mode="lines",
-            name="SPX/Commodities Cycle",
+            name="Log PPI",
             line={"color": "#22d3ee", "width": 1.9},
             showlegend=False,
-            customdata=np.column_stack([ppiaco_spx_ratio, ppiaco]),
             hovertemplate=(
-                "Date: %{x|%Y-%m-%d}<br>log(PPIACO / SPX): %{y:.3f}<br>"
-                "PPIACO / SPX: %{customdata[0]:.4f}<br>PPIACO: %{customdata[1]:.1f}<extra></extra>"
+                "Date: %{x|%Y-%m-%d}<br>Log PPI: %{y:.3f}<br>"
+                "PPIACO: %{customdata:.1f}<extra></extra>"
             ),
+            customdata=ppiaco,
         ),
         row=5,
         col=1,
@@ -1187,9 +1180,9 @@ def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Ti
     fig.update_yaxes(title_text="Normalized", row=3, col=1)
     fig.update_yaxes(title_text="Extension %", row=4, col=1, secondary_y=False)
     fig.update_yaxes(title_text="Reference 0-100", row=4, col=1, secondary_y=True, range=[0, 105], showgrid=False)
-    fig.update_yaxes(title_text="log ratio", row=5, col=1)
+    fig.update_yaxes(title_text="Log PPI", row=5, col=1)
     fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikecolor="#94a3b8", spikethickness=1)
-    return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension | SPX/Commodities Cycle</sup>", 900)
+    return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension | Log PPI</sup>", 900)
 
 
 def render_multi_layer_cycle_summary(current: dict[str, Any]) -> None:

@@ -39,7 +39,7 @@ def test_weekly_market_cycle_aligns_fred_ppiaco_and_calculates_log_ratio(monkeyp
     assert np.isclose(valid["PPIACO_SPX_Log"], np.log(valid["PPIACO"] / valid["SPX_Close"]))
 
 
-def test_multi_layer_figure_places_spx_commodities_cycle_after_structural_extension() -> None:
+def test_multi_layer_figure_places_log_ppiaco_after_structural_extension() -> None:
     figure = build_multi_layer_market_cycles_fig(
         pd.DataFrame(),
         pd.Timestamp("2000-01-01"),
@@ -47,22 +47,21 @@ def test_multi_layer_figure_places_spx_commodities_cycle_after_structural_extens
     )
     subplot_titles = [annotation.text for annotation in figure.layout.annotations]
 
-    assert subplot_titles[-2:] == ["Structural Extension", "SPX/Commodities Cycle"]
+    assert subplot_titles[-2:] == ["Structural Extension", "Log PPI"]
     assert figure.layout.height == 900
 
 
-def test_multi_layer_figure_plots_log_ppiaco_spx_in_fifth_panel() -> None:
+def test_multi_layer_figure_plots_only_log_ppiaco_in_fifth_panel() -> None:
     dates = pd.date_range("2024-01-31", periods=24, freq="ME")
     spx = pd.Series(np.linspace(4_000.0, 6_000.0, len(dates)))
     ppiaco = pd.Series(np.linspace(245.0, 265.0, len(dates)))
-    ratio = ppiaco / spx
     history = pd.DataFrame(
         {
             "Date": dates,
             "SPX_Close": spx,
             "PPIACO": ppiaco,
-            "PPIACO_SPX_Ratio": ratio,
-            "PPIACO_SPX_Log": np.log(ratio),
+            "PPIACO_SPX_Ratio": ppiaco / spx,
+            "PPIACO_SPX_Log": np.log(ppiaco / spx),
             "PrimaryMarketCycle": np.sin(np.linspace(0.0, 4.0, len(dates))),
             "LongMarketExtensionCycle": np.cos(np.linspace(0.0, 3.0, len(dates))),
             "StructuralExtensionSmooth": np.linspace(20.0, 80.0, len(dates)),
@@ -71,7 +70,8 @@ def test_multi_layer_figure_plots_log_ppiaco_spx_in_fifth_panel() -> None:
     )
 
     figure = build_multi_layer_market_cycles_fig(history, dates.min(), dates.max())
-    trace = next(item for item in figure.data if item.name == "SPX/Commodities Cycle")
+    trace = next(item for item in figure.data if item.name == "Log PPI")
 
-    np.testing.assert_allclose(np.asarray(trace.y, dtype="float64"), np.log(ratio))
+    np.testing.assert_allclose(np.asarray(trace.y, dtype="float64"), np.log(ppiaco))
+    np.testing.assert_allclose(np.asarray(trace.customdata, dtype="float64"), ppiaco)
     assert trace.yaxis == "y6"
