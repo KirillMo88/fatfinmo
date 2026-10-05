@@ -7,12 +7,13 @@ import numpy as np
 import pandas as pd
 
 
-DEMAND_CATEGORIES = ["Jewellery", "Technology", "Investment", "Central Banks"]
+DEMAND_CATEGORIES = ["Jewellery", "Technology", "Investment", "Central Banks", "OTC and other"]
 DEMAND_TONNES_COLUMNS = {
     "Jewellery": "jewellery_fabrication_tonnes",
     "Technology": "technology_tonnes",
     "Investment": "investment_tonnes",
     "Central Banks": "central_banks_tonnes",
+    "OTC and other": "otc_and_other_tonnes",
 }
 WGC_QUARTERLY_FILENAME = "wgc_gold_balance_quarterly.csv"
 
@@ -30,9 +31,6 @@ def build_demand_structure_frame(data_dir: Path | None = None) -> pd.DataFrame:
         "is_published",
         "total_supply_tonnes",
         *DEMAND_TONNES_COLUMNS.values(),
-        "technology_tonnes",
-        "investment_tonnes",
-        "central_banks_tonnes",
     }
     missing_columns = sorted(required_columns - set(source.columns))
     if missing_columns:
@@ -49,15 +47,18 @@ def build_demand_structure_frame(data_dir: Path | None = None) -> pd.DataFrame:
 
     total_supply = pd.to_numeric(source["total_supply_tonnes"], errors="coerce")
     valid_supply = total_supply.where(total_supply.gt(0))
+    jewellery = pd.to_numeric(source["jewellery_fabrication_tonnes"], errors="coerce")
     technology = pd.to_numeric(source["technology_tonnes"], errors="coerce")
     investment = pd.to_numeric(source["investment_tonnes"], errors="coerce")
     central_banks = pd.to_numeric(source["central_banks_tonnes"], errors="coerce")
+    otc_and_other = pd.to_numeric(source["otc_and_other_tonnes"], errors="coerce")
 
     shares = {
-        "Jewellery": 1.0 - technology.div(valid_supply) - investment.div(valid_supply) - central_banks.div(valid_supply),
+        "Jewellery": jewellery.div(valid_supply),
         "Technology": technology.div(valid_supply),
         "Investment": investment.div(valid_supply),
         "Central Banks": central_banks.div(valid_supply),
+        "OTC and other": otc_and_other.div(valid_supply),
     }
 
     changes: dict[str, dict[int, np.ndarray]] = {}

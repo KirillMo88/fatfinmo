@@ -14,6 +14,7 @@ DEMAND_COLORS = {
     "Technology": "#c084fc",
     "Investment": "#fbbf24",
     "Central Banks": "#fb7185",
+    "OTC and other": "#94a3b8",
 }
 
 
