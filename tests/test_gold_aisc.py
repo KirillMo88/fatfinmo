@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -124,3 +126,57 @@ def test_demand_structure_has_three_quarterly_stacked_series_and_shared_range() 
     assert len(figure.data) == 12
     assert figure.layout.barmode == "relative"
     assert list(figure.layout.xaxis.range) == [pd.Timestamp("2021-09-27"), pd.Timestamp("2026-09-27")]
+
+
+def test_demand_structure_uses_wgc_gold_balance_shares_and_quarterly_changes() -> None:
+    source = pd.read_csv(
+        Path(__file__).resolve().parents[1] / "data" / "gold_regime" / "wgc_gold_balance_quarterly.csv"
+    ).set_index("period")
+    current = source.loc["2026Q2"]
+    previous_quarter = source.loc["2026Q1"]
+    previous_year_quarter = source.loc["2025Q2"]
+    frame = build_demand_structure_frame()
+    latest = frame.loc[frame["date"].eq(pd.Timestamp("2026-06-30"))].set_index("category")
+
+    assert np.isclose(latest.loc["Technology", "demand_share"], current["technology_tonnes"] / current["total_supply_tonnes"])
+    assert np.isclose(latest.loc["Investment", "demand_share"], current["investment_tonnes"] / current["total_supply_tonnes"])
+    assert np.isclose(latest.loc["Central Banks", "demand_share"], current["central_banks_tonnes"] / current["total_supply_tonnes"])
+    assert np.isclose(
+        latest.loc["Jewellery", "demand_share"],
+        1.0
+        - current["technology_tonnes"] / current["total_supply_tonnes"]
+        - current["investment_tonnes"] / current["total_supply_tonnes"]
+        - current["central_banks_tonnes"] / current["total_supply_tonnes"],
+    )
+    assert np.isclose(latest["demand_share"].sum(), 1.0)
+    assert np.isclose(
+        latest.loc["Jewellery", "demand_12m_change_tn"],
+        current["jewellery_fabrication_tonnes"] - previous_year_quarter["jewellery_fabrication_tonnes"],
+    )
+    assert np.isclose(
+        latest.loc["Central Banks", "demand_3m_change_tn"],
+        current["central_banks_tonnes"] - previous_quarter["central_banks_tonnes"],
+    )
+
+
+def test_demand_structure_quarterly_changes_do_not_skip_missing_periods(tmp_path) -> None:
+    source = pd.DataFrame(
+        {
+            "period": ["2024Q1", "2024Q3", "2024Q4"],
+            "is_published": [True, True, True],
+            "total_supply_tonnes": [100.0, 110.0, 115.0],
+            "jewellery_fabrication_tonnes": [50.0, 55.0, 57.0],
+            "technology_tonnes": [10.0, 11.0, 12.0],
+            "investment_tonnes": [25.0, 27.0, 28.0],
+            "central_banks_tonnes": [5.0, 6.0, 7.0],
+        }
+    )
+    source.to_csv(tmp_path / "wgc_gold_balance_quarterly.csv", index=False)
+
+    frame = build_demand_structure_frame(tmp_path)
+    q3 = frame.loc[frame["quarter"].eq("Q3'24")]
+    q4 = frame.loc[frame["quarter"].eq("Q4'24")]
+
+    assert q3["demand_3m_change_tn"].isna().all()
+    assert q4.loc[q4["category"].eq("Jewellery"), "demand_3m_change_tn"].iloc[0] == 2.0
+    assert q4["demand_12m_change_tn"].isna().all()
