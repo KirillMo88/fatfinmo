@@ -119,11 +119,11 @@ def test_demand_structure_has_three_quarterly_stacked_series_and_shared_range() 
         (pd.Timestamp("2021-09-27"), pd.Timestamp("2026-09-27")),
     )
 
-    assert len(frame) == 264
-    assert DEMAND_CATEGORIES == ["Jewellery", "Technology", "Investment", "Central Banks"]
+    assert len(frame) == 330
+    assert DEMAND_CATEGORIES == ["Jewellery", "Technology", "Investment", "Central Banks", "OTC and other"]
     assert frame["date"].min() == pd.Timestamp("2010-03-31")
     assert frame["date"].max() == pd.Timestamp("2026-06-30")
-    assert len(figure.data) == 12
+    assert len(figure.data) == 15
     assert figure.layout.barmode == "relative"
     assert list(figure.layout.xaxis.range) == [pd.Timestamp("2021-09-27"), pd.Timestamp("2026-09-27")]
 
@@ -143,11 +143,9 @@ def test_demand_structure_uses_wgc_gold_balance_shares_and_quarterly_changes() -
     assert np.isclose(latest.loc["Central Banks", "demand_share"], current["central_banks_tonnes"] / current["total_supply_tonnes"])
     assert np.isclose(
         latest.loc["Jewellery", "demand_share"],
-        1.0
-        - current["technology_tonnes"] / current["total_supply_tonnes"]
-        - current["investment_tonnes"] / current["total_supply_tonnes"]
-        - current["central_banks_tonnes"] / current["total_supply_tonnes"],
+        current["jewellery_fabrication_tonnes"] / current["total_supply_tonnes"],
     )
+    assert np.isclose(latest.loc["OTC and other", "demand_share"], current["otc_and_other_tonnes"] / current["total_supply_tonnes"])
     assert np.isclose(latest["demand_share"].sum(), 1.0)
     assert np.isclose(
         latest.loc["Jewellery", "demand_12m_change_tn"],
@@ -156,6 +154,10 @@ def test_demand_structure_uses_wgc_gold_balance_shares_and_quarterly_changes() -
     assert np.isclose(
         latest.loc["Central Banks", "demand_3m_change_tn"],
         current["central_banks_tonnes"] - previous_quarter["central_banks_tonnes"],
+    )
+    assert np.isclose(
+        latest.loc["OTC and other", "demand_3m_change_tn"],
+        current["otc_and_other_tonnes"] - previous_quarter["otc_and_other_tonnes"],
     )
 
 
@@ -169,6 +171,7 @@ def test_demand_structure_quarterly_changes_do_not_skip_missing_periods(tmp_path
             "technology_tonnes": [10.0, 11.0, 12.0],
             "investment_tonnes": [25.0, 27.0, 28.0],
             "central_banks_tonnes": [5.0, 6.0, 7.0],
+            "otc_and_other_tonnes": [10.0, 11.0, 12.0],
         }
     )
     source.to_csv(tmp_path / "wgc_gold_balance_quarterly.csv", index=False)
