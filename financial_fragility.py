@@ -141,9 +141,18 @@ def _overlay_current_stress(
     market_daily: pd.DataFrame,
     funding_daily: pd.DataFrame,
     rates_history: pd.DataFrame,
+    market_current: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Use the latest source observations for current cards without changing the weekly history."""
     result = dict(current)
+    # Current Risk is already calculated by Market Cycle and exposed as its
+    # snapshot.current payload. Preserve those daily statuses for the separate
+    # Financial Fragility card instead of trying to infer them from weekly data.
+    if isinstance(market_current, dict):
+        for key, value in market_current.items():
+            if key.startswith(("CurrentRisk", "CurrentMarketRisk")) or key == "ActiveStressChannels":
+                result[key] = value
+
     market_fields = {
         "VIX": "VIX",
         "VIX3M": "VIX3M",
@@ -588,6 +597,7 @@ def build_financial_fragility_snapshot(
         sources["market_daily"],
         sources["funding_daily"],
         sources["rates"],
+        getattr(market_snapshot, "current", None),
     )
     current["RatesDataAsOf"] = sources["rates"]["Date"].max() if not sources["rates"].empty else pd.NaT
     current["RatesPressureStatus"] = _rates_pressure_status(current.get("RatesPressureRisk"))
