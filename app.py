@@ -21,6 +21,7 @@ from streamlit.errors import StreamlitSecretNotFoundError
 
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
+from job_locking import advisory_file_lock_held
 from alpha_engine import (
     alpha_config,
     calculate_alpha_engine,
@@ -539,7 +540,7 @@ def snapshot_metadata(status: str, rows: int, data_as_of: Any = None, error: str
 
 
 def background_job_running(job_name: str) -> bool:
-    return (JOB_STATUS_DIR / f"{job_name}.lock").exists()
+    return advisory_file_lock_held(JOB_STATUS_DIR / f"{job_name}.lock")
 
 
 def start_refresh_job(job: str) -> tuple[bool, str]:

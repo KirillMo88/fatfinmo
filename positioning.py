@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 import requests
 
+from job_locking import advisory_file_lock
+
 
 DISAGGREGATED_URL = "https://publicreporting.cftc.gov/api/v3/views/72hh-3qpy/export.csv"
 TFF_URL = "https://publicreporting.cftc.gov/api/v3/views/gpe5-46if/export.csv"
@@ -25,6 +27,7 @@ POSITIONING_STORAGE_DIR = Path("persistent") / "positioning"
 RAW_DIR = POSITIONING_STORAGE_DIR / "raw"
 PROCESSED_DIR = POSITIONING_STORAGE_DIR / "processed"
 STATUS_PATH = POSITIONING_STORAGE_DIR / "source_status.json"
+POSITIONING_LOCK_PATH = Path("persistent") / "job_status" / "weekly_positioning.lock"
 
 CFTC_PERCENTILE_WINDOW = 156
 CFTC_PERCENTILE_MIN_PERIODS = 52
@@ -95,6 +98,11 @@ TFF_PARTICIPANTS: tuple[tuple[str, str, str, str | None], ...] = (
 
 
 def update_positioning_data(force: bool = False) -> dict[str, Any]:
+    with advisory_file_lock(POSITIONING_LOCK_PATH):
+        return _update_positioning_data_locked(force=force)
+
+
+def _update_positioning_data_locked(force: bool = False) -> dict[str, Any]:
     ensure_positioning_dirs()
     status: dict[str, Any] = read_status()
     raw_disaggregated = download_csv_source(DISAGGREGATED_URL, RAW_DIR / "cftc_disaggregated.csv", "CFTC Commodities", status, force)
@@ -123,7 +131,12 @@ def load_positioning_data(force_update: bool = False) -> dict[str, Any]:
     aaii = read_processed("aaii")
     naaim = read_processed("naaim")
     if force_update or master.empty:
-        return update_positioning_data(force=True)
+        try:
+            return update_positioning_data(force=True)
+        except FileExistsError:
+            status = read_status()
+            status["CFTC Refresh"] = {"status": "ALREADY_RUNNING"}
+            return {"cftc_master": master, "aaii": aaii, "naaim": naaim, "status": status}
     return {"cftc_master": master, "aaii": aaii, "naaim": naaim, "status": read_status()}
 
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
+import sys
 import time
-from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from typing import Any
 import pandas as pd
 
 import app
+from job_locking import advisory_file_lock
 import positioning
 from liquidity_forecast import ERROR_PATH, SNAPSHOT_PATH, refresh_forecast_snapshot
 from rates_financial_conditions import SNAPSHOT_PATH as RATES_FC_SNAPSHOT_PATH, refresh_snapshot as refresh_rates_fc_snapshot
@@ -38,24 +41,34 @@ DEFAULT_FUNDING_LATE_RETRY_UTC = "05:00"
 DEFAULT_WEEKLY_POSITIONING_UTC = "12:30"
 DEFAULT_MARKET_PERFORMANCE_INTERVAL_SECONDS = 600
 DEFAULT_SCHEDULER_POLL_SECONDS = 30
+DEFAULT_NIGHTLY_TIMEOUT_SECONDS = 7200
+DEFAULT_WEEKLY_POSITIONING_TIMEOUT_SECONDS = 3600
+DEFAULT_MARKET_PERFORMANCE_TIMEOUT_SECONDS = 480
+DEFAULT_REFRESH_TIMEOUT_SECONDS = 1800
+DEFAULT_REFRESH_RETRY_SECONDS = 300
+MAX_REFRESH_RETRY_SECONDS = 3600
+MAX_CONCURRENT_SCHEDULED_JOBS = 2
 
 
-@contextmanager
 def job_lock(job_name: str):
     JOB_DIR.mkdir(parents=True, exist_ok=True)
-    lock_path = JOB_DIR / f"{job_name}.lock"
-    fd = None
-    try:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode("utf-8"))
-        yield
-    finally:
-        if fd is not None:
-            os.close(fd)
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
+    return advisory_file_lock(JOB_DIR / f"{job_name}.lock")
+
+
+@dataclass
+class ScheduledJob:
+    name: str
+    command: str
+    due_at: datetime
+    timeout_seconds: int
+    daily_at: dt_time | None = None
+    weekly_weekday: int | None = None
+    weekly_at: dt_time | None = None
+    interval_seconds: int | None = None
+    process: subprocess.Popen | None = None
+    process_started_at: float | None = None
+    next_regular_at: datetime | None = None
+    retry_attempts: int = 0
 
 
 def log_job(job: str, started: float, status: str, rows_updated: int = 0, source_status: Any = None, error: str | None = None) -> None:
@@ -150,11 +163,17 @@ def run_weekly_positioning() -> None:
     rows_updated = 0
     source_status: Any = None
     try:
-        with job_lock("weekly_positioning"):
-            data = positioning.update_positioning_data(force=True)
-            master = data.get("cftc_master", pd.DataFrame())
-            rows_updated = len(master) if hasattr(master, "__len__") else 0
-            source_status = data.get("status")
+        data = positioning.update_positioning_data(force=True)
+        master = data.get("cftc_master", pd.DataFrame())
+        rows_updated = len(master) if hasattr(master, "__len__") else 0
+        source_status = data.get("status")
+        failed_sources = {
+            name: detail
+            for name in ("CFTC Commodities", "CFTC Financials")
+            if (detail := (source_status or {}).get(name, {})).get("status") != "CURRENT"
+        }
+        if failed_sources:
+            raise RuntimeError(f"CFTC source refresh failed; cached data retained: {failed_sources}")
         log_job("weekly_positioning", started, "CURRENT", rows_updated, source_status=source_status)
     except FileExistsError:
         log_job("weekly_positioning", started, "SKIPPED_LOCKED")
@@ -280,6 +299,168 @@ def next_weekly_run(now: datetime, weekday: int, run_at: dt_time) -> datetime:
     return candidate
 
 
+def last_successful_job_time(job_name: str) -> datetime | None:
+    if not JOB_LOG_PATH.exists():
+        return None
+    latest: datetime | None = None
+    try:
+        with JOB_LOG_PATH.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("Job") != job_name or entry.get("Status") != "CURRENT":
+                    continue
+                finished = pd.to_datetime(entry.get("FinishedAt"), utc=True, errors="coerce")
+                if pd.isna(finished):
+                    continue
+                value = finished.to_pydatetime()
+                if latest is None or value > latest:
+                    latest = value
+    except OSError:
+        return None
+    return latest
+
+
+def initial_daily_due(now: datetime, run_at: dt_time, job_name: str) -> datetime:
+    upcoming = next_daily_run(now, run_at)
+    latest_due = upcoming - timedelta(days=1)
+    successful_at = last_successful_job_time(job_name)
+    if latest_due <= now and (successful_at is None or successful_at < latest_due):
+        return latest_due
+    return upcoming
+
+
+def initial_weekly_due(now: datetime, weekday: int, run_at: dt_time, job_name: str) -> datetime:
+    upcoming = next_weekly_run(now, weekday, run_at)
+    latest_due = upcoming - timedelta(days=7)
+    successful_at = last_successful_job_time(job_name)
+    if latest_due <= now and (successful_at is None or successful_at < latest_due):
+        return latest_due
+    return upcoming
+
+
+def _last_job_status_since(job_name: str, started_at: float) -> str | None:
+    if not JOB_LOG_PATH.exists():
+        return None
+    latest_started = float("-inf")
+    latest_status: str | None = None
+    try:
+        with JOB_LOG_PATH.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("Job") != job_name:
+                    continue
+                started = pd.to_datetime(entry.get("StartedAt"), utc=True, errors="coerce")
+                if pd.isna(started):
+                    continue
+                started_epoch = started.timestamp()
+                if started_epoch >= started_at and started_epoch >= latest_started:
+                    latest_started = started_epoch
+                    latest_status = str(entry.get("Status", ""))
+    except OSError:
+        return None
+    return latest_status
+
+
+def _next_regular_run(job: ScheduledJob, now: datetime) -> datetime:
+    if job.daily_at is not None:
+        return next_daily_run(now, job.daily_at)
+    if job.weekly_weekday is not None:
+        if job.weekly_at is None:
+            raise ValueError(f"Scheduled weekly job has no run time: {job.name}")
+        return next_weekly_run(now, job.weekly_weekday, job.weekly_at)
+    if job.interval_seconds is not None:
+        return now + timedelta(seconds=job.interval_seconds)
+    return datetime.max.replace(tzinfo=timezone.utc)
+
+
+def configured_timeout(env_name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(env_name, str(default)))
+    except (TypeError, ValueError):
+        log_scheduler(f"Invalid {env_name}; using {default}s")
+        return default
+    return value if value > 0 else default
+
+
+def schedule_retry(job: ScheduledJob, now: datetime, base_seconds: int) -> int:
+    job.retry_attempts += 1
+    delay_seconds = min(base_seconds * (2 ** min(job.retry_attempts - 1, 10)), MAX_REFRESH_RETRY_SECONDS)
+    retry_at = now + timedelta(seconds=delay_seconds)
+    if job.next_regular_at is not None and retry_at >= job.next_regular_at:
+        job.due_at = job.next_regular_at
+    else:
+        job.due_at = retry_at
+    return delay_seconds
+
+
+def launch_scheduled_job(job: ScheduledJob, retry_seconds: int = DEFAULT_REFRESH_RETRY_SECONDS) -> None:
+    started_at = time.time()
+    if job.next_regular_at is not None and job.due_at >= job.next_regular_at:
+        job.retry_attempts = 0
+    command = [sys.executable, str(Path(__file__).resolve()), job.command]
+    try:
+        job.process = subprocess.Popen(command, cwd=Path.cwd())
+    except Exception as exc:
+        log_job(job.name, started_at, "FAILED", error=f"Could not start scheduled process: {exc}")
+        delay_seconds = schedule_retry(job, datetime.now(timezone.utc), retry_seconds)
+        log_scheduler(f"{job.name} could not start; retrying in {delay_seconds}s: {exc}")
+        return
+    job.process_started_at = started_at
+    now = datetime.now(timezone.utc)
+    job.next_regular_at = _next_regular_run(job, now)
+    job.due_at = job.next_regular_at
+    log_scheduler(
+        f"Started {job.name} pid={job.process.pid}, timeout={job.timeout_seconds}s, "
+        f"next_due={job.next_regular_at.isoformat()}"
+    )
+
+
+def reap_scheduled_jobs(jobs: list[ScheduledJob], retry_seconds: int = DEFAULT_REFRESH_RETRY_SECONDS) -> None:
+    now = datetime.now(timezone.utc)
+    for job in jobs:
+        process = job.process
+        started_at = job.process_started_at
+        if process is None or started_at is None:
+            continue
+        elapsed = time.time() - started_at
+        return_code = process.poll()
+        timed_out = return_code is None and elapsed >= job.timeout_seconds
+        if timed_out:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            return_code = process.returncode
+            log_job(job.name, started_at, "FAILED", error=f"Scheduled job timed out after {job.timeout_seconds}s")
+            log_scheduler(f"{job.name} timed out after {job.timeout_seconds}s; process stopped")
+        elif return_code is not None:
+            status = _last_job_status_since(job.name, started_at)
+            if return_code == 0 and status == "CURRENT":
+                job.retry_attempts = 0
+                log_scheduler(f"Finished {job.name} successfully")
+            else:
+                error = f"Scheduled process exited with code {return_code}; job status={status or 'MISSING'}"
+                if return_code == 0 and status == "SKIPPED_LOCKED":
+                    error = "Scheduled run could not acquire its active job lock"
+                log_job(job.name, started_at, "FAILED", error=error)
+                log_scheduler(f"{job.name} did not complete successfully: {error}")
+
+        if timed_out or (return_code is not None and (return_code != 0 or _last_job_status_since(job.name, started_at) != "CURRENT")):
+            delay_seconds = schedule_retry(job, now, retry_seconds)
+            log_scheduler(f"{job.name} retry scheduled in {delay_seconds}s")
+        if return_code is not None:
+            job.process = None
+            job.process_started_at = None
+
+
 def latest_screener_snapshot_time() -> datetime | None:
     latest: datetime | None = None
     for meta_path in app.SNAPSHOT_DIR.glob("screener_snapshot_latest_*.json"):
@@ -294,15 +475,6 @@ def latest_screener_snapshot_time() -> datetime | None:
         except Exception:
             continue
     return latest
-
-
-def run_job_safely(name: str, func) -> None:
-    try:
-        log_scheduler(f"Starting {name}")
-        func()
-        log_scheduler(f"Finished {name}")
-    except Exception as exc:
-        log_scheduler(f"{name} failed: {exc}")
 
 
 def run_scheduler() -> None:
@@ -320,67 +492,68 @@ def run_scheduler() -> None:
     weekly_weekday = int(os.getenv("SCREENER_WEEKLY_POSITIONING_WEEKDAY", "5"))
 
     now = datetime.now(timezone.utc)
-    next_nightly = next_daily_run(now, nightly_at)
-    next_funding_retry = next_daily_run(now, funding_retry_at)
-    next_weekly = next_weekly_run(now, weekly_weekday, weekly_at)
-    next_overlay = time.time()
-
+    retry_seconds = configured_timeout("SCREENER_REFRESH_RETRY_SECONDS", DEFAULT_REFRESH_RETRY_SECONDS)
+    jobs = [
+        ScheduledJob("nightly_analytics", "nightly-analytics", initial_daily_due(now, nightly_at, "nightly_analytics"), configured_timeout("SCREENER_NIGHTLY_TIMEOUT_SECONDS", DEFAULT_NIGHTLY_TIMEOUT_SECONDS), daily_at=nightly_at),
+        ScheduledJob("liquidity_forecast", "liquidity-forecast", initial_daily_due(now, nightly_at, "liquidity_forecast"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=nightly_at),
+        ScheduledJob("rates_financial_conditions", "rates-financial-conditions", initial_daily_due(now, nightly_at, "rates_financial_conditions"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=nightly_at),
+        ScheduledJob("funding_conditions", "funding-conditions", initial_daily_due(now, nightly_at, "funding_conditions"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=nightly_at),
+        ScheduledJob("treasury_fiscal_regime", "treasury-fiscal-regime", initial_daily_due(now, nightly_at, "treasury_fiscal_regime"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=nightly_at),
+        ScheduledJob("rates_financial_conditions_late_retry", "rates-financial-conditions-late-retry", initial_daily_due(now, funding_retry_at, "rates_financial_conditions_late_retry"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=funding_retry_at),
+        ScheduledJob("funding_conditions_late_retry", "funding-conditions-late-retry", initial_daily_due(now, funding_retry_at, "funding_conditions_late_retry"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=funding_retry_at),
+        ScheduledJob("weekly_positioning", "weekly-positioning", initial_weekly_due(now, weekly_weekday, weekly_at, "weekly_positioning"), configured_timeout("SCREENER_WEEKLY_POSITIONING_TIMEOUT_SECONDS", DEFAULT_WEEKLY_POSITIONING_TIMEOUT_SECONDS), weekly_weekday=weekly_weekday, weekly_at=weekly_at),
+        ScheduledJob("market_performance_10m", "market-performance", now, configured_timeout("SCREENER_MARKET_PERFORMANCE_TIMEOUT_SECONDS", DEFAULT_MARKET_PERFORMANCE_TIMEOUT_SECONDS), interval_seconds=max(60, overlay_interval)),
+    ]
     log_scheduler(
-        f"Scheduler started; nightly={next_nightly.isoformat()}, "
-        f"funding_late_retry={next_funding_retry.isoformat()}, "
-        f"weekly_positioning={next_weekly.isoformat()}, overlay_interval={overlay_interval}s"
+        f"Scheduler started; max_parallel={MAX_CONCURRENT_SCHEDULED_JOBS}; "
+        + ", ".join(f"{job.name}={job.due_at.isoformat()}" for job in jobs)
     )
 
     if os.getenv("SCREENER_RUN_NIGHTLY_ON_START_IF_MISSING", "1").strip().lower() in {"1", "true", "yes"}:
+        by_name = {job.name: job for job in jobs}
         if latest_screener_snapshot_time() is None:
-            run_job_safely("nightly_analytics_startup", run_nightly_analytics)
+            by_name["nightly_analytics"].due_at = now
+        manifest = read_technical_outlook_simple_v3_manifest()
         if (
             not TECHNICAL_OUTLOOK_SIMPLE_V3_MANIFEST_PATH.exists()
-            or read_technical_outlook_simple_v3_manifest().get("model_version") != TECHNICAL_OUTLOOK_SIMPLE_V3_MODEL_VERSION
-            or read_technical_outlook_simple_v3_manifest().get("config_version") != TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG_VERSION
-            or read_technical_outlook_simple_v3_manifest().get("sr_engine_version") != TECHNICAL_OUTLOOK_SIMPLE_V3_SR_ENGINE_VERSION
-            or {item.get("ticker") for item in read_technical_outlook_simple_v3_manifest().get("assets", [])}
-            != set(TECHNICAL_OUTLOOK_SIMPLE_V3_CORE_ASSET_KEYS)
+            or manifest.get("model_version") != TECHNICAL_OUTLOOK_SIMPLE_V3_MODEL_VERSION
+            or manifest.get("config_version") != TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG_VERSION
+            or manifest.get("sr_engine_version") != TECHNICAL_OUTLOOK_SIMPLE_V3_SR_ENGINE_VERSION
+            or {item.get("ticker") for item in manifest.get("assets", [])} != set(TECHNICAL_OUTLOOK_SIMPLE_V3_CORE_ASSET_KEYS)
         ):
-            run_job_safely("technical_outlook_simple_v3_startup", refresh_technical_outlook_simple_v3_assets)
+            # This refresh is also part of Nightly Analytics; schedule it at the
+            # same time instead of blocking the scheduler during startup.
+            by_name["nightly_analytics"].due_at = min(by_name["nightly_analytics"].due_at, now)
         if not SNAPSHOT_PATH.exists():
-            run_job_safely("liquidity_forecast_startup", run_liquidity_forecast)
+            by_name["liquidity_forecast"].due_at = now
         if not RATES_FC_SNAPSHOT_PATH.exists():
-            run_job_safely("rates_financial_conditions_startup", run_rates_financial_conditions)
+            by_name["rates_financial_conditions"].due_at = now
         if not FUNDING_SNAPSHOT_PATH.exists():
-            run_job_safely("funding_conditions_startup", run_funding_conditions)
+            by_name["funding_conditions"].due_at = now
         if not TREASURY_FISCAL_SNAPSHOT_PATH.exists():
-            run_job_safely("treasury_fiscal_regime_startup", run_treasury_fiscal_regime)
+            by_name["treasury_fiscal_regime"].due_at = now
 
     while True:
+        reap_scheduled_jobs(jobs, retry_seconds)
         now_dt = datetime.now(timezone.utc)
-        now_seconds = time.time()
-        if now_dt >= next_nightly:
-            run_job_safely("nightly_analytics", run_nightly_analytics)
-            run_job_safely("liquidity_forecast", run_liquidity_forecast)
-            run_job_safely("rates_financial_conditions", run_rates_financial_conditions)
-            run_job_safely("funding_conditions", run_funding_conditions)
-            run_job_safely("treasury_fiscal_regime", run_treasury_fiscal_regime)
-            next_nightly = next_daily_run(datetime.now(timezone.utc), nightly_at)
-            log_scheduler(f"Next nightly_analytics={next_nightly.isoformat()}")
-        if now_dt >= next_weekly:
-            run_job_safely("weekly_positioning", run_weekly_positioning)
-            next_weekly = next_weekly_run(datetime.now(timezone.utc), weekly_weekday, weekly_at)
-            log_scheduler(f"Next weekly_positioning={next_weekly.isoformat()}")
-        if now_dt >= next_funding_retry:
-            run_job_safely("rates_financial_conditions_late_retry", run_rates_financial_conditions_late_retry)
-            run_job_safely("funding_conditions_late_retry", run_funding_conditions_late_retry)
-            next_funding_retry = next_daily_run(datetime.now(timezone.utc), funding_retry_at)
-            log_scheduler(f"Next funding_conditions_late_retry={next_funding_retry.isoformat()}")
-        if now_seconds >= next_overlay:
-            run_job_safely("market_performance_10m", update_market_performance_overlay)
-            next_overlay = time.time() + max(60, overlay_interval)
+        active_count = sum(job.process is not None for job in jobs)
+        for job in jobs:
+            if job.due_at <= now_dt and job.process is None:
+                if active_count >= MAX_CONCURRENT_SCHEDULED_JOBS:
+                    break
+                launch_scheduled_job(job, retry_seconds)
+                if job.process is None and job.due_at <= now_dt:
+                    # Failed process creation is already logged and scheduled
+                    # for retry by launch_scheduled_job.
+                    continue
+                if job.process is not None:
+                    active_count += 1
         time.sleep(max(5, poll_seconds))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screener refresh jobs")
-    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "liquidity-forecast", "rates-financial-conditions", "funding-conditions", "treasury-fiscal-regime", "weekly-positioning", "scheduler"])
+    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "liquidity-forecast", "rates-financial-conditions", "rates-financial-conditions-late-retry", "funding-conditions", "funding-conditions-late-retry", "treasury-fiscal-regime", "weekly-positioning", "scheduler"])
     args = parser.parse_args()
     if args.job == "market-performance":
         update_market_performance_overlay()
@@ -390,8 +563,12 @@ def main() -> None:
         run_liquidity_forecast()
     elif args.job == "rates-financial-conditions":
         run_rates_financial_conditions()
+    elif args.job == "rates-financial-conditions-late-retry":
+        run_rates_financial_conditions_late_retry()
     elif args.job == "funding-conditions":
         run_funding_conditions()
+    elif args.job == "funding-conditions-late-retry":
+        run_funding_conditions_late_retry()
     elif args.job == "treasury-fiscal-regime":
         run_treasury_fiscal_regime()
     elif args.job == "weekly-positioning":

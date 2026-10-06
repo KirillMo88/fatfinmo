@@ -41,6 +41,8 @@ def render_cftc_cot_tab() -> None:
     naaim = data.get("naaim", pd.DataFrame())
     status = data.get("status", {})
 
+    if status.get("CFTC Refresh", {}).get("status") == "ALREADY_RUNNING":
+        st.info("Positioning data refresh is already running; showing the last saved data.")
     render_source_status(master, status)
     range_choice = st.radio("Time range", CFTC_RANGE_OPTIONS, index=1, horizontal=True, key="cftc_cot_range")
     if master.empty:
