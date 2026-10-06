@@ -26,6 +26,12 @@ STATE_COLORS = {
     "EXTREME TRANSITION": "#ef4444",
     "UNAVAILABLE": "#334155",
 }
+CURRENT_MARKET_RISK_COLORS = {
+    "NORMAL": "#22c55e",
+    "HIGH RISK": "#facc15",
+    "RED FLAG": "#ef4444",
+    "RED FLAG + CREDIT CONFIRMATION": "#7f1d1d",
+}
 
 
 def _fmt(value: Any, digits: int = 1, suffix: str = "") -> str:
@@ -54,21 +60,51 @@ def _card(
     score_suffix: str = "/100",
     score_digits: int = 0,
     status_color_overrides: dict[str, str] | None = None,
+    show_score: bool = True,
 ) -> None:
     detail = "".join(
         f"<div class='ff-row'><span>{html.escape(str(label))}</span><strong>{html.escape(str(value))}</strong></div>"
         for label, value in rows
     )
+    score_markup = (
+        f"<div class='ff-score'><span>{html.escape(str(state))}</span><b>{_fmt(score, score_digits)} {html.escape(score_suffix)}</b></div>"
+        if show_score
+        else ""
+    )
     st.markdown(
         f"""
         <div class='ff-card{' ff-wide' if wide else ''}' style='border-top-color:{_state_color(state, status_color_overrides)}'>
-          <div class='ff-card-head'><div><div class='ff-title'>{html.escape(title)}</div><div class='ff-subtitle'>{html.escape(subtitle)}</div></div>
-          <div class='ff-score'><span>{html.escape(str(state))}</span><b>{_fmt(score, score_digits)} {html.escape(score_suffix)}</b></div></div>
+          <div class='ff-card-head'><div><div class='ff-title'>{html.escape(title)}</div><div class='ff-subtitle'>{html.escape(subtitle)}</div></div>{score_markup}</div>
           <div class='ff-details'>{detail}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _current_market_risk_status(current: dict[str, Any]) -> str:
+    status = str(current.get("CurrentMarketRiskState", "DATA INCOMPLETE")).strip().upper()
+    credit_confirmation = current.get("CurrentRiskCreditConfirmation")
+    if isinstance(credit_confirmation, str):
+        credit_confirmed = credit_confirmation.strip().lower() in {"true", "1", "yes"}
+    else:
+        credit_confirmed = bool(credit_confirmation) if pd.notna(credit_confirmation) else False
+    if status == "RED FLAG" and credit_confirmed:
+        return "RED FLAG + CREDIT CONFIRMATION"
+    return status if status and status != "NAN" else "DATA INCOMPLETE"
+
+
+def _current_market_risk_signal(current: dict[str, Any]) -> str:
+    signal = str(current.get("CurrentRiskLastSignal", "N/A")).strip()
+    if not signal or signal.upper() in {"N/A", "NAN", "NONE"}:
+        return "N/A"
+    signal_date = pd.to_datetime(current.get("CurrentRiskLastSignalDate"), errors="coerce")
+    return f"{signal} — {signal_date:%Y-%m-%d}" if pd.notna(signal_date) else signal
+
+
+def _risk_component_state(current: dict[str, Any], key: str) -> str:
+    value = str(current.get(key, "DATA INCOMPLETE")).strip()
+    return value if value and value.upper() not in {"NAN", "NONE"} else "DATA INCOMPLETE"
 
 
 def _styles() -> None:
@@ -228,11 +264,30 @@ def render_financial_fragility_tab(api_key: str | None, liquidity_regime: pd.Dat
 
     st.markdown("### STRESS REALIZATION LAYER")
     st.caption("Bottom-up confirmation through actual market stress channels")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         _card("Credit Stress", "Stress transmission through HY credit", current.get("CreditStressState"), current.get("CreditStress"), [("HY OAS 3Y Percentile", _fmt(current.get("HYOAS_3Y_Percentile"), 1)), ("Current HY OAS", _fmt(current.get("HY_OAS"), 2)), ("Data As Of", pd.Timestamp(current["CreditDataAsOf"]).strftime("%Y-%m-%d") if pd.notna(current.get("CreditDataAsOf")) else "n/a"), ("Interpretation", "Credit market does not confirm stress." if _number(current.get("CreditStress")) < 50 else "Credit stress is transmitting.")])
     with col2:
         _card("Market Volatility Stress", "Fast market shock channel", current.get("MarketVolatilityStressState"), current.get("MarketVolatilityStress"), [("VIX", _fmt(current.get("VIX"), 2)), ("VIX / VIX3M", _fmt(current.get("VIX_VIX3M_Ratio"), 3)), ("VIX Momentum Risk", _fmt(current.get("VIXMomentumRisk"), 1)), ("Realized Volatility", _fmt(current.get("RealizedVolatility20D"), 3)), ("Data As Of", pd.Timestamp(current["MarketDataAsOf"]).strftime("%Y-%m-%d") if pd.notna(current.get("MarketDataAsOf")) else "n/a")])
+    with col3:
+        current_risk_status = _current_market_risk_status(current)
+        _card(
+            "Current Market Risk",
+            "Current cross-asset risk regime",
+            current_risk_status,
+            np.nan,
+            [
+                ("Status", current_risk_status),
+                ("Last Signal", _current_market_risk_signal(current)),
+                ("Breadth Risk", _risk_component_state(current, "CurrentRiskBreadthRiskState")),
+                ("RSI Divergence Risk", _risk_component_state(current, "CurrentRiskRSIDivergenceRiskState")),
+                ("VIX Risk", _risk_component_state(current, "CurrentRiskVIXRiskState")),
+                ("High Beta Risk", _risk_component_state(current, "CurrentRiskHighBetaRiskState")),
+                ("High Yield Risk", _risk_component_state(current, "CurrentRiskHYRiskState")),
+            ],
+            status_color_overrides=CURRENT_MARKET_RISK_COLORS,
+            show_score=False,
+        )
 
     st.markdown("### TRANSITION RISK")
     _card("Transition Risk", "How stable the current regime configuration is", current.get("TransitionRiskState"), current.get("TransitionRisk"), [
