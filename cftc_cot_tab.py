@@ -9,6 +9,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from positioning import (
+    CFTC_3Y_PERCENTILE_MIN_PERIODS,
+    CFTC_5Y_PERCENTILE_MIN_PERIODS,
+    CFTC_STALE_DAYS,
     CFTC_DASHBOARD_LAYOUT,
     cftc_asset_config,
     cftc_asset_series,
@@ -124,14 +127,22 @@ def render_cftc_asset_card(master: pd.DataFrame, asset: str, range_choice: str) 
 
 def render_card_metrics(row: pd.Series) -> None:
     history = safe_float(row.get("History_Weeks"))
-    history_status = "FULL HISTORY" if np.isfinite(history) and history >= 156 else "LIMITED HISTORY"
+    three_year_status = "READY" if np.isfinite(history) and history >= CFTC_3Y_PERCENTILE_MIN_PERIODS else "N/A (<156W)"
+    five_year_status = "READY" if np.isfinite(history) and history >= CFTC_5Y_PERCENTILE_MIN_PERIODS else "N/A (<260W)"
+    updated = fmt_date(row.get("Date"))
+    date_value = pd.to_datetime(row.get("Date"), errors="coerce")
+    if pd.isna(date_value):
+        freshness = "DATE UNKNOWN"
+    else:
+        today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+        freshness = "STALE" if (today - date_value.normalize()).days > CFTC_STALE_DAYS else "CURRENT"
     metrics = [
         ("Net % OI", fmt_signed_pct_points(row.get("NetPctOI"))),
-        ("3Y Percentile", fmt_score(row.get("NetPctOI_3Y_Percentile"))),
+        ("3Y Percentile", f"{fmt_score(row.get('NetPctOI_3Y_Percentile'))} ({three_year_status})"),
+        ("5Y Percentile", f"{fmt_score(row.get('NetPctOI_5Y_Percentile'))} ({five_year_status})"),
         ("4W", fmt_signed_pp(row.get("NetPctOI_4W_Change"))),
         ("13W", fmt_signed_pp(row.get("NetPctOI_13W_Change"))),
-        ("Updated", fmt_date(row.get("Date"))),
-        ("History", history_status),
+        ("Updated", f"{updated} ({freshness})"),
     ]
     text = " | ".join(f"{label}: {value}" for label, value in metrics)
     st.markdown(f"<div style='font-size:0.70rem;color:#cbd5e1;line-height:1.25;margin-bottom:0.35rem;'>{html.escape(text)}</div>", unsafe_allow_html=True)
@@ -147,8 +158,22 @@ def build_cftc_chart(data: pd.DataFrame, asset: str, participant: str) -> go.Fig
     d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
     d["NetPctOI"] = pd.to_numeric(d["NetPctOI"], errors="coerce")
     d["NetPctOI_3Y_Percentile"] = pd.to_numeric(d["NetPctOI_3Y_Percentile"], errors="coerce")
+    if "NetPctOI_5Y_Percentile" not in d:
+        d["NetPctOI_5Y_Percentile"] = np.nan
+    d["NetPctOI_5Y_Percentile"] = pd.to_numeric(d["NetPctOI_5Y_Percentile"], errors="coerce")
     d = d.dropna(subset=["Date"]).sort_values("Date")
     fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=d["Date"],
+            y=d["NetPctOI_5Y_Percentile"],
+            mode="lines",
+            name="5Y Percentile",
+            yaxis="y2",
+            line={"color": "#c084fc", "width": 1.5, "dash": "dot"},
+            hovertemplate="Week: %{x|%Y-%m-%d}<br>5Y Percentile: %{y:.0f}<extra></extra>",
+        )
+    )
     fig.add_trace(
         go.Scatter(
             x=d["Date"],
@@ -172,7 +197,7 @@ def build_cftc_chart(data: pd.DataFrame, asset: str, participant: str) -> go.Fig
     )
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1}, opacity=0.55)
     fig.update_layout(
-        title={"text": f"{asset} COT — {participant} Net % OI and Trailing 3Y Percentile", "font": {"size": 12}},
+        title={"text": f"{asset} COT — {participant} Net % OI and Trailing 3Y / 5Y Percentiles", "font": {"size": 12}},
         template="plotly_dark",
         paper_bgcolor="#0f131a",
         plot_bgcolor="#0f131a",
@@ -181,7 +206,7 @@ def build_cftc_chart(data: pd.DataFrame, asset: str, participant: str) -> go.Fig
         margin={"l": 38, "r": 38, "t": 52, "b": 42},
         legend={"orientation": "h", "y": -0.22, "x": 0.0},
         yaxis={"title": "Net % OI", "gridcolor": "#263241", "zeroline": False},
-        yaxis2={"title": "3Y Percentile", "overlaying": "y", "side": "right", "range": [0, 100], "gridcolor": "#263241"},
+        yaxis2={"title": "Percentile", "overlaying": "y", "side": "right", "range": [0, 100], "gridcolor": "#263241"},
         xaxis={"gridcolor": "#1f2937"},
     )
     return fig
