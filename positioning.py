@@ -31,6 +31,10 @@ POSITIONING_LOCK_PATH = Path("persistent") / "job_status" / "weekly_positioning.
 
 CFTC_PERCENTILE_WINDOW = 156
 CFTC_PERCENTILE_MIN_PERIODS = 52
+CFTC_3Y_PERCENTILE_WINDOW = 156
+CFTC_3Y_PERCENTILE_MIN_PERIODS = 156
+CFTC_5Y_PERCENTILE_WINDOW = 260
+CFTC_5Y_PERCENTILE_MIN_PERIODS = 260
 CFTC_STALE_DAYS = 10
 CFTC_UPDATE_FREQUENCY = "Weekly"
 CFTC_SCHEDULED_UPDATE_DAY = "Saturday"
@@ -63,7 +67,14 @@ CFTC_DASHBOARD_LAYOUT: tuple[tuple[str, ...], ...] = (
 CFTC_DASHBOARD_ASSETS: tuple[CftcDashboardAsset, ...] = (
     CftcDashboardAsset("GOLD", "Commodities", "Disaggregated", "Managed Money", ("GOLD",), ("088691",)),
     CftcDashboardAsset("SILVER", "Commodities", "Disaggregated", "Managed Money", ("SILVER",), ("084691",)),
-    CftcDashboardAsset("WTI", "Commodities", "Disaggregated", "Managed Money", ("WTI", "CRUDE OIL, LIGHT SWEET", "LIGHT SWEET CRUDE"), ("067651",)),
+    CftcDashboardAsset("WTI", "Commodities", "Disaggregated", "Managed Money", ("WTI-PHYSICAL",), ("067651",)),
+    CftcDashboardAsset("Natural Gas", "Commodities", "Disaggregated", "Managed Money", ("NAT GAS NYME",), ("023651",)),
+    CftcDashboardAsset("RBOB", "Commodities", "Disaggregated", "Managed Money", ("GASOLINE RBOB",), ("111659",)),
+    CftcDashboardAsset("Copper", "Commodities", "Disaggregated", "Managed Money", ("COPPER- #1",), ("085692",)),
+    CftcDashboardAsset("Aluminum", "Commodities", "Disaggregated", "Managed Money", ("ALUMINUM",), ("191691",)),
+    CftcDashboardAsset("Corn", "Commodities", "Disaggregated", "Managed Money", ("CORN",), ("002602",)),
+    CftcDashboardAsset("Wheat", "Commodities", "Disaggregated", "Managed Money", ("WHEAT-SRW",), ("001602",)),
+    CftcDashboardAsset("Soybeans", "Commodities", "Disaggregated", "Managed Money", ("SOYBEANS",), ("005602",)),
     CftcDashboardAsset("PLATINUM", "Commodities", "Disaggregated", "Managed Money", ("PLATINUM",), ("076651",)),
     CftcDashboardAsset("PALLADIUM", "Commodities", "Disaggregated", "Managed Money", ("PALLADIUM",), ("075651",)),
     CftcDashboardAsset("S&P 500", "Equity / Volatility", "TFF", "Asset Manager", ("E-MINI S&P 500", "S&P 500 STOCK INDEX", "S&P 500"), ("13874", "138741")),
@@ -229,6 +240,7 @@ def market_positioning_snapshot(master: pd.DataFrame, aaii: pd.DataFrame, naaim:
             prefix = sanitize_field_name(f"{asset}_{participant}")
             out[f"{prefix}_NetPctOI"] = row.get("NetPctOI")
             out[f"{prefix}_NetPctOI_3Y_Percentile"] = row.get("NetPctOI_3Y_Percentile")
+            out[f"{prefix}_NetPctOI_5Y_Percentile"] = row.get("NetPctOI_5Y_Percentile")
             out[f"{prefix}_NetPctOI_4W_Change"] = row.get("NetPctOI_4W_Change")
             out[f"{prefix}_NetPctOI_13W_Change"] = row.get("NetPctOI_13W_Change")
     return out
@@ -295,7 +307,7 @@ def normalize_cftc_report(raw: pd.DataFrame, report_type: str, participants: tup
     result["NetPctOI"] = result["Net"] / result["Open_Interest"].replace(0.0, np.nan) * 100.0
     result["LongPctOI"] = result["Long"] / result["Open_Interest"].replace(0.0, np.nan) * 100.0
     result["ShortPctOI"] = result["Short"] / result["Open_Interest"].replace(0.0, np.nan) * 100.0
-    for column in ["NetPctOI_3Y_Percentile", "NetPctOI_4W_Change", "NetPctOI_13W_Change", "NetPctOI_3Y_Median"]:
+    for column in ["NetPctOI_3Y_Percentile", "NetPctOI_5Y_Percentile", "NetPctOI_4W_Change", "NetPctOI_13W_Change", "NetPctOI_3Y_Median"]:
         result[column] = np.nan
     result["History_Weeks"] = 0
     return result[cftc_master_columns()]
@@ -306,25 +318,25 @@ def resolve_canonical_contracts(master: pd.DataFrame) -> pd.DataFrame:
         return master
     out = master.copy()
     out["Preferred_For_Dashboard"] = False
+    code_values = out["CFTC_Code"].fillna("").astype(str).str.strip().str.upper()
     for cfg in CFTC_DASHBOARD_ASSETS:
-        candidates = out.loc[out["Report_Type"] == cfg.report_type].copy()
+        report_mask = out["Report_Type"].eq(cfg.report_type)
+        if cfg.code_patterns:
+            # Stable CFTC codes are the identity. In particular, never fall
+            # back from NYMEX WTI 067651 to ICE WTI 067411 by matching names.
+            code_mask = report_mask & code_values.isin({code.upper() for code in cfg.code_patterns})
+            if code_mask.any():
+                out.loc[code_mask, "Canonical_Asset"] = cfg.canonical_asset
+                out.loc[code_mask, "Asset_Group"] = cfg.asset_group
+                out.loc[code_mask, "Preferred_For_Dashboard"] = True
+            continue
+        candidates = out.loc[report_mask].copy()
         if candidates.empty:
             continue
-        if cfg.canonical_asset == "WTI":
-            wti_mask = (
-                (out["Report_Type"] == cfg.report_type)
-                & out["CFTC_Code"].astype(str).str.contains("|".join(re.escape(code) for code in cfg.code_patterns), case=False, na=False)
-                & out["Raw_Contract_Name"].astype(str).str.upper().str.contains("CRUDE OIL, LIGHT SWEET|WTI-PHYSICAL", regex=True, na=False)
-            )
-            if wti_mask.any():
-                out.loc[wti_mask, "Canonical_Asset"] = cfg.canonical_asset
-                out.loc[wti_mask, "Asset_Group"] = cfg.asset_group
-                out.loc[wti_mask, "Preferred_For_Dashboard"] = True
-                continue
         selected_name = select_contract_name(candidates, cfg)
         if not selected_name:
             continue
-        mask = (out["Report_Type"] == cfg.report_type) & (out["Raw_Contract_Name"] == selected_name)
+        mask = report_mask & (out["Raw_Contract_Name"] == selected_name)
         out.loc[mask, "Canonical_Asset"] = cfg.canonical_asset
         out.loc[mask, "Asset_Group"] = cfg.asset_group
         out.loc[mask, "Preferred_For_Dashboard"] = True
@@ -336,15 +348,25 @@ def calculate_cftc_positioning_metrics(master: pd.DataFrame) -> pd.DataFrame:
         return master
     out = master.copy()
     out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
-    out = out.dropna(subset=["Date"]).sort_values(["Report_Type", "Raw_Contract_Name", "Participant_Category", "Date"])
-    group_cols = ["Report_Type", "Raw_Contract_Name", "Participant_Category"]
-    out["History_Weeks"] = out.groupby(group_cols).cumcount() + 1
-    out["NetPctOI_4W_Change"] = out.groupby(group_cols)["NetPctOI"].diff(4)
-    out["NetPctOI_13W_Change"] = out.groupby(group_cols)["NetPctOI"].diff(13)
-    out["NetPctOI_3Y_Median"] = out.groupby(group_cols)["NetPctOI"].transform(lambda s: s.rolling(CFTC_PERCENTILE_WINDOW, min_periods=CFTC_PERCENTILE_MIN_PERIODS).median())
-    out["NetPctOI_3Y_Percentile"] = out.groupby(group_cols)["NetPctOI"].transform(
-        lambda s: trailing_percentile(s, CFTC_PERCENTILE_WINDOW, CFTC_PERCENTILE_MIN_PERIODS)
+    out = out.dropna(subset=["Date"]).copy()
+    stable_code = out["CFTC_Code"].fillna("").astype(str).str.strip()
+    out["_CFTC_History_Key"] = stable_code.where(stable_code.ne(""), out["Raw_Contract_Name"].astype(str))
+    group_cols = ["Report_Type", "_CFTC_History_Key", "Participant_Category"]
+    out = out.sort_values([*group_cols, "Date", "Raw_Contract_Name"])
+    grouped = out.groupby(group_cols, dropna=False, sort=False)
+    out["History_Weeks"] = grouped.cumcount() + 1
+    out["NetPctOI_4W_Change"] = grouped["NetPctOI"].diff(4)
+    out["NetPctOI_13W_Change"] = grouped["NetPctOI"].diff(13)
+    out["NetPctOI_3Y_Median"] = grouped["NetPctOI"].transform(
+        lambda s: s.rolling(CFTC_3Y_PERCENTILE_WINDOW, min_periods=CFTC_3Y_PERCENTILE_MIN_PERIODS).median()
     )
+    out["NetPctOI_3Y_Percentile"] = grouped["NetPctOI"].transform(
+        lambda s: trailing_percentile(s, CFTC_3Y_PERCENTILE_WINDOW, CFTC_3Y_PERCENTILE_MIN_PERIODS)
+    )
+    out["NetPctOI_5Y_Percentile"] = grouped["NetPctOI"].transform(
+        lambda s: trailing_percentile(s, CFTC_5Y_PERCENTILE_WINDOW, CFTC_5Y_PERCENTILE_MIN_PERIODS)
+    )
+    out = out.drop(columns=["_CFTC_History_Key"])
     return out[cftc_master_columns()]
 
 
@@ -428,11 +450,13 @@ def download_csv_source(url: str, cache_path: Path, label: str, status: dict[str
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     if cache_path.exists() and not force:
         try:
-            return pd.read_csv(cache_path, low_memory=False)
+            return pd.read_csv(cache_path, low_memory=False, dtype=str)
         except Exception:
             pass
     try:
-        frame = pd.read_csv(url, low_memory=False)
+        # CFTC market codes are identifiers, not numbers; preserve leading
+        # zeroes so canonical-code matching cannot silently change.
+        frame = pd.read_csv(url, low_memory=False, dtype=str)
         frame.to_csv(cache_path, index=False)
         status[label] = {"last_updated_utc": now_utc_iso(), "source": url, "status": "CURRENT", "rows": int(len(frame))}
         annotate_source_schedule(status[label], label)
@@ -441,7 +465,7 @@ def download_csv_source(url: str, cache_path: Path, label: str, status: dict[str
         status[label] = {"last_updated_utc": now_utc_iso(), "source": url, "status": "SOURCE_FAILED_USING_CACHE", "error": str(exc)}
         annotate_source_schedule(status[label], label)
         if cache_path.exists():
-            return pd.read_csv(cache_path, low_memory=False)
+            return pd.read_csv(cache_path, low_memory=False, dtype=str)
         return pd.DataFrame()
 
 
@@ -574,14 +598,18 @@ def validate_cftc_master(master: pd.DataFrame) -> list[str]:
         return ["CFTC master is empty"]
     if master.duplicated(subset=["Date", "Raw_Contract_Name", "Participant_Category", "Report_Type"]).any():
         errors.append("Date + Raw Contract + Participant + Report Type is not unique")
+    has_code = master["CFTC_Code"].fillna("").astype(str).str.strip().ne("")
+    if master.loc[has_code].duplicated(subset=["Date", "CFTC_Code", "Participant_Category", "Report_Type"]).any():
+        errors.append("Date + CFTC Code + Participant + Report Type is not unique")
     if (pd.to_numeric(master["Open_Interest"], errors="coerce") <= 0).any():
         errors.append("Open_Interest has non-positive values")
     net_diff = (pd.to_numeric(master["Long"], errors="coerce") - pd.to_numeric(master["Short"], errors="coerce") - pd.to_numeric(master["Net"], errors="coerce")).abs()
     if (net_diff > 1e-6).any():
         errors.append("Net does not equal Long - Short")
-    pct = pd.to_numeric(master["NetPctOI_3Y_Percentile"], errors="coerce").dropna()
-    if ((pct < 0.0) | (pct > 100.0)).any():
-        errors.append("Percentile outside 0-100")
+    for column in ("NetPctOI_3Y_Percentile", "NetPctOI_5Y_Percentile"):
+        pct = pd.to_numeric(master[column], errors="coerce").dropna()
+        if ((pct < 0.0) | (pct > 100.0)).any():
+            errors.append(f"{column} outside 0-100")
     dates = pd.to_datetime(master["Date"], errors="coerce").dropna()
     today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
     if (dates > today).any():
@@ -594,7 +622,8 @@ def positioning_metadata(status: dict[str, Any]) -> pd.DataFrame:
         ("Date", "CFTC report date / weekly observation date", "CFTC, AAII, NAAIM", "All", "CFTC source files update weekly on Saturday", "Parsed date; no look-ahead shifting", "Date"),
         ("Participant_Category", "Economic participant category from source report", "CFTC", "Disaggregated / TFF", "Report-specific; no equivalence mapping forced", "Canonical display label only", "Text"),
         ("NetPctOI", "Net position as percent of open interest", "CFTC", "Disaggregated / TFF", "Category-specific", "(Long - Short) / Open Interest * 100", "Percent points"),
-        ("NetPctOI_3Y_Percentile", "Point-in-time trailing 3Y percentile", "CFTC", "Disaggregated / TFF", "Category-specific", "Rolling 156W percentile using data available up to t only; min 52W", "0-100"),
+        ("NetPctOI_3Y_Percentile", "Point-in-time trailing 3Y percentile", "CFTC", "Disaggregated / TFF", "Category-specific", "Rolling 156W percentile by CFTC code; requires 156 weekly observations", "0-100"),
+        ("NetPctOI_5Y_Percentile", "Point-in-time trailing 5Y percentile", "CFTC", "Disaggregated / TFF", "Category-specific", "Rolling 260W percentile by CFTC code; requires 260 weekly observations", "0-100"),
         ("AAII_BullBearSpread", "Bullish minus bearish sentiment", "AAII", "Survey", "Individual investors", "Bullish - Bearish", "Percent points"),
         ("NAAIM_Exposure", "NAAIM Exposure Index", "NAAIM", "Survey", "Active investment managers", "Loaded from source table when accessible; cached fallback allowed", "Index"),
     ]
@@ -747,6 +776,7 @@ def cftc_master_columns() -> list[str]:
         "LongPctOI",
         "ShortPctOI",
         "NetPctOI_3Y_Percentile",
+        "NetPctOI_5Y_Percentile",
         "NetPctOI_4W_Change",
         "NetPctOI_13W_Change",
         "NetPctOI_3Y_Median",

@@ -20,7 +20,7 @@ from positioning import (
 
 
 def test_normalize_disaggregated_gold_and_calculate_metrics():
-    dates = pd.date_range("2020-01-07", periods=60, freq="W-TUE")
+    dates = pd.date_range("2020-01-07", periods=300, freq="W-TUE")
     raw = pd.DataFrame(
         {
             "Report_Date_as_YYYY-MM-DD": dates,
@@ -28,8 +28,8 @@ def test_normalize_disaggregated_gold_and_calculate_metrics():
             "Contract_Market_Name": ["GOLD"] * len(dates),
             "CFTC_Contract_Market_Code": ["088691"] * len(dates),
             "Open_Interest_All": [1000] * len(dates),
-            "M_Money_Positions_Long_All": np.arange(300, 360),
-            "M_Money_Positions_Short_All": np.arange(100, 160),
+            "M_Money_Positions_Long_All": np.arange(300, 600),
+            "M_Money_Positions_Short_All": np.arange(100, 400),
             "M_Money_Positions_Spread_All": [50] * len(dates),
         }
     )
@@ -43,7 +43,108 @@ def test_normalize_disaggregated_gold_and_calculate_metrics():
     assert gold.iloc[-1]["Net"] == gold.iloc[-1]["Long"] - gold.iloc[-1]["Short"]
     assert np.isclose(gold.iloc[-1]["NetPctOI"], 20.0)
     assert np.isfinite(gold.iloc[-1]["NetPctOI_3Y_Percentile"])
+    assert np.isfinite(gold.iloc[-1]["NetPctOI_5Y_Percentile"])
     assert not validate_cftc_master(master)
+
+
+def test_wti_same_code_history_continues_across_name_change_without_ice_splice():
+    dates = pd.date_range("2020-01-07", periods=300, freq="W-TUE")
+    names = ["CRUDE OIL, LIGHT SWEET - NEW YORK MERCANTILE EXCHANGE"] * 200
+    names += ["WTI-PHYSICAL - NEW YORK MERCANTILE EXCHANGE"] * 100
+    raw = pd.DataFrame(
+        {
+            "Report_Date_as_YYYY-MM-DD": dates.tolist() + dates.tolist(),
+            "Market_and_Exchange_Names": names + ["WTI - ICE FUTURES EUROPE"] * len(dates),
+            "Contract_Market_Name": ["CRUDE OIL, LIGHT SWEET"] * 200 + ["WTI-PHYSICAL"] * 100 + ["WTI"] * len(dates),
+            "CFTC_Contract_Market_Code": ["067651"] * len(dates) + ["067411"] * len(dates),
+            "Open_Interest_All": [1000] * (len(dates) * 2),
+            "M_Money_Positions_Long_All": list(np.arange(300, 600)) * 2,
+            "M_Money_Positions_Short_All": list(np.arange(100, 400)) * 2,
+            "M_Money_Positions_Spread_All": [50] * (len(dates) * 2),
+        }
+    )
+
+    master = calculate_cftc_positioning_metrics(resolve_canonical_contracts(normalize_cftc(raw, pd.DataFrame())))
+    wti = cftc_asset_series(master, "WTI", "Managed Money")
+    ice = master.loc[master["CFTC_Code"] == "067411"]
+
+    assert len(wti) == len(dates)
+    assert wti.iloc[199]["History_Weeks"] == 200
+    assert wti.iloc[200]["History_Weeks"] == 201
+    assert np.isfinite(wti.iloc[199]["NetPctOI_4W_Change"])
+    assert np.isfinite(wti.iloc[-1]["NetPctOI_13W_Change"])
+    assert np.isfinite(wti.iloc[-1]["NetPctOI_3Y_Percentile"])
+    assert np.isfinite(wti.iloc[-1]["NetPctOI_5Y_Percentile"])
+    assert not ice["Preferred_For_Dashboard"].any()
+    assert set(wti["CFTC_Code"]) == {"067651"}
+
+
+def test_expected_commodity_contracts_map_by_exact_cftc_code():
+    contracts = [
+        ("023651", "NAT GAS NYME", "NATURAL GAS - NEW YORK MERCANTILE EXCHANGE", "Natural Gas"),
+        ("111659", "GASOLINE RBOB", "GASOLINE RBOB - NEW YORK MERCANTILE EXCHANGE", "RBOB"),
+        ("085692", "COPPER- #1", "COPPER - COMMODITY EXCHANGE INC.", "Copper"),
+        ("191691", "ALUMINUM", "ALUMINUM - COMMODITY EXCHANGE INC.", "Aluminum"),
+        ("002602", "CORN", "CORN - CHICAGO BOARD OF TRADE", "Corn"),
+        ("005602", "SOYBEANS", "SOYBEANS - CHICAGO BOARD OF TRADE", "Soybeans"),
+        ("001602", "WHEAT-SRW", "WHEAT-SRW - CHICAGO BOARD OF TRADE", "Wheat"),
+    ]
+    raw = pd.DataFrame(
+        {
+            "Report_Date_as_YYYY-MM-DD": [pd.Timestamp("2026-09-29")] * len(contracts),
+            "Market_and_Exchange_Names": [item[2] for item in contracts],
+            "Contract_Market_Name": [item[1] for item in contracts],
+            "CFTC_Contract_Market_Code": [item[0] for item in contracts],
+            "Open_Interest_All": [1000] * len(contracts),
+            "M_Money_Positions_Long_All": [400] * len(contracts),
+            "M_Money_Positions_Short_All": [200] * len(contracts),
+            "M_Money_Positions_Spread_All": [50] * len(contracts),
+        }
+    )
+    master = resolve_canonical_contracts(normalize_cftc(raw, pd.DataFrame()))
+    mapped = master.loc[master["Preferred_For_Dashboard"]]
+
+    assert set(zip(mapped["CFTC_Code"], mapped["Canonical_Asset"])) == {
+        (item[0], item[3]) for item in contracts
+    }
+
+
+def test_aluminum_percentiles_require_full_156_and_260_week_history():
+    dates = pd.date_range("2023-01-03", periods=143, freq="W-TUE")
+    raw = pd.DataFrame(
+        {
+            "Report_Date_as_YYYY-MM-DD": dates,
+            "Market_and_Exchange_Names": ["ALUMINUM - COMMODITY EXCHANGE INC."] * len(dates),
+            "Contract_Market_Name": ["ALUMINUM"] * len(dates),
+            "CFTC_Contract_Market_Code": ["191691"] * len(dates),
+            "Open_Interest_All": [1000] * len(dates),
+            "M_Money_Positions_Long_All": np.arange(300, 300 + len(dates)),
+            "M_Money_Positions_Short_All": np.arange(100, 100 + len(dates)),
+            "M_Money_Positions_Spread_All": [50] * len(dates),
+        }
+    )
+    master = calculate_cftc_positioning_metrics(resolve_canonical_contracts(normalize_cftc(raw, pd.DataFrame())))
+    aluminum = cftc_asset_series(master, "Aluminum", "Managed Money")
+
+    assert len(aluminum) == 143
+    assert np.isfinite(aluminum.iloc[-1]["NetPctOI_4W_Change"])
+    assert np.isfinite(aluminum.iloc[-1]["NetPctOI_13W_Change"])
+    assert pd.isna(aluminum.iloc[-1]["NetPctOI_3Y_Percentile"])
+    assert pd.isna(aluminum.iloc[-1]["NetPctOI_5Y_Percentile"])
+
+    full_dates = pd.date_range("2021-01-05", periods=260, freq="W-TUE")
+    full_raw = raw.iloc[np.zeros(260, dtype=int)].copy().reset_index(drop=True)
+    full_raw["Report_Date_as_YYYY-MM-DD"] = full_dates
+    full_raw["M_Money_Positions_Long_All"] = np.arange(300, 560)
+    full_raw["M_Money_Positions_Short_All"] = np.arange(100, 360)
+    full_master = calculate_cftc_positioning_metrics(
+        resolve_canonical_contracts(normalize_cftc(full_raw, pd.DataFrame()))
+    )
+    full_aluminum = cftc_asset_series(full_master, "Aluminum", "Managed Money")
+    assert pd.isna(full_aluminum.iloc[154]["NetPctOI_3Y_Percentile"])
+    assert np.isfinite(full_aluminum.iloc[155]["NetPctOI_3Y_Percentile"])
+    assert pd.isna(full_aluminum.iloc[258]["NetPctOI_5Y_Percentile"])
+    assert np.isfinite(full_aluminum.iloc[259]["NetPctOI_5Y_Percentile"])
 
 
 def test_normalize_tff_sp500_keeps_participant_definitions():
