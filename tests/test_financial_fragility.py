@@ -68,7 +68,21 @@ def test_stress_layer_uses_latest_daily_market_and_funding_values():
     snapshot = build_financial_fragility_snapshot(
         liquidity_regime=pd.DataFrame(),
         forecast_frame=pd.DataFrame({"Date": dates, "LiquidityForecastState": "EXPANSION", "LiquidityPressureScore": 20.0}),
-        market_snapshot=SimpleNamespace(history=market_history, daily=market_daily),
+        market_snapshot=SimpleNamespace(
+            history=market_history,
+            daily=market_daily,
+            current={
+                "CurrentMarketRiskState": "MODERATE",
+                "CurrentRiskCreditConfirmation": True,
+                "CurrentRiskBreadthRiskState": "LOW",
+                "CurrentRiskRSIDivergenceRiskState": "MODERATE",
+                "CurrentRiskVIXRiskState": "LOW",
+                "CurrentRiskHighBetaRiskState": "NORMAL",
+                "CurrentRiskHYRiskState": "HIGH",
+                "CurrentRiskLastSignal": "HIGH RISK",
+                "CurrentRiskLastSignalDate": pd.Timestamp("2026-10-05"),
+            },
+        ),
         business_snapshot=None,
         rates_snapshot=SimpleNamespace(history=rates),
         funding_snapshot=SimpleNamespace(weekly=funding_weekly, daily=funding_daily),
@@ -85,6 +99,15 @@ def test_stress_layer_uses_latest_daily_market_and_funding_values():
     assert snapshot.current["CollateralStressStatus"] == "HIGH"
     assert snapshot.current["MarketDataAsOf"] == daily_dates[-1]
     assert snapshot.current["FundingDataAsOf"] == daily_dates[-1]
+    assert snapshot.current["CurrentMarketRiskState"] == "MODERATE"
+    assert snapshot.current["CurrentRiskCreditConfirmation"] is True
+    assert snapshot.current["CurrentRiskBreadthRiskState"] == "LOW"
+    assert snapshot.current["CurrentRiskRSIDivergenceRiskState"] == "MODERATE"
+    assert snapshot.current["CurrentRiskVIXRiskState"] == "LOW"
+    assert snapshot.current["CurrentRiskHighBetaRiskState"] == "NORMAL"
+    assert snapshot.current["CurrentRiskHYRiskState"] == "HIGH"
+    assert snapshot.current["CurrentRiskLastSignal"] == "HIGH RISK"
+    assert snapshot.current["CurrentRiskLastSignalDate"] == pd.Timestamp("2026-10-05")
     assert snapshot.current["RatesPressureStatus"] == "EXTREME"
     assert np.isfinite(snapshot.current["RealizedVolRisk"])
     assert np.isfinite(snapshot.current["MarketVolatilityStress"])
