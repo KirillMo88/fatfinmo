@@ -366,7 +366,11 @@ def build_market_confirmation(
         qualifier = resolve_cftc_qualifier(values.tolist(), net.tolist()) if values.notna().any() else "N/A"
         curves = part["Seasonal Curve State"].tolist()
         tight_count = sum(v in {"Tight", "Strong Tightness", "Extreme Tightness"} for v in curves)
-        curve_percentiles = pd.to_numeric(part["Seasonal Percentile 10Y"], errors="coerce")
+        curve_percentiles_10y = pd.to_numeric(part["Seasonal Percentile 10Y"], errors="coerce")
+        curve_percentiles_5y = pd.to_numeric(part["Seasonal Percentile 5Y"], errors="coerce")
+        # Prefer the structural 10Y percentile, but keep the sector model usable
+        # while the growing history has only reached the valid 5Y threshold.
+        curve_percentiles = curve_percentiles_10y.where(curve_percentiles_10y.notna(), curve_percentiles_5y)
         sector_curve_percentile = float(curve_percentiles.median()) if curve_percentiles.notna().any() else np.nan
         sector_curve_state = classify_seasonal_curve(sector_curve_percentile)
         market_state = resolve_price_curve_market_state(price_state, sector_curve_state)
@@ -383,6 +387,15 @@ def build_market_confirmation(
                         "CFTC Dispersion": dispersion, "CFTC Qualifier": qualifier,
                         "Market Confirmation": market_state})
     return commodity, pd.DataFrame(sectors)
+
+
+def latest_complete_commodity_cycle_row(history: pd.DataFrame) -> pd.Series:
+    """Return the newest month with a fully classified physical FRED regime."""
+    if history.empty or "Core State" not in history:
+        return pd.Series(dtype=object)
+    state = history["Core State"]
+    complete = history.loc[state.notna() & state.ne("DATA INCOMPLETE")]
+    return complete.iloc[-1] if not complete.empty else pd.Series(dtype=object)
 
 
 def build_commodity_cycle_history(

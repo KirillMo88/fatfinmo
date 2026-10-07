@@ -13,6 +13,7 @@ from commodity_cycle.data import (
     PRICE_TICKERS,
     build_commodity_cycle_history,
     build_market_confirmation,
+    latest_complete_commodity_cycle_row,
     load_cftc_snapshot,
     load_fred_history,
     load_monthly_prices,
@@ -80,7 +81,7 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         return
 
     history = data["history"]
-    current = history.dropna(subset=["Core State"]).iloc[-1] if not history.empty and "Core State" in history else pd.Series(dtype=object)
+    current = latest_complete_commodity_cycle_row(history)
     capex = data["capex"]
     capex_current = capex.dropna(subset=["CAPEX Intensity"]).iloc[-1] if not capex.empty else pd.Series(dtype=object)
     commodity = data["commodity"]
@@ -251,11 +252,10 @@ def _render_core_breadth_chart(history: pd.DataFrame, selected_range: str) -> No
 
 
 def _render_fred_heatmap(history: pd.DataFrame) -> None:
-    latest = history.dropna(subset=["Core State"]).tail(1)
-    if latest.empty:
+    row = latest_complete_commodity_cycle_row(history)
+    if row.empty:
         st.info("No fully classified month yet; stress windows require sufficient prior monthly data.")
         return
-    row = latest.iloc[0]
     table = []
     for label in FRED_SERIES:
         if label in {"PPIACO", "CAPEX", "FPI"}:
