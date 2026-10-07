@@ -282,9 +282,11 @@ def calculate_capex(history: pd.Series) -> pd.DataFrame:
 def _classify_raw_core(row: pd.Series) -> dict[str, bool]:
     s5, s10 = row.get("Seasonal Tightening 5"), row.get("Seasonal Tightening 10")
     r5, r10 = row.get("Rolling Tightening 5"), row.get("Rolling Tightening 10")
-    e5, e10 = row.get("Seasonal Easing 5"), row.get("Rolling Easing 10")
-    conf_t10, conf_net10 = row.get("Confirmation Tightening 10"), row.get("Confirmation Net 10")
-    conf_ease5, conf_net5 = row.get("Confirmation Easing 5"), row.get("Confirmation Net 5")
+    e5 = row.get("Seasonal Easing 5")
+    conf_t10 = row.get("Seasonal Confirmation Tightening 10", row.get("Confirmation Tightening 10"))
+    conf_net10 = row.get("Seasonal Confirmation Net 10", row.get("Confirmation Net 10"))
+    conf_ease5 = row.get("Seasonal Confirmation Easing 5", row.get("Confirmation Easing 5"))
+    conf_net5 = row.get("Seasonal Confirmation Net 5", row.get("Confirmation Net 5"))
     core_stress = row.get("Core Median Stress")
     systemic = all(pd.notna(v) for v in (s10, r10, conf_t10, conf_net10)) and s10 >= 2 and r10 >= 2 and conf_t10 >= 2 and conf_net10 >= 0.2
     early_broad = pd.notna(s5) and s5 >= 2
@@ -292,7 +294,7 @@ def _classify_raw_core(row: pd.Series) -> dict[str, bool]:
     route_a = pd.notna(e5) and e5 >= 2
     veto = pd.notna(core_stress) and core_stress >= 75 and ((pd.notna(s10) and s10 >= 1) or (pd.notna(r10) and r10 >= 1))
     route_a = route_a and not veto
-    route_b = all(pd.notna(v) for v in (row.get("Seasonal Easing 5"), conf_ease5, conf_net5, core_stress)) and row["Seasonal Easing 5"] >= 1 and conf_ease5 >= 3 and conf_net5 <= -0.4 and core_stress < 60
+    route_b = all(pd.notna(v) for v in (e5, conf_ease5, conf_net5, core_stress)) and e5 >= 1 and conf_ease5 >= 3 and conf_net5 <= -0.4 and core_stress < 60
     early_easing = route_a or route_b
     confirmed_easing = False  # Persistence is evaluated with the trailing 3-month window below.
     return {"systemic": systemic, "confirmed_broad": confirmed_broad, "early_broad": early_broad,
@@ -306,36 +308,38 @@ def resolve_core_state_transition(
     mature: bool = False,
     data_complete: bool = True,
 ) -> str:
-    """Apply the deterministic priority and sticky-exit rules for one month."""
+    """Resolve one V1.2 lifecycle transition from the prior valid state and raw signals."""
     if not data_complete:
         return "DATA INCOMPLETE"
-    if raw.get("confirmed_easing", False):
-        return "Confirmed Easing"
-    if previous == "Early Easing":
-        return "Systemic Broadening" if raw.get("systemic", False) else "Early Easing"
-    if previous == "Confirmed Easing":
-        if raw.get("systemic", False):
-            return "Systemic Broadening"
-        if raw.get("confirmed_broad", False):
-            return "Confirmed Broadening"
-        if raw.get("early_broad", False):
-            return "Early Broadening"
-        return "Confirmed Easing"
-    if raw.get("early_easing", False):
-        return "Early Easing"
-    if raw.get("systemic", False):
-        return "Systemic Broadening"
+    previous = previous if previous != "DATA INCOMPLETE" else "Neutral"
+
+    def first_true(rules: tuple[tuple[str, str], ...], default: str) -> str:
+        return next((state for signal, state in rules if raw.get(signal, False)), default)
+
+    broadening_rules = (
+        ("systemic", "Systemic Broadening"),
+        ("confirmed_broad", "Confirmed Broadening"),
+        ("early_broad", "Early Broadening"),
+    )
     if previous == "Systemic Broadening":
         return "Mature" if mature else "Systemic Broadening"
     if previous == "Mature":
-        return "Mature"
+        if raw.get("systemic", False):
+            return "Systemic Broadening"
+        return "Early Easing" if raw.get("early_easing", False) else "Mature"
     if previous == "Early Easing":
-        return "Early Easing"
-    if raw.get("confirmed_broad", False):
-        return "Confirmed Broadening"
-    if raw.get("early_broad", False):
-        return "Early Broadening"
-    return "Neutral"
+        # Early Easing is the hand-off stage from Mature toward Confirmed Easing.
+        # It remains active until that transition confirms; unrelated raw
+        # broadening/easing fluctuations do not restart the cycle.
+        return "Confirmed Easing" if raw.get("confirmed_easing", False) else "Early Easing"
+    if previous == "Confirmed Easing":
+        # A new broadening signal can end easing; otherwise confirmed easing
+        # remains only while its rolling persistence condition is active.
+        return first_true(broadening_rules, "Confirmed Easing" if raw.get("confirmed_easing", False)
+                          else "Early Easing" if raw.get("early_easing", False) else "Neutral")
+    if previous in {"Early Broadening", "Confirmed Broadening"}:
+        return first_true(broadening_rules, "Neutral")
+    return first_true(broadening_rules, "Neutral")
 
 
 def update_systemic_wave(state: str, previous: str, previous_duration: int, previous_max_stress: float, stress: float) -> tuple[int, float]:
@@ -354,9 +358,10 @@ def is_confirmed_easing_persistent(last_three_rolling_easing_counts: Sequence[fl
 
 
 def calculate_core_state(history: pd.DataFrame) -> pd.DataFrame:
-    """Calculate raw breadth and apply the explicit sticky monthly state machine."""
+    """Calculate strict raw breadth and apply the V1.2 lifecycle state machine."""
     out = pd.DataFrame(index=history.index)
-    out["Core Median Stress"] = history[[f"{name} Rolling Stress" for name in CORE_SERIES]].median(axis=1)
+    core_rolling_stress = history[[f"{name} Rolling Stress" for name in CORE_SERIES]]
+    out["Core Median Stress"] = core_rolling_stress.median(axis=1, skipna=False)
     for kind in ("Seasonal", "Rolling"):
         delta_cols = []
         for name in CORE_SERIES + CONFIRMATION_SERIES:
@@ -365,60 +370,138 @@ def calculate_core_state(history: pd.DataFrame) -> pd.DataFrame:
             out[delta_col] = history[stress_col].diff(6)
             delta_cols.append(delta_col)
         for threshold in (5, 10):
-            tight_core = out[[f"{name} {kind} Delta 6M" for name in CORE_SERIES]].gt(threshold).sum(axis=1)
-            ease_core = out[[f"{name} {kind} Delta 6M" for name in CORE_SERIES]].lt(-threshold).sum(axis=1)
+            core_delta = out[[f"{name} {kind} Delta 6M" for name in CORE_SERIES]]
+            core_complete = core_delta.notna().all(axis=1)
+            tight_core = core_delta.gt(threshold).sum(axis=1).where(core_complete)
+            ease_core = core_delta.lt(-threshold).sum(axis=1).where(core_complete)
             out[f"{kind} Tightening {threshold}"] = tight_core
             out[f"{kind} Easing {threshold}"] = ease_core
-            tight_conf = out[[f"{name} {kind} Delta 6M" for name in CONFIRMATION_SERIES]].gt(threshold).sum(axis=1)
-            ease_conf = out[[f"{name} {kind} Delta 6M" for name in CONFIRMATION_SERIES]].lt(-threshold).sum(axis=1)
-            out[f"Confirmation Tightening {threshold}"] = tight_conf
-            out[f"Confirmation Easing {threshold}"] = ease_conf
-            out[f"Confirmation Net {threshold}"] = (tight_conf - ease_conf) / 5
-    raw = [_classify_raw_core(row) for _, row in out.iterrows()]
+            confirmation_delta = out[[f"{name} {kind} Delta 6M" for name in CONFIRMATION_SERIES]]
+            confirmation_complete = confirmation_delta.notna().all(axis=1)
+            tight_conf = confirmation_delta.gt(threshold).sum(axis=1).where(confirmation_complete)
+            ease_conf = confirmation_delta.lt(-threshold).sum(axis=1).where(confirmation_complete)
+            net_conf = ((tight_conf - ease_conf) / 5).where(confirmation_complete)
+            out[f"{kind} Confirmation Tightening {threshold}"] = tight_conf
+            out[f"{kind} Confirmation Easing {threshold}"] = ease_conf
+            out[f"{kind} Confirmation Net {threshold}"] = net_conf
+            if kind == "Seasonal":
+                # Keep the historical field names, now explicitly mapped to the V1.2 source.
+                out[f"Confirmation Tightening {threshold}"] = tight_conf
+                out[f"Confirmation Easing {threshold}"] = ease_conf
+                out[f"Confirmation Net {threshold}"] = net_conf
+
+    required_deltas = (
+        [f"{name} Seasonal Delta 6M" for name in CORE_SERIES]
+        + [f"{name} Rolling Delta 6M" for name in CORE_SERIES]
+        + [f"{name} Seasonal Delta 6M" for name in CONFIRMATION_SERIES]
+    )
+    required_stress = [f"{name} Rolling Stress" for name in CORE_SERIES]
+    required_inputs = pd.concat([out[required_deltas], history[required_stress]], axis=1)
+    current_complete = required_inputs.notna().all(axis=1)
+    out["Data Complete"] = current_complete
+    out["Missing Required Inputs"] = required_inputs.isna().apply(
+        lambda row: ", ".join(row.index[row].tolist()), axis=1
+    )
+
     states: list[str] = []
     system_duration: list[int] = []
     wave_max: list[float] = []
     recent_mature: list[bool] = []
+    mature_eligibility: list[bool] = []
+    mature_reference_max: list[float] = []
+    raw_early_broadening: list[Any] = []
+    raw_confirmed_broadening: list[Any] = []
+    raw_systemic: list[Any] = []
+    raw_mature: list[Any] = []
+    raw_early_easing: list[Any] = []
+    raw_confirmed_easing: list[Any] = []
     transition_diagnostic: list[str] = []
-    current_duration, current_max, last_mature_position = 0, np.nan, -10_000
-    for pos, ((_, row), flags) in enumerate(zip(out.iterrows(), raw)):
-        required_breadth = ["Seasonal Tightening 5", "Seasonal Tightening 10", "Rolling Tightening 5",
-                            "Rolling Tightening 10", "Seasonal Easing 5", "Seasonal Easing 10",
-                            "Rolling Easing 10", "Confirmation Tightening 10", "Confirmation Net 10",
-                            "Confirmation Easing 5", "Confirmation Net 5", "Core Median Stress"]
-        previous = states[-1] if states else "Neutral"
+    current_duration, current_max = 0, np.nan
+    last_mature_position = -10_000
+    last_mature_wave_max = np.nan
+    previous_valid_state = "Neutral"
+    for pos, (_, row) in enumerate(out.iterrows()):
+        previous = previous_valid_state
         recent_mature_flag = pos - last_mature_position <= 6
         systemic_active = previous == "Systemic Broadening"
         mature_eligible = (current_duration >= 6 if systemic_active else False) or recent_mature_flag
-        max_stress = current_max if systemic_active else np.nan
-        loss_seasonal = out["Seasonal Tightening 10"].iloc[max(0, pos - 2):pos + 1].le(1).sum() >= 2
-        net_peak = out["Confirmation Net 10"].iloc[max(0, pos - 6):pos + 1].max()
-        net_now = row.get("Confirmation Net 10")
+
+        easing_window = out["Rolling Easing 10"].iloc[max(0, pos - 2):pos + 1]
+        easing_window_complete = len(easing_window) == 3 and easing_window.notna().all()
+        confirmed_easing = easing_window_complete and is_confirmed_easing_persistent(easing_window)
+
+        seasonal_mature_window = out["Seasonal Tightening 10"].iloc[max(0, pos - 2):pos + 1]
+        confirmation_peak_window = out["Seasonal Confirmation Net 10"].iloc[max(0, pos - 6):pos + 1]
+        mature_windows_complete = (
+            len(seasonal_mature_window) == 3 and seasonal_mature_window.notna().all()
+            and len(confirmation_peak_window) == 7 and confirmation_peak_window.notna().all()
+        )
+        if systemic_active and current_duration >= 6:
+            mature_reference_stress = current_max
+        elif recent_mature_flag:
+            mature_reference_stress = last_mature_wave_max
+        elif systemic_active:
+            mature_reference_stress = current_max
+        else:
+            mature_reference_stress = np.nan
+        loss_seasonal = bool(seasonal_mature_window.le(1).sum() >= 2) if seasonal_mature_window.notna().all() else False
+        net_peak = confirmation_peak_window.max() if confirmation_peak_window.notna().all() else np.nan
+        net_now = row.get("Seasonal Confirmation Net 10")
         net_decline = pd.notna(net_peak) and pd.notna(net_now) and net_peak - net_now >= 0.4
-        mature_raw = mature_eligible and pd.notna(max_stress) and max_stress >= 60 and loss_seasonal and (
-            (pd.notna(row.get("Rolling Tightening 10")) and row["Rolling Tightening 10"] <= 1) or net_decline
+        mature_signal = (
+            mature_eligible and mature_windows_complete and pd.notna(mature_reference_stress)
+            and mature_reference_stress >= 60 and loss_seasonal
+            and (row.get("Rolling Tightening 10") <= 1 or net_decline)
         )
-        data_complete = not row[required_breadth].isna().any()
-        flags = dict(flags)
-        flags["confirmed_easing"] = is_confirmed_easing_persistent(
-            out["Rolling Easing 10"].iloc[max(0, pos - 2):pos + 1]
-        )
-        candidate = resolve_core_state_transition(previous, flags, mature=mature_raw, data_complete=data_complete)
+        data_complete = bool(current_complete.iloc[pos])
+        if previous in {"Early Easing", "Confirmed Easing"} and not easing_window_complete:
+            data_complete = False
+        if mature_eligible and not mature_windows_complete:
+            data_complete = False
+
+        flags = _classify_raw_core(row)
+        flags["confirmed_easing"] = bool(confirmed_easing)
+        candidate = resolve_core_state_transition(previous, flags, mature=bool(mature_signal), data_complete=data_complete)
+
+        for values, key in (
+            (raw_early_broadening, "early_broad"),
+            (raw_confirmed_broadening, "confirmed_broad"),
+            (raw_systemic, "systemic"),
+            (raw_early_easing, "early_easing"),
+        ):
+            values.append(bool(flags[key]) if data_complete else np.nan)
+        raw_confirmed_easing.append(bool(confirmed_easing) if data_complete else np.nan)
+        raw_mature.append(bool(mature_signal) if data_complete else np.nan)
+        mature_eligibility.append(bool(mature_eligible) if data_complete else np.nan)
+        mature_reference_max.append(float(mature_reference_stress) if pd.notna(mature_reference_stress) else np.nan)
         transition_diagnostic.append("Re-Broadening" if previous == "Mature" and candidate == "Systemic Broadening" else "")
 
-        current_duration, current_max = update_systemic_wave(
-            candidate, previous, current_duration, current_max, row.get("Core Median Stress", np.nan)
-        )
-        if candidate == "Mature":
-            last_mature_position = pos
+        if data_complete:
+            if candidate == "Mature":
+                if systemic_active:
+                    last_mature_wave_max = current_max
+                last_mature_position = pos
+            current_duration, current_max = update_systemic_wave(
+                candidate, previous, current_duration, current_max, row.get("Core Median Stress", np.nan)
+            )
+            previous_valid_state = candidate
         states.append(candidate)
         system_duration.append(current_duration)
         wave_max.append(current_max)
         recent_mature.append(pos - last_mature_position <= 6)
+
     out["Core State"] = states
     out["Systemic State Duration"] = system_duration
     out["Current Systemic Wave Max Stress"] = wave_max
     out["Recent Mature Within 6M"] = recent_mature
+    out["Mature Eligibility"] = mature_eligibility
+    out["Mature Reference Wave Max Stress"] = mature_reference_max
+    out["Raw Early Broadening"] = raw_early_broadening
+    out["Raw Confirmed Broadening"] = raw_confirmed_broadening
+    out["Raw Systemic"] = raw_systemic
+    out["Raw Mature"] = raw_mature
+    out["Raw Early Easing"] = raw_early_easing
+    out["Raw Confirmed Easing"] = raw_confirmed_easing
     out["Transition Diagnostic"] = transition_diagnostic
     return out
 

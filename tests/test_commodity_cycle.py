@@ -16,6 +16,7 @@ from commodity_cycle.data import (
 )
 
 from commodity_cycle.model import (
+    calculate_core_state,
     calculate_capex_current_percentile,
     calculate_capex_expanding_percentile,
     classify_capex_direction,
@@ -766,23 +767,76 @@ def test_capex_current_percentile_uses_full_history():
     assert result.iloc[-1] == 97.61904761904762
 
 
-def test_sticky_core_transitions_and_systemic_wave_reset_rules():
+def test_core_transition_rules_follow_the_state_lifecycle():
     no_raw = {"confirmed_easing": False, "early_easing": False, "systemic": False,
               "confirmed_broad": False, "early_broad": False}
     assert resolve_core_state_transition("Systemic Broadening", no_raw) == "Systemic Broadening"
     assert resolve_core_state_transition("Mature", no_raw) == "Mature"
     assert resolve_core_state_transition("Early Easing", no_raw) == "Early Easing"
-    assert resolve_core_state_transition("Confirmed Easing", no_raw) == "Confirmed Easing"
-    assert resolve_core_state_transition("Confirmed Easing", {**no_raw, "early_easing": True}) == "Confirmed Easing"
-    assert resolve_core_state_transition("Confirmed Easing", {**no_raw, "early_broad": True}) == "Early Broadening"
+    assert resolve_core_state_transition("Confirmed Easing", no_raw) == "Neutral"
+    assert resolve_core_state_transition("Neutral", {**no_raw, "confirmed_easing": True}) == "Neutral"
+    assert resolve_core_state_transition("Early Easing", {**no_raw, "confirmed_easing": True}) == "Confirmed Easing"
+    assert resolve_core_state_transition("Confirmed Easing", {**no_raw, "confirmed_easing": True, "early_broad": True}) == "Early Broadening"
+    assert resolve_core_state_transition("Confirmed Broadening", {**no_raw, "early_easing": True}) == "Neutral"
+    assert resolve_core_state_transition("Neutral", {**no_raw, "early_easing": True}) == "Neutral"
+    assert resolve_core_state_transition("Mature", {**no_raw, "early_easing": True}) == "Early Easing"
     assert resolve_core_state_transition("Mature", {**no_raw, "systemic": True}) == "Systemic Broadening"
-    assert resolve_core_state_transition("Systemic Broadening", {**no_raw, "early_easing": True}) == "Early Easing"
+    assert resolve_core_state_transition("Systemic Broadening", {**no_raw, "early_easing": True}) == "Systemic Broadening"
     assert resolve_core_state_transition("Systemic Broadening", no_raw, mature=True) == "Mature"
+    assert resolve_core_state_transition("Systemic Broadening", {**no_raw, "systemic": True}, mature=True) == "Mature"
     assert resolve_core_state_transition("Systemic Broadening", no_raw, data_complete=False) == "DATA INCOMPLETE"
-    assert resolve_core_state_transition("Early Easing", {**no_raw, "early_easing": True, "systemic": True}) == "Systemic Broadening"
+    assert resolve_core_state_transition("Early Easing", {**no_raw, "early_easing": True, "systemic": True}) == "Early Easing"
+    assert resolve_core_state_transition("Confirmed Easing", {**no_raw, "systemic": True}) == "Systemic Broadening"
     assert update_systemic_wave("Systemic Broadening", "Mature", 0, np.nan, 70) == (1, 70)
     reset_duration, reset_max = update_systemic_wave("Mature", "Systemic Broadening", 8, 85, 50)
     assert reset_duration == 0 and np.isnan(reset_max)
     assert is_confirmed_easing_persistent([2, 1, 2])
     assert not is_confirmed_easing_persistent([2, 1, 1])
     assert not is_confirmed_easing_persistent([2, 2])
+
+
+def test_core_confirmation_breadth_uses_seasonal_delta_without_overwriting_rolling():
+    index = pd.date_range("2000-01-01", periods=7, freq="MS")
+    history = pd.DataFrame(index=index)
+    core = ("Petroleum / Energy", "Metals", "Agriculture")
+    confirmation = ("Chemicals", "Lumber", "Hardware / Plumbing", "Machinery", "Electrical / Electronics")
+    for name in core + confirmation:
+        seasonal = np.full(7, 50.0)
+        rolling = np.full(7, 50.0)
+        if name in {"Chemicals", "Lumber"}:
+            seasonal[-1] = 61.0
+        if name == "Chemicals":
+            rolling[-1] = 61.0
+        history[f"{name} Seasonal Stress"] = seasonal
+        history[f"{name} Rolling Stress"] = rolling
+
+    result = calculate_core_state(history).iloc[-1]
+
+    assert result["Seasonal Confirmation Tightening 10"] == 2
+    assert result["Seasonal Confirmation Net 10"] == 0.4
+    assert result["Rolling Confirmation Tightening 10"] == 1
+    assert result["Confirmation Tightening 10"] == 2
+    assert result["Confirmation Net 10"] == 0.4
+    assert bool(result["Data Complete"])
+
+
+def test_core_state_completeness_does_not_turn_missing_inputs_into_zero_breadth():
+    index = pd.date_range("2000-01-01", periods=7, freq="MS")
+    history = pd.DataFrame(index=index)
+    series = ("Petroleum / Energy", "Metals", "Agriculture", "Chemicals", "Lumber",
+              "Hardware / Plumbing", "Machinery", "Electrical / Electronics")
+    for name in series:
+        history[f"{name} Seasonal Stress"] = 50.0
+        history[f"{name} Rolling Stress"] = 50.0
+    history.loc[index[-1], "Metals Seasonal Stress"] = np.nan
+    history.loc[index[-1], "Agriculture Rolling Stress"] = np.nan
+
+    result = calculate_core_state(history).iloc[-1]
+
+    assert not bool(result["Data Complete"])
+    assert result["Core Median Stress"] is np.nan or pd.isna(result["Core Median Stress"])
+    assert pd.isna(result["Seasonal Tightening 5"])
+    assert pd.isna(result["Rolling Tightening 5"])
+    assert result["Core State"] == "DATA INCOMPLETE"
+    assert "Metals Seasonal Delta 6M" in result["Missing Required Inputs"]
+    assert "Agriculture Rolling Delta 6M" in result["Missing Required Inputs"]
