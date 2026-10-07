@@ -19,6 +19,7 @@ from commodity_cycle.data import (
     load_monthly_prices,
     load_commodity_term_structure,
 )
+from commodity_cycle.export import commodity_tables_to_xlsx
 
 TTL_SECONDS = 21600
 RANGE_OPTIONS = ("1Y", "3Y", "5Y", "10Y", "20Y", "Full")
@@ -42,6 +43,12 @@ PRIMARY_COMMODITY_COLUMNS = (
 )
 PERCENT_COLUMNS = {
     "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread",
+}
+DISPLAY_COLUMN_NAMES = {
+    "3Y Percentile": "COT 3Y Percentile",
+    "5Y Percentile": "COT 5Y Percentile",
+    "Seasonal Percentile 5Y": "Spread 5Y Seasonal Percentile",
+    "Seasonal Percentile 10Y": "Spread 10Y Seasonal Percentile",
 }
 
 
@@ -174,6 +181,13 @@ def _render_market_section(commodity: pd.DataFrame, sectors: pd.DataFrame, price
         st.info("No commodity market observations are currently available.")
     else:
         primary, auxiliary = _commodity_confirmation_frames(commodity)
+        st.download_button(
+            "Download Commodity Tables (.xlsx)",
+            data=commodity_tables_to_xlsx(primary, auxiliary),
+            file_name=f"commodity_cycle_tables_{pd.Timestamp.now(tz='UTC'):%Y-%m-%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="commodity_cycle_tables_download",
+        )
         st.dataframe(_style_commodity_table(primary, highlight_primary=True), use_container_width=True, hide_index=True)
         if not auxiliary.empty:
             st.markdown("#### Additional commodity diagnostics")
@@ -199,6 +213,8 @@ def _commodity_confirmation_frames(commodity: pd.DataFrame) -> tuple[pd.DataFram
     diagnostic_columns = [column for column in commodity if column not in PRIMARY_COMMODITY_COLUMNS]
     auxiliary_columns = identifiers + [column for column in diagnostic_columns if column not in identifiers]
     auxiliary = commodity.loc[:, auxiliary_columns].copy() if auxiliary_columns else pd.DataFrame(index=commodity.index)
+    primary = primary.rename(columns=DISPLAY_COLUMN_NAMES)
+    auxiliary = auxiliary.rename(columns=DISPLAY_COLUMN_NAMES)
     return primary, auxiliary
 
 
