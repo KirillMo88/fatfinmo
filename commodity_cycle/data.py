@@ -61,6 +61,26 @@ def load_commodity_term_structure() -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
     current = bundle["current"].copy()
     monthly = bundle["monthly"].copy()
     seasonal_history = seasonal_history_frame(history, monthly)
+    agriculture_seasonal = bundle.get("agriculture_seasonal", pd.DataFrame()).copy()
+    if not agriculture_seasonal.empty:
+        valid_agriculture = agriculture_seasonal.loc[
+            agriculture_seasonal["Data Quality"].isin(["OK", "ACCEPTABLE"])
+            & pd.to_numeric(agriculture_seasonal["Median Seasonal Spread"], errors="coerce").notna()
+        ].copy()
+        if not valid_agriculture.empty:
+            ag_history = pd.DataFrame({
+                "Asset": valid_agriculture["Asset"].astype(str),
+                "Date": pd.to_datetime(valid_agriculture["Matched Date End"], errors="coerce"),
+                "Month": pd.to_datetime(valid_agriculture["Matched Date End"], errors="coerce").dt.month,
+                "Spread": pd.to_numeric(valid_agriculture["Median Seasonal Spread"], errors="coerce"),
+                "PairKey": valid_agriculture["PairKey"].astype(str),
+            })
+            seasonal_history = pd.concat([seasonal_history, ag_history], ignore_index=True).dropna(
+                subset=["Asset", "Date", "Spread", "PairKey"]
+            )
+            seasonal_history = seasonal_history.sort_values("Date").drop_duplicates(
+                ["Asset", "PairKey", "Date"], keep="last"
+            )
     if current.empty:
         current = pd.DataFrame(columns=[
             "Asset", "As Of", "Leg1", "Leg2", "Spread %", "Raw Curve State", "Seasonal Pctl 10Y",
@@ -87,7 +107,9 @@ def load_commodity_term_structure() -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
         # month as the official model state; the current month remains explicitly provisional.
         official5, official10, official_state = [], [], []
         for _, row in current.iterrows():
-            if int(row.get("mtd_observation_count", 0) or 0) >= 5:
+            if str(row.get("asset")) in {"Corn", "Wheat", "Soybeans"}:
+                p5, p10 = row.get("Seasonal Pctl 5Y"), row.get("Seasonal Pctl 10Y")
+            elif int(row.get("mtd_observation_count", 0) or 0) >= 5:
                 p5, p10 = row.get("Seasonal Pctl 5Y"), row.get("Seasonal Pctl 10Y")
             else:
                 finalized = store.last_finalized_for(str(row["asset"]), str(row["pair_key"]))
