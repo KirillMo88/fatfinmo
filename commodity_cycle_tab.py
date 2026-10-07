@@ -24,6 +24,7 @@ from commodity_cycle.export import commodity_tables_to_xlsx
 
 TTL_SECONDS = 21600
 RANGE_OPTIONS = ("1Y", "3Y", "5Y", "10Y", "20Y", "Full")
+MOMENTUM_WEEKS = {"1M": 4, "3M": 13, "6M": 26, "12M": 52}
 CORE_COLORS = {
     "Neutral": "#e2e8f0", "Early Broadening": "#fde047", "Confirmed Broadening": "#fb923c",
     "Systemic Broadening": "#f43f5e", "Mature": "#c084fc", "Early Easing": "#4ade80",
@@ -154,6 +155,7 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         st.info("The FRED Inventory/Sales model is unavailable. Check Diagnostics / Data below; market and positioning sections remain available where their feeds loaded.")
     else:
         _render_ppi_core_chart(history, selected_range)
+        _render_ppi_cpi_roc_chart(history, selected_range)
         view = st.radio("Regime shading", ["Final State", "Final State 2"], index=1, horizontal=True,
                         key="commodity_cycle_final_view_v2")
         _render_final_state_chart(history, selected_range, view)
@@ -162,14 +164,15 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
     if not history.empty:
         st.markdown("#### FRED Inventory / Sales Regime")
         _render_fred_heatmap(history)
-        st.markdown("#### Core stress and breadth diagnostics")
-        cols = [c for c in history if c.endswith("Rolling Stress") or c.endswith("Seasonal Stress")]
-        st.dataframe(history[cols].tail(24).round(1), use_container_width=True)
+        with st.expander("Core stress and breadth diagnostics", expanded=False):
+            cols = [c for c in history if c.endswith("Rolling Stress") or c.endswith("Seasonal Stress")]
+            st.dataframe(history[cols].tail(24).round(1), use_container_width=True)
 
     _render_market_section(
         commodity,
         sectors,
-        data["prices"],
+        data["performance_prices"],
+        selected_range,
         data["term_history"],
         data.get("term_diagnostics", pd.DataFrame()),
     )
@@ -188,7 +191,8 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
 def _render_market_section(
     commodity: pd.DataFrame,
     sectors: pd.DataFrame,
-    prices: pd.DataFrame,
+    performance_prices: pd.DataFrame,
+    selected_range: str,
     term_history: pd.DataFrame,
     term_diagnostics: pd.DataFrame,
 ) -> None:
@@ -201,12 +205,17 @@ def _render_market_section(
             for col, (_, row) in zip(cols, sectors.iterrows()):
                 with col:
                     st.markdown(f"**{row['Sector']}**")
-                    st.metric("Market Confirmation", str(row["Market Confirmation"]))
-                    st.caption(f"Price: {row['Price State']} · Bullish {row['Bullish Count']} / Bearish {row['Bearish Count']}")
-                    st.caption(f"Curve tight breadth: {_fmt(row['Curve Tight Breadth'], '%')}")
                     avg_cftc = row.get("CFTC Average 5Y Percentile", np.nan)
                     avg_cftc_text = "N/A" if pd.isna(avg_cftc) else f"{float(avg_cftc):.1f}"
-                    st.caption(f"Avg CFTC: {avg_cftc_text}, CFTC Dispersion: {_fmt(row['CFTC Dispersion'], ' pts')}")
+                    st.markdown(
+                        "<div style='font-size:1.5rem;line-height:1.4;margin-top:0.25rem'>"
+                        f"<div>Price: {row['Price State']} · Bullish {row['Bullish Count']} / Bearish {row['Bearish Count']}</div>"
+                        f"<div>Curve tight breadth: {_fmt(row['Curve Tight Breadth'], '%')}</div>"
+                        f"<div>Avg CFTC: {avg_cftc_text}</div>"
+                        f"<div>CFTC Dispersion: {_fmt(row['CFTC Dispersion'], ' pts')}</div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
     st.markdown("#### Commodity confirmation table")
     if commodity.empty:
         st.info("No commodity market observations are currently available.")
@@ -221,15 +230,16 @@ def _render_market_section(
         )
         st.dataframe(_style_commodity_table(primary, highlight_primary=True), use_container_width=True, hide_index=True)
         if not auxiliary.empty:
-            st.markdown("#### Additional commodity diagnostics")
-            st.dataframe(_style_commodity_table(auxiliary), use_container_width=True, hide_index=True)
-        st.markdown("#### Price momentum × CFTC positioning")
-        momentum_period = st.selectbox(
-            "Price Momentum",
-            options=("1M", "3M", "6M", "12M"),
-            index=2,
-            key="commodity_cycle_price_momentum_period",
-        )
+            with st.expander("Additional commodity diagnostics", expanded=False):
+                st.dataframe(_style_commodity_table(auxiliary), use_container_width=True, hide_index=True)
+    momentum_period = st.selectbox(
+        "Price Momentum",
+        options=("1M", "3M", "6M", "12M"),
+        index=2,
+        key="commodity_cycle_price_momentum_period",
+    )
+    st.markdown("#### Price momentum × CFTC positioning")
+    if not commodity.empty:
         momentum_column = f"Return {momentum_period}"
         fig = go.Figure()
         for _, row in commodity.iterrows():
@@ -249,8 +259,17 @@ def _render_market_section(
         fig.add_hline(y=75, line_dash="dot", line_color="#f59e0b")
         fig.add_hline(y=25, line_dash="dot", line_color="#38bdf8")
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-        asset = st.selectbox("Commodity drill-down", commodity["Commodity"].tolist(), key="commodity_cycle_drilldown")
-        _render_commodity_drilldown(asset, prices, term_history)
+    st.markdown("#### Commodity price and momentum history")
+    for row_start in range(0, len(PRICE_TICKERS), 3):
+        columns = st.columns(3)
+        for column, asset in zip(columns, list(PRICE_TICKERS)[row_start:row_start + 3]):
+            with column:
+                _render_asset_price_momentum(
+                    asset,
+                    performance_prices.get(asset, pd.Series(dtype=float)),
+                    momentum_period,
+                    selected_range,
+                )
 
 
 def _commodity_confirmation_frames(commodity: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -320,34 +339,89 @@ def _style_commodity_table(frame: pd.DataFrame, *, highlight_primary: bool = Fal
     return styled
 
 
-def _render_commodity_drilldown(asset: str, prices: pd.DataFrame, term_history: pd.DataFrame) -> None:
-    p = prices[asset].dropna() if asset in prices else pd.Series(dtype=float)
-    curve = term_history.loc[(term_history["Asset"] == asset) & pd.to_numeric(term_history["Spread %"], errors="coerce").notna()].copy() if not term_history.empty else pd.DataFrame()
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.1,
-                        specs=[[{}], [{}], [{"secondary_y": True}]],
-                        subplot_titles=(f"{asset} daily price (Yahoo Finance continuous future)", "13-week price momentum", "Provided term-structure spread and seasonal percentile"))
-    if len(p):
-        fig.add_trace(go.Scatter(x=p.index, y=p.values, name="Price", line=dict(color="#38bdf8")), row=1, col=1)
-        weekly = p.to_frame("Price")
-        weekly["Week"] = weekly.index.to_period("W-FRI")
-        weekly = weekly.groupby("Week", sort=True).tail(1)["Price"]
-        momentum = weekly.div(weekly.shift(13)).sub(1) * 100
-        fig.add_trace(go.Scatter(x=momentum.index, y=momentum, name="13W return", line=dict(color="#a78bfa"), connectgaps=False), row=2, col=1)
-        fig.add_hline(y=0, line_dash="dot", line_color="#64748b", row=2, col=1)
-    if not curve.empty:
-        fig.add_trace(go.Scatter(x=curve["Date"], y=curve["Spread %"] * 100, name="Spread %", line=dict(color="#facc15"), connectgaps=False), row=3, col=1, secondary_y=False)
-        for pctl_col, color in (("Seasonal Pctl 5Y RT", "#fb7185"), ("Seasonal Pctl 10Y RT", "#c084fc")):
-            if pctl_col in curve:
-                fig.add_trace(go.Scatter(x=curve["Date"], y=pd.to_numeric(curve[pctl_col], errors="coerce"), name=pctl_col, line=dict(color=color, dash="dot"), connectgaps=False), row=3, col=1, secondary_y=True)
-        fig.add_hline(y=0, line_dash="dot", line_color="#64748b", row=3, col=1)
-    fig.update_layout(template="plotly_dark", height=690, margin=dict(l=35, r=20, t=45, b=25), legend=dict(orientation="h"))
+def _price_momentum_series(prices: pd.Series, period: str) -> pd.Series:
+    """Return weekly close-to-close momentum using the app's 4/13/26/52-week horizons."""
+    weeks = MOMENTUM_WEEKS.get(period)
+    if weeks is None:
+        return pd.Series(dtype=float)
+    values = pd.to_numeric(prices, errors="coerce").dropna().sort_index()
+    if values.empty:
+        return pd.Series(dtype=float)
+    dates = pd.to_datetime(values.index, errors="coerce", utc=True).tz_localize(None).normalize()
+    values.index = dates
+    values = values.loc[~values.index.isna()].groupby(level=0).last().sort_index()
+    weekly = values.resample("W-FRI").last().dropna()
+    return weekly.div(weekly.shift(weeks)).sub(1).mul(100).rename(f"Return {period}")
+
+
+def _render_asset_price_momentum(
+    asset: str,
+    prices: pd.Series,
+    period: str,
+    selected_range: str,
+) -> None:
+    values = pd.to_numeric(prices, errors="coerce").dropna().sort_index()
+    if values.empty:
+        st.markdown(f"**{asset}**")
+        st.info("No price history available.")
+        return
+    dates = pd.to_datetime(values.index, errors="coerce", utc=True).tz_localize(None).normalize()
+    values.index = dates
+    values = values.loc[~values.index.isna()].groupby(level=0).last().sort_index()
+    weekly = values.resample("W-FRI").last().dropna()
+    momentum = _price_momentum_series(values, period)
+    visible_price = _slice_range(weekly.to_frame("Price"), selected_range)["Price"]
+    visible_momentum = _slice_range(momentum.to_frame("Momentum"), selected_range)["Momentum"]
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                        row_heights=[0.62, 0.38], subplot_titles=("Price", f"{period} price momentum"))
+    fig.add_trace(go.Scatter(x=visible_price.index, y=visible_price, name=f"{asset} price",
+                             line=dict(color="#38bdf8", width=1.6), showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=visible_momentum.index, y=visible_momentum, name=f"{period} return",
+                             line=dict(color="#c084fc", width=1.6), showlegend=False,
+                             connectgaps=False), row=2, col=1)
+    fig.add_hline(y=0, line_dash="dot", line_color="#64748b", row=2, col=1)
+    fig.update_layout(template="plotly_dark", height=350, title=dict(text=asset, x=0.02, xanchor="left"),
+                      margin=dict(l=35, r=12, t=45, b=25), showlegend=False)
     fig.update_yaxes(title_text="Price", row=1, col=1)
-    fig.update_yaxes(title_text="13W return %", row=2, col=1)
-    fig.update_yaxes(title_text="Spread %", row=3, col=1, secondary_y=False)
-    fig.update_yaxes(title_text="Seasonal percentile", range=[0, 100], row=3, col=1, secondary_y=True)
+    fig.update_yaxes(title_text="Return (%)", row=2, col=1)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-    if curve.empty:
-        st.caption("No supplied historical term-structure observations for this commodity; no synthetic curve is shown.")
+
+
+def _render_ppi_cpi_roc_chart(history: pd.DataFrame, selected_range: str) -> None:
+    view = _slice_range(history, selected_range)
+    ppi_level = pd.to_numeric(history.get("PPIACO", pd.Series(index=history.index, dtype=float)), errors="coerce").dropna()
+    cpi_level = pd.to_numeric(history.get("CPIAUCSL", pd.Series(index=history.index, dtype=float)), errors="coerce").dropna()
+    ppi_roc = ppi_level.pct_change(periods=12, fill_method=None).mul(100).reindex(view.index)
+    cpi_roc = cpi_level.pct_change(periods=12, fill_method=None).mul(100).reindex(view.index)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=view.index, y=ppi_roc, name="PPIACO 12M ROC",
+                             line=dict(color="#38bdf8", width=2), connectgaps=False))
+    fig.add_trace(go.Scatter(x=view.index, y=cpi_roc, name="CPIAUCSL 12M ROC",
+                             line=dict(color="#f97316", width=2), connectgaps=False))
+
+    observed_ppi = ppi_roc.dropna()
+    if len(observed_ppi) >= 2:
+        mean = float(observed_ppi.mean())
+        std = float(observed_ppi.std(ddof=1))
+        if np.isfinite(std):
+            for sigma, color in ((1, "#fde047"), (2, "#fb7185")):
+                for direction in (1, -1):
+                    level = mean + direction * sigma * std
+                    label = f"PPIACO mean {direction * sigma:+d}σ"
+                    fig.add_trace(go.Scatter(
+                        x=view.index, y=np.full(len(view), level), name=label,
+                        line=dict(color=color, width=1.2, dash="dot"),
+                        hovertemplate=f"{label}: %{{y:.2f}}%<extra></extra>",
+                    ))
+    fig.add_hline(y=0, line_dash="dash", line_color="#64748b", line_width=1)
+    fig.update_layout(template="plotly_dark", title="PPIACO 12M ROC + CPIAUCSL 12M ROC",
+                      height=360, margin=dict(l=35, r=20, t=50, b=85),
+                      yaxis_title="12M ROC (%)",
+                      legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="left", x=0))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    if cpi_roc.notna().sum() == 0:
+        st.caption("CPIAUCSL history is unavailable for the selected range.")
 
 
 def _render_ppi_core_chart(history: pd.DataFrame, selected_range: str) -> None:
@@ -384,7 +458,7 @@ def _render_fred_heatmap(history: pd.DataFrame) -> None:
         return
     table = []
     for label in FRED_SERIES:
-        if label in {"PPIACO", "CAPEX", "FPI"}:
+        if label in {"PPIACO", "CPIAUCSL", "CAPEX", "FPI"}:
             continue
         rolling = row.get(f"{label} Rolling Stress")
         seasonal = row.get(f"{label} Seasonal Stress")

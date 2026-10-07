@@ -30,6 +30,7 @@ FRED_SERIES = {
     "Machinery": "R4238IM163SCEN",
     "Electrical / Electronics": "R4236IM163SCEN",
     "PPIACO": "PPIACO",
+    "CPIAUCSL": "CPIAUCSL",
     "CAPEX": "E318RC1Q027SBEA",
     "FPI": "FPI",
 }
@@ -864,7 +865,7 @@ def build_commodity_cycle_history(
     if fred.empty:
         return pd.DataFrame(), pd.DataFrame(), term_history.copy()
     model = fred.copy().sort_index()
-    inventory_columns = [name for name in FRED_SERIES if name not in {"PPIACO", "CAPEX", "FPI"}]
+    inventory_columns = [name for name in FRED_SERIES if name not in {"PPIACO", "CPIAUCSL", "CAPEX", "FPI"}]
     for name in FRED_SERIES:
         if name not in model:
             model[name] = np.nan
