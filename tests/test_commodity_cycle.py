@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 from datetime import date
 from commodity_cycle.data import (
     FRED_SERIES,
@@ -29,13 +30,20 @@ from commodity_cycle.model import (
     resolve_price_curve_market_state,
     update_systemic_wave,
 )
-from commodity_cycle.term_structure import TermStructureStore, candidate_contracts, contract_symbol, make_rows, quote_is_fresh, seasonal_percentile
+from commodity_cycle.term_structure import (
+    TermStructureStore, _contract_expiry, candidate_contracts, contract_symbol,
+    cme_cl_business_days_between, make_rows, quote_is_fresh, seasonal_percentile,
+    validate_cl_expiration,
+)
 from commodity_cycle.term_structure_pipeline import (
     TermStructureStore as PersistentCurveStore,
     TermStructureContractProvider,
+    ExpectedContract,
     _active_front,
+    _expected_contract_frame,
     fetch_current_term_structure,
     _completed_eod_frame,
+    normalize_completed_daily_bars,
     _current_month_daily,
     _calculate_agriculture_seasonality,
     agriculture_contract_pair,
@@ -235,6 +243,33 @@ def test_yahoo_contract_symbols_are_generated_for_rolling_years():
     assert candidates[-1][0].endswith(".NYM")
 
 
+def test_wti_cl_expirations_match_known_nymex_contract_dates():
+    # Dates cross-checked against listed CL contract expiration metadata; Jan 2026
+    # also exercises the Christmas reference-day holiday adjustment.
+    known = {
+        (2026, 1): "2025-12-19",  # CLF2026
+        (2026, 2): "2026-01-20",  # MLK holiday shifts the business-day count
+        (2026, 10): "2026-09-22", # CLV2026
+        (2026, 11): "2026-10-20", # CLX2026
+        (2026, 12): "2026-11-20", # CLZ2026
+        (2027, 1): "2026-12-21", # CLF2027
+    }
+    for (year, month), expected in known.items():
+        assert _contract_expiry("WTI", year, month) == pd.Timestamp(expected)
+        assert validate_cl_expiration(year, month, expected) == pd.Timestamp(expected)
+        assert cme_cl_business_days_between(
+            pd.Timestamp(expected).date(), pd.Timestamp(expected).date() + pd.Timedelta(days=1)
+        ) == 1
+
+
+def test_cl_expiry_validation_and_dte_use_cme_holiday_calendar():
+    with pytest.raises(ValueError, match="Invalid NYMEX CL expiration"):
+        ExpectedContract("WTI", "CLF26.NYM", 1, 2026, pd.Timestamp("2025-12-22"), None, "NYM")
+    # Jan 19, 2026 is the CME MLK closure, so there is only one trading day
+    # from Friday Jan 16 to the Tuesday Jan 20 expiry (the expiry day is excluded).
+    assert trading_day_dte("2026-01-16", "2026-01-20", asset="WTI") == 1
+
+
 def test_agriculture_uses_calendar_comparable_delivery_pairs():
     today = date(2026, 10, 7)
     def quote(symbol):
@@ -393,6 +428,73 @@ def test_only_completed_common_eod_quotes_can_form_current_spread():
     assert completed.iloc[-1]["price"] == 10.0
     assert _current_month_daily([{"as_of": pd.Timestamp("2026-09-30")},
                                  {"as_of": pd.Timestamp("2026-10-06")}], today) == [{"as_of": pd.Timestamp("2026-10-06")}]
+
+
+def test_yahoo_daily_normalization_deduplicates_and_excludes_current_session():
+    index = pd.DatetimeIndex([
+        "2026-10-05 00:00:00-05:00",
+        "2026-10-06 00:00:00-05:00",
+        "2026-10-06 15:00:00-05:00", # duplicate non-date-label snapshot loses to the EOD label
+        "2026-10-07 00:00:00-05:00", # current daily candle is partial
+        "2026-10-07 10:00:00-05:00", # current intraday snapshot is partial
+    ])
+    raw = pd.DataFrame({
+        "price": [100.0, 101.0, 999.0, 102.0, 103.0],
+        "volume": [10.0, 11.0, 999.0, 12.0, 13.0],
+    }, index=index)
+    normalized, diagnostics = normalize_completed_daily_bars(raw, date(2026, 10, 7))
+    assert normalized.index.tolist() == [pd.Timestamp("2026-10-05"), pd.Timestamp("2026-10-06")]
+    assert normalized.loc[pd.Timestamp("2026-10-06"), "price"] == 101.0
+    assert normalized.loc[pd.Timestamp("2026-10-06"), "volume"] == 11.0
+    assert diagnostics == {
+        "duplicate_rows_removed": 1,
+        "partial_rows_excluded": 2,
+        "final_valid_daily_bar_count": 2,
+        "latest_completed_trading_date": "2026-10-06",
+    }
+
+
+def test_yahoo_utc_midnight_daily_label_does_not_shift_to_prior_exchange_date():
+    raw = pd.DataFrame(
+        {"price": [100.0, 101.0], "volume": [10.0, 11.0]},
+        index=pd.DatetimeIndex(["2026-10-05 00:00:00+00:00", "2026-10-06 00:00:00+00:00"]),
+    )
+    normalized, diagnostics = normalize_completed_daily_bars(raw, date(2026, 10, 7))
+    assert normalized.index.tolist() == [pd.Timestamp("2026-10-05"), pd.Timestamp("2026-10-06")]
+    assert diagnostics["latest_completed_trading_date"] == "2026-10-06"
+
+
+def test_cme_evening_snapshot_maps_to_next_trade_date_and_is_excluded():
+    raw = pd.DataFrame(
+        {"price": [100.0], "volume": [10.0]},
+        index=pd.DatetimeIndex(["2026-10-06 17:30:00-05:00"]),
+    )
+    normalized, diagnostics = normalize_completed_daily_bars(raw, date(2026, 10, 7))
+    assert normalized.empty
+    assert diagnostics["partial_rows_excluded"] == 1
+
+
+def test_contract_volume_metrics_and_diagnostics_use_normalized_bars():
+    today = date(2026, 10, 7)
+    contract = ExpectedContract("WTI", "CLX27.NYM", 11, 2027, _contract_expiry("WTI", 2027, 11), None, "NYM")
+    raw = pd.DataFrame(
+        {"price": [100.0, 101.0, 999.0, 102.0], "volume": [10.0, 11.0, 999.0, 12.0]},
+        index=pd.DatetimeIndex([
+            "2026-10-05 00:00:00-05:00", "2026-10-06 00:00:00-05:00",
+            "2026-10-06 15:00:00-05:00", "2026-10-07 00:00:00-05:00",
+        ]),
+    )
+    cleaned, stats = normalize_completed_daily_bars(raw, today)
+    diagnostics, metrics = _expected_contract_frame(
+        "WTI", [contract], {contract.symbol: cleaned}, today, "Yahoo Finance",
+        {contract.symbol: stats},
+    )
+    row = diagnostics[0]
+    assert metrics[contract.symbol]["volume5"] == 21.0
+    assert row["Duplicate Rows Removed"] == 1
+    assert row["Partial Rows Excluded"] == 1
+    assert row["Final Valid Daily-Bar Count"] == 2
+    assert row["Latest Completed Trading Date"] == "2026-10-06"
 
 
 def test_front_roll_requires_two_completed_volume_crossover_sessions(tmp_path):

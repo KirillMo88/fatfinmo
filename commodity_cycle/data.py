@@ -42,6 +42,16 @@ PRICE_TICKERS = {
     "Wheat": "ZW=F",
     "Soybeans": "ZS=F",
 }
+PERFORMANCE_TV_SYMBOLS = {
+    "WTI": "NYMEX:CL1!",
+    "Natural Gas": "NYMEX:NG1!",
+    "RBOB": "NYMEX:RB1!",
+    "Copper": "COMEX:HG1!",
+    "Aluminum": "COMEX:ALI1!",
+    "Corn": "CBOT:ZC1!",
+    "Wheat": "CBOT:ZW1!",
+    "Soybeans": "CBOT:ZS1!",
+}
 CFTC_ASSET_MAP = {
     "WTI": "WTI", "Natural Gas": "Natural Gas", "RBOB": "RBOB",
     "Copper": "Copper", "Aluminum": "Aluminum", "Corn": "Corn",
@@ -103,12 +113,10 @@ def _official_seasonal_result(
     seasonal_history: pd.DataFrame,
     percentile_with_history: Any,
 ) -> dict[str, Any]:
-    """Resolve official curve percentiles and their same-configuration provenance."""
+    """Rank the live spread against same-period history; never substitute a historical signal."""
     asset = str(row.get("asset", row.get("Asset", "")))
     pair_key = str(row.get("pair_key", row.get("PairKey", "")))
     as_of = pd.to_datetime(row.get("As Of", row.get("as_of")), errors="coerce")
-    p5 = row.get("Seasonal Pctl 5Y", np.nan)
-    p10 = row.get("Seasonal Pctl 10Y", np.nan)
     source = str(row.get("Source", row.get("source", "N/A")))
     current_vendors = _source_vendor_set(source)
     result: dict[str, Any] = {
@@ -172,8 +180,12 @@ def _official_seasonal_result(
         }
 
     if asset in {"Corn", "Wheat", "Soybeans"}:
-        status = "CURRENT_MTD" if pd.notna(p5) or pd.notna(p10) else "N/A"
-        if pd.isna(as_of):
+        # Agriculture percentiles are calculated from the current seasonal
+        # contract spread against prior comparable seasons upstream.
+        p5 = row.get("Seasonal Pctl 5Y", np.nan)
+        p10 = row.get("Seasonal Pctl 10Y", np.nan)
+        current_spread = pd.to_numeric(pd.Series([row.get("Spread %", row.get("spread"))]), errors="coerce").iloc[0]
+        if pd.isna(current_spread) or pd.isna(as_of):
             return result
         info5 = {
             "history_n": row.get("5Y HistoryN", 0),
@@ -183,66 +195,24 @@ def _official_seasonal_result(
             "history_n": row.get("10Y HistoryN", 0),
             "history_status": row.get("10Y HistoryStatus", "INSUFFICIENT_10Y_HISTORY"),
         }
+        status = "CURRENT_SPREAD" if pd.notna(p5) or pd.notna(p10) else "N/A"
         return finish(p5, p10, pd.Timestamp(as_of), status, info5, info10,
                       month_specific=False, as_of_format="%Y-%m-%d")
-    if pd.notna(as_of) and int(row.get("mtd_observation_count", 0) or 0) >= 5:
-        current_period = pd.Timestamp(as_of).to_period("M")
-        current_value = float(row.get("mtd_spread", row.get("spread", np.nan)))
-        info5 = percentile_with_history(
-            current_value, seasonal_history, asset, current_period.month, pair_key, 5,
-            before=current_period.to_timestamp()
-        )
-        info10 = percentile_with_history(
-            current_value, seasonal_history, asset, current_period.month, pair_key, 10,
-            before=current_period.to_timestamp()
-        )
-        return finish(p5, p10, pd.Timestamp(as_of), "CURRENT_MTD", info5, info10,
-                      month_specific=True, as_of_format="%Y-%m-%d")
-    if pd.isna(as_of) or seasonal_history.empty:
+    current_spread = pd.to_numeric(pd.Series([row.get("Spread %", row.get("spread"))]), errors="coerce").iloc[0]
+    if pd.isna(as_of) or not np.isfinite(current_spread):
         return result
-
     current_period = pd.Timestamp(as_of).to_period("M")
-    dates = pd.to_datetime(seasonal_history["Date"], errors="coerce")
-    completed_current = seasonal_history.loc[
-        seasonal_history["Asset"].astype(str).eq(asset)
-        & seasonal_history["PairKey"].astype(str).eq(pair_key)
-        & dates.dt.to_period("M").eq(current_period)
-    ].copy()
-    if not completed_current.empty:
-        completed_current["Date"] = pd.to_datetime(completed_current["Date"], errors="coerce")
-        latest = completed_current.sort_values("Date").iloc[-1]
-        completed_date = pd.Timestamp(latest["Date"])
-        completed_spread = float(latest["Spread"])
-        info5 = percentile_with_history(
-            completed_spread, seasonal_history, asset, completed_date.month, pair_key, 5, before=completed_date
-        )
-        info10 = percentile_with_history(
-            completed_spread, seasonal_history, asset, completed_date.month, pair_key, 10, before=completed_date
-        )
-        return finish(info5["percentile"], info10["percentile"], completed_date,
-                      "CURRENT_COMPLETE_MONTH", info5, info10,
-                      month_specific=True, as_of_format="%Y-%m")
-    candidates = seasonal_history.loc[
-        seasonal_history["Asset"].astype(str).eq(asset)
-        & seasonal_history["PairKey"].astype(str).eq(pair_key)
-        & dates.dt.month.eq(current_period.month)
-        & (dates < current_period.to_timestamp())
-    ].copy()
-    if candidates.empty:
-        return result
-    candidates["Date"] = pd.to_datetime(candidates["Date"], errors="coerce")
-    latest = candidates.sort_values("Date").iloc[-1]
-    fallback_date = pd.Timestamp(latest["Date"])
-    fallback_spread = float(latest["Spread"])
     info5 = percentile_with_history(
-        fallback_spread, seasonal_history, asset, fallback_date.month, pair_key, 5, before=fallback_date
+        float(current_spread), seasonal_history, asset, current_period.month, pair_key, 5,
+        before=current_period.to_timestamp()
     )
     info10 = percentile_with_history(
-        fallback_spread, seasonal_history, asset, fallback_date.month, pair_key, 10, before=fallback_date
+        float(current_spread), seasonal_history, asset, current_period.month, pair_key, 10,
+        before=current_period.to_timestamp()
     )
-    return finish(info5["percentile"], info10["percentile"], fallback_date,
-                  "HISTORICAL_FALLBACK_SAME_MONTH", info5, info10,
-                  month_specific=True, as_of_format="%Y-%m")
+    status = "CURRENT_SPREAD" if pd.notna(info5["percentile"]) or pd.notna(info10["percentile"]) else "N/A"
+    return finish(info5["percentile"], info10["percentile"], pd.Timestamp(as_of), status,
+                  info5, info10, month_specific=True, as_of_format="%Y-%m-%d")
 
 
 def _official_seasonal_percentiles(
@@ -348,8 +318,8 @@ def load_commodity_term_structure() -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
         current["Seasonal Pctl 10Y"] = current.get("Seasonal Pctl 10Y", np.nan)
         current["Current Month Seasonal Pctl 5Y"] = current["Seasonal Pctl 5Y"]
         current["Current Month Seasonal Pctl 10Y"] = current["Seasonal Pctl 10Y"]
-        # Until MTD reaches five synchronized business-day spreads, keep only the
-        # latest historical observation from the same calendar month as the fallback.
+        # These are current-spread percentiles. Historical rows are comparison
+        # samples only and are never promoted into the current signal.
         seasonal_results: list[dict[str, Any]] = []
         for _, row in current.iterrows():
             seasonal_results.append(_official_seasonal_result(row, seasonal_history, percentile_with_history))
@@ -456,7 +426,7 @@ def _price_at_or_before(series: pd.Series, target: pd.Timestamp) -> float:
 
 
 def price_returns_from_daily(series: pd.Series) -> dict[str, float]:
-    """Calculate current-price returns against prices 4/13/26/52 calendar weeks ago."""
+    """Calculate current-price returns against prices 4/13/26/52 weeks ago."""
     history = pd.to_numeric(series, errors="coerce").dropna().sort_index()
     if history.empty:
         return {label: np.nan for label in ("Return 1M", "Return 3M", "Return 6M", "Return 12M")}
@@ -470,7 +440,7 @@ def price_returns_from_daily(series: pd.Series) -> dict[str, float]:
 
 
 def load_monthly_prices() -> tuple[pd.DataFrame, dict[str, str]]:
-    """Fetch daily continuous-futures prices for current price and week-based momentum."""
+    """Fetch Yahoo daily continuous-futures prices for displayed price and charts."""
     try:
         import yfinance as yf
     except Exception as exc:
@@ -500,6 +470,77 @@ def load_monthly_prices() -> tuple[pd.DataFrame, dict[str, str]]:
         except Exception as exc:
             status[asset] = f"FAILED: {exc}"
     return (pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()), status
+
+
+def load_tradingview_performance_prices(
+    fallback_prices: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, dict[str, str], dict[str, str]]:
+    """Fetch TradingView weekly closes, falling back to Yahoo daily closes per asset."""
+    try:
+        from tradingview_mcp import get_ohlcv_data
+    except Exception as exc:
+        get_ohlcv_data = None
+        client_error = f"TradingView MCP client unavailable ({exc})"
+    else:
+        client_error = ""
+
+    frames: list[pd.Series] = []
+    status: dict[str, str] = {}
+    source: dict[str, str] = {}
+    for asset, symbol in PERFORMANCE_TV_SYMBOLS.items():
+        tv_error = client_error
+        series = pd.Series(dtype=float)
+        if get_ohlcv_data is None:
+            tv_error = client_error
+        else:
+            for attempt in range(2):
+                try:
+                    bars = get_ohlcv_data(symbol, interval="1W", count=500, force=True)
+                    if bars is None or bars.empty or not {"date", "close"}.issubset(bars.columns):
+                        tv_error = f"empty/invalid OHLCV response for {symbol}"
+                    else:
+                        dates = pd.to_datetime(bars["date"], errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
+                        closes = pd.to_numeric(bars["close"], errors="coerce")
+                        series = pd.Series(closes.to_numpy(), index=dates).dropna()
+                        series = series.loc[~series.index.isna()].groupby(level=0).last().sort_index()
+                        if series.empty:
+                            tv_error = f"empty/invalid OHLCV response for {symbol}"
+                        else:
+                            break
+                except Exception as exc:
+                    tv_error = f"{type(exc).__name__}: {exc}"
+                if attempt == 0:
+                    continue
+            if not series.empty:
+                series.name = asset
+                frames.append(series)
+                source[asset] = "TradingView MCP"
+                age_days = (pd.Timestamp.now().normalize() - series.index[-1].normalize()).days
+                freshness = "STALE" if age_days > 7 else "CURRENT"
+                status[asset] = f"{freshness}: {series.index[-1].date().isoformat()} via TradingView MCP weekly ({symbol})"
+                continue
+
+        yahoo = pd.Series(dtype=float)
+        if fallback_prices is not None and asset in fallback_prices:
+            yahoo = pd.to_numeric(fallback_prices[asset], errors="coerce").dropna().sort_index()
+        if not yahoo.empty:
+            yahoo.index = pd.to_datetime(yahoo.index, errors="coerce", utc=True).tz_localize(None).normalize()
+            yahoo = yahoo.loc[~yahoo.index.isna()].groupby(level=0).last().sort_index()
+            yahoo.name = asset
+            frames.append(yahoo)
+            source[asset] = "Yahoo Finance"
+            age_days = (pd.Timestamp.now().normalize() - yahoo.index[-1].normalize()).days
+            freshness = "STALE" if age_days > 7 else "CURRENT"
+            ticker = PRICE_TICKERS[asset]
+            status[asset] = (
+                f"{freshness}: {yahoo.index[-1].date().isoformat()} via Yahoo Finance fallback ({ticker}); "
+                f"TradingView unavailable: {tv_error}"
+            )
+        else:
+            source[asset] = "N/A"
+            status[asset] = f"MISSING: TradingView ({tv_error}); Yahoo Finance ({PRICE_TICKERS[asset]}) also unavailable"
+    prices = pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()
+    return prices, status, source
 
 
 def cftc_snapshot_from_master(
@@ -603,6 +644,8 @@ def build_market_confirmation(
     term_history: pd.DataFrame,
     term_current: pd.DataFrame,
     cftc: dict[str, dict[str, Any]],
+    performance_prices: pd.DataFrame | None = None,
+    performance_sources: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Compute commodity and sector snapshots from prices, current live curves and canonical CFTC."""
     from commodity_cycle.model import (
@@ -616,9 +659,12 @@ def build_market_confirmation(
     )
 
     current_rows: list[dict[str, Any]] = []
+    performance_prices = performance_prices if performance_prices is not None else pd.DataFrame()
+    performance_sources = performance_sources or {}
     for asset in PRICE_TICKERS:
         price = monthly_prices.get(asset, pd.Series(dtype=float)).dropna() if not monthly_prices.empty else pd.Series(dtype=float)
-        returns = price_returns_from_daily(price)
+        performance = performance_prices.get(asset, pd.Series(dtype=float)).dropna() if not performance_prices.empty else pd.Series(dtype=float)
+        returns = price_returns_from_daily(performance)
         r1, r3, r6, r12 = (returns[label] for label in ("Return 1M", "Return 3M", "Return 6M", "Return 12M"))
         pstate = classify_commodity_price_momentum(r3, r6, r12)
         curve = term_current.loc[term_current["Asset"].eq(asset)] if not term_current.empty else pd.DataFrame()
@@ -638,6 +684,8 @@ def build_market_confirmation(
             "Commodity": asset,
             "Price": float(price.iloc[-1]) if len(price) else np.nan,
             "Price Date": price.index[-1] if len(price) else pd.NaT,
+            "Performance As Of": performance.index[-1] if len(performance) else pd.NaT,
+            "Analytics Return Source": performance_sources.get(asset, "N/A"),
             "Return 1M": r1, "Return 3M": r3, "Return 6M": r6, "Return 12M": r12,
             "Price State": pstate,
             "Term Structure As Of": curve_row.get("As Of"),
@@ -689,6 +737,7 @@ def build_market_confirmation(
         ) if c else "N/A"
         row["As Of Alignment"] = _as_of_alignment(
             row.get("Price Date"),
+            row.get("Performance As Of"),
             row.get("Term Structure As Of"),
             row.get("CFTC As Of"),
             row.get("Seasonal Percentile As Of"),
