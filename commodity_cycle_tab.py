@@ -139,7 +139,7 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         ("PPI Confirmation", current.get("PPI Confirmation", "N/A")),
         (
             "CAPEX Full-History Percentile",
-            f"{_fmt(capex_current.get('CAPEX Current Percentile'), '%')} ({_format_state(capex_current.get('CAPEX Direction', 'N/A'))})",
+            f"{_fmt(capex_current.get('CAPEX Current Percentile'), '%')} ({_fmt(capex_current.get('CAPEX 24M Change'), '%')})",
         ),
     ]
     with st.container(key="commodity-cycle-summary"):
@@ -148,53 +148,41 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
             with cards[idx % 4]:
                 st.metric(label, _format_state(value))
 
-    overview, market = st.tabs(["Overview", "Market Confirmation"])
-    with overview:
-        _range_picker("commodity_cycle_overview_range")
-        if history.empty:
-            st.info("The FRED Inventory/Sales model is unavailable. Check the data diagnostics below; market and positioning sections remain available where their feeds loaded.")
-        else:
-            _render_ppi_core_chart(history, st.session_state["commodity_cycle_overview_range"])
-            view = st.radio("Regime shading", ["Final State", "Final State 2"], index=1, horizontal=True,
-                            key="commodity_cycle_final_view_v2")
-            _render_final_state_chart(history, st.session_state["commodity_cycle_overview_range"], view)
+    _range_picker("commodity_cycle_overview_range")
+    selected_range = st.session_state["commodity_cycle_overview_range"]
+    if history.empty:
+        st.info("The FRED Inventory/Sales model is unavailable. Check Diagnostics / Data below; market and positioning sections remain available where their feeds loaded.")
+    else:
+        _render_ppi_core_chart(history, selected_range)
+        view = st.radio("Regime shading", ["Final State", "Final State 2"], index=1, horizontal=True,
+                        key="commodity_cycle_final_view_v2")
+        _render_final_state_chart(history, selected_range, view)
+    if not capex.empty:
+        _render_capex_intensity_chart(capex, history, selected_range)
+    if not history.empty:
+        st.markdown("#### FRED Inventory / Sales Regime")
+        _render_fred_heatmap(history)
+        st.markdown("#### Core stress and breadth diagnostics")
+        cols = [c for c in history if c.endswith("Rolling Stress") or c.endswith("Seasonal Stress")]
+        st.dataframe(history[cols].tail(24).round(1), use_container_width=True)
+
+    _render_market_section(
+        commodity,
+        sectors,
+        data["prices"],
+        data["term_history"],
+        data.get("term_diagnostics", pd.DataFrame()),
+    )
+
+    with st.expander("Diagnostics / Data", expanded=False):
         if not capex.empty:
-            st.markdown("#### CAPEX Vulnerability")
-            capex_metrics = st.columns(3)
-            capex_metrics[0].metric(
-                "CAPEX intensity",
-                _fmt(capex_current.get("CAPEX Intensity")),
-                help="E318RC1Q027SBEA / FPI; quarterly, not seasonally normalized.",
-            )
-            capex_metrics[1].metric(
-                "Full-history percentile",
-                _fmt(capex_current.get("CAPEX Current Percentile"), "%"),
-            )
-            capex_metrics[2].metric(
-                "24M direction",
-                f"{_fmt(capex_current.get('CAPEX 24M Change'), '%')} · {capex_current.get('CAPEX Direction', 'N/A')}",
-            )
-            _render_capex_intensity_chart(
-                capex, history, st.session_state["commodity_cycle_overview_range"]
-            )
-            _render_capex_charts(capex, history)
-            history_view = capex[["CAPEX Intensity", "CAPEX Expanding Percentile", "CAPEX Vulnerability RT", "CAPEX 24M Change", "CAPEX Direction"]].tail(20).copy()
+            st.markdown("#### CAPEX Intensity history")
+            history_view = capex[[
+                "CAPEX Intensity", "CAPEX Expanding Percentile", "CAPEX Vulnerability RT",
+                "CAPEX 24M Change", "CAPEX Direction",
+            ]].tail(20).copy()
             st.dataframe(history_view.round(3), use_container_width=True)
-        if not history.empty:
-            st.markdown("#### FRED Inventory / Sales Regime")
-            _render_fred_heatmap(history)
-            st.markdown("#### Core stress and breadth diagnostics")
-            cols = [c for c in history if c.endswith("Rolling Stress") or c.endswith("Seasonal Stress")]
-            st.dataframe(history[cols].tail(24).round(1), use_container_width=True)
         _render_diagnostics_section(data, commodity)
-    with market:
-        _render_market_section(
-            commodity,
-            sectors,
-            data["prices"],
-            data["term_history"],
-            data.get("term_diagnostics", pd.DataFrame()),
-        )
 
 
 def _render_market_section(
@@ -421,39 +409,7 @@ def _render_capex_intensity_chart(capex: pd.DataFrame, history: pd.DataFrame, se
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
-def _render_capex_charts(capex: pd.DataFrame, history: pd.DataFrame) -> None:
-    selected_range = st.session_state.get("commodity_cycle_overview_range", "10Y")
-    recent = _slice_range(capex, selected_range)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=recent.index, y=recent["CAPEX Vulnerability RT"], name="Vulnerability", line=dict(color="#fb7185")))
-    for low, high, color, label in (
-        (0, 20, "#22c55e", "Very Low / Low"), (20, 40, "#38bdf8", "Neutral"),
-        (40, 60, "#facc15", "Moderate-High"), (60, 80, "#f97316", "High"),
-        (80, 100, "#ef4444", "Extreme"),
-    ):
-        fig.add_hrect(y0=low, y1=high, fillcolor=color, opacity=0.08, line_width=0,
-                      annotation_text=label, annotation_position="top left")
-    fig.update_layout(template="plotly_dark", height=360, title="CAPEX Vulnerability — expanding, no look-ahead percentile",
-                      margin=dict(l=35, r=30, t=50, b=35), legend=dict(orientation="h"))
-    fig.update_yaxes(title_text="Vulnerability (100 − expanding percentile)", range=[0, 100])
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-    if not history.empty:
-        common = history[["Final State 2"]].join(capex[["CAPEX Vulnerability RT"]], how="inner").dropna()
-        common = _slice_range(common, selected_range)
-        if not common.empty:
-            overlay = go.Figure()
-            _add_state_bands(overlay, common, "Final State 2", FINAL_COLORS)
-            overlay.add_trace(go.Scatter(x=common.index, y=common["CAPEX Vulnerability RT"], name="CAPEX Vulnerability RT",
-                                         showlegend=False, line=dict(color="white", width=2), connectgaps=False))
-            _add_state_legend(overlay, common, "Final State 2", FINAL_COLORS)
-            overlay.update_layout(template="plotly_dark", height=420, title="CAPEX Vulnerability + Final State 2",
-                                  yaxis_title="Vulnerability", margin=dict(l=35, r=20, t=55, b=105),
-                                  legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="left", x=0, title_text="State"))
-            st.plotly_chart(overlay, use_container_width=True, config={"displayModeBar": False})
-
-
 def _render_diagnostics_section(data: dict[str, Any], commodity: pd.DataFrame) -> None:
-    st.markdown("#### Diagnostics / Data")
     _render_data_status(data)
     st.caption("The bundled workbook remains the immutable baseline for Energy and Metals. The downloadable workbook below is generated from the live engine and includes reconstructed Agriculture seasonal history when available.")
     if not commodity.empty:
