@@ -33,6 +33,15 @@ FINAL_COLORS = {
     "Disinflation Transition": "#22c55e", "Confirmed Disinflation": "#0ea5e9",
     "Broad Inflation": "#f97316", "N/A": "#64748b",
 }
+PRIMARY_COMMODITY_COLUMNS = (
+    "Sector", "Commodity", "Price", "Return 3M", "Return 6M", "Return 12M", "Price State",
+    "Curve Spread", "Raw Curve State", "MM Net % OI", "4W Change", "13W Change", "5Y Percentile",
+    "Seasonal Percentile 5Y", "CFTC Relative State", "Seasonal Curve State", "Price × Curve",
+    "Price Date", "Term Structure As Of",
+)
+PERCENT_COLUMNS = {
+    "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread",
+}
 
 
 @st.cache_data(show_spinner="Loading Commodity Cycle data…", ttl=TTL_SECONDS)
@@ -163,19 +172,11 @@ def _render_market_section(commodity: pd.DataFrame, sectors: pd.DataFrame, price
     if commodity.empty:
         st.info("No commodity market observations are currently available.")
     else:
-        display_cols = [c for c in [
-        "Sector", "Commodity", "Price", "Price Date", "Return 3M", "Return 6M", "Return 12M", "Price State",
-            "Term Structure As Of", "Leg 1", "Leg 2", "F1 Symbol", "F3 Symbol", "F6 Symbol", "Term Structure Structure", "Term Structure Source",
-            "CurveDataQuality", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status",
-            "Rollover Date", "Rollover Method", "Days To Expiry", "5Y HistoryN", "5Y HistoryStartDate", "5Y HistoryEndDate", "5Y HistoryStatus", "10Y HistoryN", "10Y HistoryStartDate", "10Y HistoryEndDate", "10Y HistoryStatus",
-            "Curve Spread", "Raw Curve State", "Seasonal Percentile 5Y", "Seasonal Percentile 10Y", "Seasonal Curve State", "Price × Curve",
-            "MM Net % OI", "Net Direction", "3Y Percentile", "5Y Percentile", "CFTC Relative State", "4W Change", "13W Change", "Updated Date", "CFTC Status", "Price Status", "Term Structure Status",
-        ] if c in commodity]
-        shown = commodity[display_cols].copy()
-        for col in ("Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread"):
-            if col in shown:
-                shown[col] = pd.to_numeric(shown[col], errors="coerce").map(lambda x: f"{x:.1%}" if pd.notna(x) else "N/A")
-        st.dataframe(shown, use_container_width=True, hide_index=True)
+        primary, auxiliary = _commodity_confirmation_frames(commodity)
+        st.dataframe(_style_commodity_table(primary, highlight_primary=True), use_container_width=True, hide_index=True)
+        if not auxiliary.empty:
+            st.markdown("#### Additional commodity diagnostics")
+            st.dataframe(_style_commodity_table(auxiliary), use_container_width=True, hide_index=True)
         st.markdown("#### Price momentum × CFTC positioning")
         fig = go.Figure()
         for _, row in commodity.iterrows():
@@ -188,6 +189,64 @@ def _render_market_section(commodity: pd.DataFrame, sectors: pd.DataFrame, price
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
         asset = st.selectbox("Commodity drill-down", commodity["Commodity"].tolist(), key="commodity_cycle_drilldown")
         _render_commodity_drilldown(asset, prices, term_history)
+
+
+def _commodity_confirmation_frames(commodity: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    primary_columns = [column for column in PRIMARY_COMMODITY_COLUMNS if column in commodity]
+    primary = commodity.loc[:, primary_columns].copy()
+    identifiers = [column for column in ("Sector", "Commodity") if column in commodity]
+    diagnostic_columns = [column for column in commodity if column not in PRIMARY_COMMODITY_COLUMNS]
+    auxiliary_columns = identifiers + [column for column in diagnostic_columns if column not in identifiers]
+    auxiliary = commodity.loc[:, auxiliary_columns].copy() if auxiliary_columns else pd.DataFrame(index=commodity.index)
+    return primary, auxiliary
+
+
+def _commodity_numeric_formatters(frame: pd.DataFrame) -> dict[str, str]:
+    formatters: dict[str, str] = {}
+    for column in frame.select_dtypes(include=[np.number]).columns:
+        formatters[column] = "{:.2%}" if column in PERCENT_COLUMNS else "{:.2f}"
+    return formatters
+
+
+def _return_gradient_styles(values: pd.Series) -> list[str]:
+    numeric = pd.to_numeric(values, errors="coerce")
+    valid = numeric.dropna()
+    if valid.empty:
+        return ["" for _ in values]
+    low, high = float(valid.min()), float(valid.max())
+    styles = []
+    for value in numeric:
+        if pd.isna(value):
+            styles.append("")
+            continue
+        ratio = 0.5 if high == low else (float(value) - low) / (high - low)
+        if ratio <= 0.5:
+            start, end, blend = (127, 29, 29), (133, 77, 14), ratio * 2
+        else:
+            start, end, blend = (133, 77, 14), (20, 83, 45), (ratio - 0.5) * 2
+        red, green, blue = (round(start[i] + (end[i] - start[i]) * blend) for i in range(3))
+        styles.append(f"background-color: rgb({red}, {green}, {blue}); color: #ffffff")
+    return styles
+
+
+def _raw_curve_state_style(value: Any) -> str:
+    state = str(value).strip().lower()
+    if state == "contango":
+        return "background-color: #14532d; color: #ffffff"
+    if state == "backwardation":
+        return "background-color: #7f1d1d; color: #ffffff"
+    return ""
+
+
+def _style_commodity_table(frame: pd.DataFrame, *, highlight_primary: bool = False) -> pd.io.formats.style.Styler:
+    styled = frame.style.format(_commodity_numeric_formatters(frame), na_rep="N/A")
+    if highlight_primary:
+        returns = [column for column in ("Return 3M", "Return 6M", "Return 12M") if column in frame]
+        if returns:
+            styled = styled.apply(_return_gradient_styles, subset=returns)
+        if "Raw Curve State" in frame:
+            styled = styled.map(_raw_curve_state_style, subset=["Raw Curve State"])
+    return styled
 
 
 def _render_commodity_drilldown(asset: str, prices: pd.DataFrame, term_history: pd.DataFrame) -> None:
