@@ -14,7 +14,9 @@ import pandas as pd
 
 from commodity_cycle.term_structure import (
     AGRICULTURE, ENERGY, METALS, MONTH_CODES, TERM_DB_PATH,
-    _contract_expiry, _tradingview_quote, contract_symbol, quote_is_fresh,
+    _contract_expiry, _exchange_today, _tradingview_quote, cme_cl_business_days_between,
+    exchange_trading_date,
+    contract_symbol, quote_is_fresh, validate_cl_expiration,
 )
 
 
@@ -37,6 +39,10 @@ class ExpectedContract:
     expiry: pd.Timestamp
     first_notice: pd.Timestamp | None
     exchange: str
+
+    def __post_init__(self) -> None:
+        if self.asset == "WTI":
+            validate_cl_expiration(self.delivery_year, self.delivery_month, self.expiry)
 
 
 class TermStructureContractProvider:
@@ -83,7 +89,10 @@ class YahooFuturesProvider(TermStructureContractProvider):
                 out["open_interest"] = np.nan  # Yahoo historical daily OI is not exposed by yfinance.
                 out["source"] = self.name
                 out = out.loc[~out.index.isna()].dropna(subset=["price"]).sort_index()
+                exchange_today = _exchange_today()
+                out, normalization = normalize_completed_daily_bars(out, exchange_today)
                 if not out.empty:
+                    out.attrs["normalization_diagnostics"] = normalization
                     frames[symbol] = out
             except Exception:
                 continue
@@ -108,7 +117,7 @@ class YahooFuturesProvider(TermStructureContractProvider):
                     info = yf.Ticker(contract.symbol).get_info()
                     oi = pd.to_numeric(pd.Series([info.get("openInterest")]), errors="coerce").iloc[0]
                     if pd.notna(oi) and contract.symbol in frames:
-                        completed = frames[contract.symbol].index[frames[contract.symbol].index.date < date.today()]
+                        completed = frames[contract.symbol].index
                         if len(completed):
                             frames[contract.symbol].loc[completed[-1], "open_interest"] = float(oi)
                 except Exception:
@@ -389,16 +398,74 @@ class TermStructureStore:
         return dict(row) if row else {}
 
 
-def _completed_eod_frame(frame: pd.DataFrame, today: date) -> pd.DataFrame:
+def normalize_completed_daily_bars(
+    frame: pd.DataFrame,
+    today: date,
+    exchange_timezone: str = "America/Chicago",
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Normalize vendor daily bars to exchange dates and exclude current/partial sessions."""
+    diagnostics = {
+        "duplicate_rows_removed": 0,
+        "partial_rows_excluded": 0,
+        "final_valid_daily_bar_count": 0,
+        "latest_completed_trading_date": None,
+    }
     if frame is None or frame.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), diagnostics
     out = frame.copy()
-    out.index = pd.to_datetime(out.index, errors="coerce")
-    if out.index.tz is not None:
-        out.index = out.index.tz_convert("UTC").tz_localize(None)
-    out = out.loc[~out.index.isna()]
-    out = out.loc[out.index.date < today]
-    return out.sort_index().groupby(level=0).last()
+    source_index = pd.to_datetime(out.index, errors="coerce")
+    trading_dates: list[date | None] = []
+    normalized_timestamps: list[pd.Timestamp | pd.NaT] = []
+    label_priorities: list[int] = []
+    for value in source_index:
+        if pd.isna(value):
+            trading_dates.append(None)
+            normalized_timestamps.append(pd.NaT)
+            label_priorities.append(0)
+            continue
+        stamp = pd.Timestamp(value)
+        date_label = stamp.hour == 0 and stamp.minute == 0 and stamp.second == 0
+        if stamp.tzinfo is None:
+            trading_date = stamp.date() if date_label else exchange_trading_date(stamp, exchange_timezone)
+        elif date_label:
+            # Yahoo's 1D candles are date labels at midnight; preserve that label
+            # instead of shifting it to the prior date when converting zones.
+            trading_date = stamp.date()
+        else:
+            trading_date = exchange_trading_date(stamp, exchange_timezone)
+        trading_dates.append(trading_date)
+        normalized_timestamps.append(pd.Timestamp(trading_date))
+        label_priorities.append(int(date_label))
+    out.index = pd.DatetimeIndex(normalized_timestamps, name="trading_date")
+    out["_trading_date"] = trading_dates
+    out["_daily_label_priority"] = label_priorities
+    out = out.loc[out["_trading_date"].notna()]
+    if "price" in out:
+        prices = pd.to_numeric(out["price"], errors="coerce")
+        out = out.loc[prices.gt(0) & np.isfinite(prices)]
+    partial = out["_trading_date"].map(lambda value: value >= today)
+    diagnostics["partial_rows_excluded"] = int(partial.sum())
+    out = out.loc[~partial].copy()
+    if out.empty:
+        return out.drop(columns=["_trading_date", "_daily_label_priority"], errors="ignore"), diagnostics
+    diagnostics["duplicate_rows_removed"] = int(out.index.duplicated(keep="last").sum())
+    out = out.sort_values("_daily_label_priority", kind="stable")
+    out = out.loc[~out.index.duplicated(keep="last")]
+    out = out.drop(columns=["_trading_date", "_daily_label_priority"], errors="ignore").sort_index()
+    diagnostics["final_valid_daily_bar_count"] = int(len(out))
+    diagnostics["latest_completed_trading_date"] = out.index[-1].date().isoformat()
+    return out, diagnostics
+
+
+def _completed_eod_frame(frame: pd.DataFrame, today: date) -> pd.DataFrame:
+    # Backward-compatible frame-only wrapper used by existing callers/tests.
+    return normalize_completed_daily_bars(frame, today)[0]
+
+
+def _business_days_to_expiry(asset: str, start: date, end: date) -> int:
+    if asset == "WTI":
+        return cme_cl_business_days_between(start, end)
+    return int(np.busday_count(start, end))
 
 
 def _current_month_daily(rows: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
@@ -421,7 +488,7 @@ def _after_current_month_roll(rows: list[dict[str, Any]], roll: dict[str, Any], 
 
 
 def expected_contracts(asset: str, today: date | None = None) -> list[ExpectedContract]:
-    today = today or date.today()
+    today = today or _exchange_today()
     spec = CONTRACT_SPECS[asset]
     contracts = []
     for offset in range(spec["horizon_months"]):
@@ -478,10 +545,13 @@ def agriculture_contract_pair(asset: str, season_start_year: int) -> tuple[Expec
     return near, deferred
 
 
-def trading_day_dte(observation_date: pd.Timestamp | date | str, expiry: pd.Timestamp | date | str) -> int:
+def trading_day_dte(observation_date: pd.Timestamp | date | str, expiry: pd.Timestamp | date | str,
+                    asset: str | None = None) -> int:
     """Business-day DTE using the same convention for current and historical contracts."""
     observed = pd.Timestamp(observation_date).normalize().date()
     expiry_date = pd.Timestamp(expiry).normalize().date()
+    if asset == "WTI":
+        return cme_cl_business_days_between(observed, expiry_date)
     return int(np.busday_count(observed, expiry_date))
 
 
@@ -625,22 +695,20 @@ def _first_notice(year: int, month: int) -> pd.Timestamp:
 def _days_to_roll_date(contract: ExpectedContract) -> int:
     limit = contract.first_notice if contract.first_notice is not None else contract.expiry
     roll_day = pd.Timestamp(np.busday_offset(limit.date(), -HARD_ROLL_BUSINESS_DAYS, roll="backward"))
-    return int(np.busday_count(date.today(), roll_day.date()))
+    return _business_days_to_expiry(contract.asset, _exchange_today(), roll_day.date())
 
 
 def _expected_contract_frame(asset: str, contracts: list[ExpectedContract], histories: dict[str, pd.DataFrame], today: date,
-                             source: str) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+                             source: str,
+                             normalization_diagnostics: dict[str, dict[str, Any]] | None = None
+                             ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     diagnostics = []
     metrics = {}
+    normalization_diagnostics = normalization_diagnostics or {}
     for contract in contracts:
         frame = histories.get(contract.symbol, pd.DataFrame()).copy()
         if not frame.empty:
-            frame.index = pd.to_datetime(frame.index, errors="coerce")
-            if frame.index.tz is not None:
-                frame.index = frame.index.tz_convert("UTC").tz_localize(None)
-            frame = frame.loc[~frame.index.isna()].sort_index()
-            # A Yahoo bar dated today may still be an incomplete session. Only completed prior dates count.
-            frame = frame.loc[frame.index.date < today]
+            frame = _completed_eod_frame(frame, today)
         last_date = pd.Timestamp(frame.index[-1]).normalize() if not frame.empty else pd.NaT
         last = frame.iloc[-1] if not frame.empty else pd.Series(dtype=object)
         price = _number(last.get("price"))
@@ -672,9 +740,13 @@ def _expected_contract_frame(asset: str, contracts: list[ExpectedContract], hist
             "Volume": volume, "5D Cumulative Volume": volume5, "Open Interest": open_interest,
             "Recent Volume History": json.dumps({pd.Timestamp(dt).date().isoformat(): _number(value) for dt, value in frame.get("volume", pd.Series(dtype=float)).tail(5).items()}),
             "Recent Open Interest History": json.dumps({pd.Timestamp(dt).date().isoformat(): _number(value) for dt, value in frame.get("open_interest", pd.Series(dtype=float)).dropna().tail(5).items()}),
-            "Days To Expiry": int(np.busday_count(today, contract.expiry.date())) if contract.expiry.date() >= today else 0,
+            "Days To Expiry": _business_days_to_expiry(asset, today, contract.expiry.date()) if contract.expiry.date() >= today else 0,
             "Contract Status": status, "Rejection Reason": reason, "Selected As": "Not Selected",
             "Roll Method": None, "Source": (str(last.get("source")) if pd.notna(last.get("source")) else source),
+            "Duplicate Rows Removed": normalization_diagnostics.get(contract.symbol, {}).get("duplicate_rows_removed", 0),
+            "Partial Rows Excluded": normalization_diagnostics.get(contract.symbol, {}).get("partial_rows_excluded", 0),
+            "Final Valid Daily-Bar Count": len(frame),
+            "Latest Completed Trading Date": last_date.date().isoformat() if pd.notna(last_date) else None,
         })
     return diagnostics, metrics
 
@@ -704,7 +776,7 @@ def _active_front(asset: str, contracts: list[ExpectedContract], metrics: dict[s
     if index + 1 >= len(contracts):
         selected = contracts[index]
         meta = store.save_roll(asset, selected.symbol, None, "CALENDAR_FALLBACK", today,
-                               int(np.busday_count(today, selected.expiry.date())))
+                               _business_days_to_expiry(asset, today, selected.expiry.date()))
         return index, "CALENDAR_FALLBACK", meta
     current, nxt = contracts[index], contracts[index + 1]
     method = "HARD_EXPIRY_ROLL" if forced_expiry_roll else "CALENDAR_FALLBACK"
@@ -724,7 +796,7 @@ def _active_front(asset: str, contracts: list[ExpectedContract], metrics: dict[s
             method = "OPEN_INTEREST_CROSSOVER"
         else:
             hard_limit = current.first_notice if current.first_notice is not None else current.expiry
-            days_to_limit = int(np.busday_count(today, hard_limit.date()))
+            days_to_limit = _business_days_to_expiry(asset, today, hard_limit.date())
             if days_to_limit <= HARD_ROLL_BUSINESS_DAYS:
                 index += 1
                 method = "HARD_EXPIRY_ROLL"
@@ -738,7 +810,7 @@ def _active_front(asset: str, contracts: list[ExpectedContract], metrics: dict[s
     selected = contracts[min(index, len(contracts) - 1)]
     next_symbol = contracts[index - 1].symbol if index else None
     meta = store.save_roll(asset, selected.symbol, next_symbol, method, trigger_date,
-                           int(np.busday_count(today, selected.expiry.date())))
+                           _business_days_to_expiry(asset, today, selected.expiry.date()))
     return index, method, meta
 
 
@@ -942,18 +1014,19 @@ def _calculate_curve_seasonality(row: dict[str, Any], baseline: pd.DataFrame, mo
     current_month = pd.Timestamp(row["as_of"]).to_period("M") if pd.notna(row.get("as_of")) else pd.Period.now("M")
     history = seasonal_history_frame(baseline, monthly)
     result = {}
+    current_spread = _number(row.get("spread"))
     for n, label in ((5, "5Y"), (10, "10Y")):
-        info = percentile_with_history(float(row.get("mtd_spread", np.nan)), history, row["asset"], current_month.month,
+        info = percentile_with_history(current_spread, history, row["asset"], current_month.month,
                                       row["pair_key"], n, before=current_month.to_timestamp())
-        result[f"Seasonal Pctl {label}"] = info["percentile"] if int(row.get("mtd_observation_count", 0)) >= 5 else np.nan
+        result[f"Seasonal Pctl {label}"] = info["percentile"]
         result[f"{label} HistoryN"] = info["history_n"]
         result[f"{label} HistoryStartDate"] = info["history_start"]
         result[f"{label} HistoryEndDate"] = info["history_end"]
-        result[f"{label} HistoryStatus"] = info["history_status"] if int(row.get("mtd_observation_count", 0)) >= 5 else "PROVISIONAL_INSUFFICIENT_MTD_SAMPLE"
-    if int(row.get("mtd_observation_count", 0)) < 5:
-        result["current_seasonal_status"] = "PROVISIONAL / N/A"
-    elif pd.notna(result.get("Seasonal Pctl 5Y")):
-        result["current_seasonal_status"] = "OFFICIAL" if pd.notna(result.get("Seasonal Pctl 10Y")) else "OFFICIAL_5Y / INSUFFICIENT_10Y_HISTORY"
+        result[f"{label} HistoryStatus"] = info["history_status"]
+    if not np.isfinite(current_spread):
+        result["current_seasonal_status"] = "N/A_CURRENT_SPREAD_UNAVAILABLE"
+    elif pd.notna(result.get("Seasonal Pctl 5Y")) or pd.notna(result.get("Seasonal Pctl 10Y")):
+        result["current_seasonal_status"] = "CURRENT_SPREAD"
     else:
         result["current_seasonal_status"] = "INSUFFICIENT_SEASONAL_HISTORY"
     return result
@@ -969,7 +1042,7 @@ def _load_agriculture_seasonal_history(
     today: date | None = None,
 ) -> pd.DataFrame:
     """Load/cache expired contracts and create ten DTE-aligned seasonal observations."""
-    today = today or date.today()
+    today = today or _exchange_today()
     pairs = [
         agriculture_contract_pair(asset, year)
         for year in range(int(current_season_start_year) - 10, int(current_season_start_year))
@@ -1029,7 +1102,7 @@ def fetch_current_term_structure(store: TermStructureStore, baseline: pd.DataFra
                                  fallback_provider: TermStructureContractProvider | None = None,
                                  lme_provider: WestmetallLMEProvider | None = None) -> dict[str, pd.DataFrame]:
     """Deterministic refresh: calendar → quote histories → validation → legs → daily/monthly curves."""
-    today = today or date.today()
+    today = today or _exchange_today()
     refresh_id = datetime.now(timezone.utc).isoformat(timespec="seconds")
     yahoo = yahoo_provider or YahooFuturesProvider()
     fallback = fallback_provider or TradingViewFuturesProvider()
@@ -1050,17 +1123,44 @@ def fetch_current_term_structure(store: TermStructureStore, baseline: pd.DataFra
             source = fallback.name
         except Exception:
             fresh_histories = {}
-    histories = {symbol: _completed_eod_frame(frame, today) for symbol, frame in fresh_histories.items()}
-    histories = {symbol: frame for symbol, frame in histories.items() if not frame.empty}
+    histories: dict[str, pd.DataFrame] = {}
+    normalization_diagnostics: dict[str, dict[str, Any]] = {}
+    for symbol, raw_frame in fresh_histories.items():
+        provider_stats = dict(raw_frame.attrs.get("normalization_diagnostics", {}))
+        frame, stats = normalize_completed_daily_bars(raw_frame, today)
+        if frame.empty:
+            continue
+        histories[symbol] = frame
+        if provider_stats:
+            stats = {
+                "duplicate_rows_removed": int(provider_stats.get("duplicate_rows_removed", 0)) + int(stats.get("duplicate_rows_removed", 0)),
+                "partial_rows_excluded": int(provider_stats.get("partial_rows_excluded", 0)) + int(stats.get("partial_rows_excluded", 0)),
+                "final_valid_daily_bar_count": len(frame),
+                "latest_completed_trading_date": frame.index[-1].date().isoformat(),
+            }
+        normalization_diagnostics[symbol] = stats
     fresh_histories = histories.copy()
     # Merge local observations so two-session crossovers can survive transient fetch gaps.
     old_history = store.quote_history(item.symbol for item in contracts)
     for symbol, old in old_history.items():
+        normalized_old, old_stats = normalize_completed_daily_bars(old, today)
         new = histories.get(symbol, pd.DataFrame())
         if not new.empty:
-            histories[symbol] = pd.concat([old, new]).sort_index().groupby(level=0).last()
-        elif symbol not in histories:
-            histories[symbol] = old
+            merged, merge_stats = normalize_completed_daily_bars(pd.concat([normalized_old, new]), today)
+            histories[symbol] = merged
+            fresh_stats = normalization_diagnostics.get(symbol, {})
+            normalization_diagnostics[symbol] = {
+                "duplicate_rows_removed": int(fresh_stats.get("duplicate_rows_removed", 0))
+                + int(old_stats.get("duplicate_rows_removed", 0))
+                + int(merge_stats.get("duplicate_rows_removed", 0)),
+                "partial_rows_excluded": int(fresh_stats.get("partial_rows_excluded", 0))
+                + int(old_stats.get("partial_rows_excluded", 0)),
+                "final_valid_daily_bar_count": len(merged),
+                "latest_completed_trading_date": merged.index[-1].date().isoformat() if not merged.empty else None,
+            }
+        elif not normalized_old.empty:
+            histories[symbol] = normalized_old
+            normalization_diagnostics[symbol] = old_stats
     store.save_quotes(fetchable_contracts, fresh_histories, refresh_id)
     current_rows: list[dict[str, Any]] = []
     daily_rows: list[dict[str, Any]] = []
@@ -1068,7 +1168,7 @@ def fetch_current_term_structure(store: TermStructureStore, baseline: pd.DataFra
     for asset, group in universes.items():
         fetchable_group = [c for c in group if c.expiry.date() >= today]
         asset_source = source
-        diag, metrics = _expected_contract_frame(asset, group, histories, today, asset_source)
+        diag, metrics = _expected_contract_frame(asset, group, histories, today, asset_source, normalization_diagnostics)
         diagnostics_rows.extend(diag)
         active_group = [item for item in group if item.expiry.date() >= today]
         if not active_group and asset not in METALS:
@@ -1085,14 +1185,29 @@ def fetch_current_term_structure(store: TermStructureStore, baseline: pd.DataFra
             if source == yahoo.name and failed_required:
                 try:
                     tv = fallback.fetch_contracts(failed_required)
-                    tv = {symbol: _completed_eod_frame(frame, today) for symbol, frame in tv.items()}
-                    tv = {symbol: frame for symbol, frame in tv.items() if not frame.empty}
+                    normalized_tv = {}
+                    for symbol, frame in tv.items():
+                        completed, stats = normalize_completed_daily_bars(frame, today)
+                        if not completed.empty:
+                            normalized_tv[symbol] = completed
+                            normalization_diagnostics[symbol] = stats
+                    tv = normalized_tv
                     if tv:
-                        histories.update(tv)
+                        for symbol, frame in tv.items():
+                            merged, stats = normalize_completed_daily_bars(
+                                pd.concat([histories.get(symbol, pd.DataFrame()), frame]), today
+                            )
+                            histories[symbol] = merged
+                            normalization_diagnostics[symbol].update({
+                                "duplicate_rows_removed": normalization_diagnostics[symbol].get("duplicate_rows_removed", 0)
+                                + stats.get("duplicate_rows_removed", 0),
+                                "final_valid_daily_bar_count": len(merged),
+                                "latest_completed_trading_date": merged.index[-1].date().isoformat() if not merged.empty else None,
+                            })
                         fresh_histories.update(tv)
                         store.save_quotes(failed_required, tv, refresh_id)
                         diagnostics_rows = [r for r in diagnostics_rows if r.get("Asset") != asset]
-                        diag, metrics = _expected_contract_frame(asset, group, histories, today, fallback.name)
+                        diag, metrics = _expected_contract_frame(asset, group, histories, today, fallback.name, normalization_diagnostics)
                         diagnostics_rows.extend(diag)
                         index, roll_method, roll = _active_front(asset, active_group, metrics, histories, store, today)
                         active = active_group[index]
@@ -1134,7 +1249,7 @@ def fetch_current_term_structure(store: TermStructureStore, baseline: pd.DataFra
                 row["season_start_year"] = active.delivery_year
                 row["current_near_expiry"] = active.expiry
                 row["current_near_dte"] = (
-                    trading_day_dte(row["as_of"], active.expiry)
+                    trading_day_dte(row["as_of"], active.expiry, asset=asset)
                     if pd.notna(row.get("as_of")) else np.nan
                 )
                 daily_rows.extend(_after_current_month_roll(_current_month_daily(daily, today), roll, today))

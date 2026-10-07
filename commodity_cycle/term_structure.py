@@ -3,7 +3,8 @@ from __future__ import annotations
 import calendar
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -30,6 +31,25 @@ ALL_ASSETS = (*ENERGY, *AGRICULTURE, *METALS)
 TERM_DB_PATH = Path(__file__).resolve().parent.parent / "persistent" / "commodity_cycle" / "term_structure.sqlite3"
 
 
+def _exchange_today() -> date:
+    """Current NYMEX/CBOT trade date, independent of the app host's timezone."""
+    return exchange_trading_date(pd.Timestamp.now(tz="America/Chicago"))
+
+
+def exchange_trading_date(value: pd.Timestamp | datetime | str,
+                          exchange_timezone: str = "America/Chicago") -> date:
+    """Map a timestamp to the CME futures trade date (evening sessions belong to next day)."""
+    stamp = pd.Timestamp(value)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize(exchange_timezone)
+    else:
+        stamp = stamp.tz_convert(exchange_timezone)
+    # Globex sessions opening at 17:00 CT are assigned to the following trade
+    # date. Sunday evening is Monday's session; Friday evening is closed.
+    evening_session = stamp.hour >= 17 and stamp.weekday() in {0, 1, 2, 3, 6}
+    return (stamp.date() + timedelta(days=1)) if evening_session else stamp.date()
+
+
 @dataclass(frozen=True)
 class Quote:
     contract: str
@@ -46,7 +66,7 @@ def contract_symbol(root: str, month: int, year: int, exchange: str) -> str:
 
 def candidate_contracts(asset: str, today: date | None = None, years_ahead: int = 1) -> list[tuple[str, pd.Timestamp]]:
     """Generate listed delivery months dynamically; not tied to a fixed year."""
-    today = today or date.today()
+    today = today or _exchange_today()
     current_month = today.month
     current_year = today.year
     out: list[tuple[str, pd.Timestamp]] = []
@@ -77,14 +97,116 @@ def _third_business_day_before(value: pd.Timestamp) -> pd.Timestamp:
     return pd.Timestamp(np.busday_offset(previous.date(), -2))
 
 
+def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
+    first = date(year, month, 1)
+    return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (occurrence - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    last = date(year, month, calendar.monthrange(year, month)[1])
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+def _easter_sunday(year: int) -> date:
+    # Gregorian computus; CME Globex is closed on Good Friday.
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = (h + l - 7 * m + 114) % 31 + 1
+    return date(year, month, day)
+
+
+def _observed_fixed_holiday(year: int, month: int, day: int) -> date:
+    holiday = date(year, month, day)
+    if holiday.weekday() == 5:
+        return holiday - timedelta(days=1)
+    if holiday.weekday() == 6:
+        return holiday + timedelta(days=1)
+    return holiday
+
+
+@lru_cache(maxsize=None)
+def cme_cl_holidays(year: int) -> frozenset[date]:
+    """CME/NYMEX full closure dates used when applying the CL termination rule."""
+    holidays = {
+        _observed_fixed_holiday(year, 1, 1),
+        _nth_weekday(year, 1, 0, 3),       # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),       # Presidents Day
+        _easter_sunday(year) - timedelta(days=2),  # Good Friday
+        _last_weekday(year, 5, 0),         # Memorial Day
+        _observed_fixed_holiday(year, 7, 4),
+        _nth_weekday(year, 9, 0, 1),       # Labor Day
+        _nth_weekday(year, 11, 3, 4),      # Thanksgiving
+        _observed_fixed_holiday(year, 12, 25),
+    }
+    if year >= 2022:
+        holidays.add(_observed_fixed_holiday(year, 6, 19))  # Juneteenth
+    return frozenset(holidays)
+
+
+def is_cme_cl_business_day(value: date) -> bool:
+    return value.weekday() < 5 and value not in cme_cl_holidays(value.year)
+
+
+def _previous_cme_cl_business_day(value: date, *, include_value: bool = False) -> date:
+    candidate = value if include_value else value - timedelta(days=1)
+    while not is_cme_cl_business_day(candidate):
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _cl_expiry(delivery_year: int, delivery_month: int) -> pd.Timestamp:
+    """NYMEX CL last trade date: 3 CME business days before the 25th prior month.
+
+    When the 25th is not a CME business day, use the preceding CME business
+    day as the reference date, then count three further CME business days back.
+    """
+    prior_month = pd.Timestamp(delivery_year, delivery_month, 1) - pd.Timedelta(days=1)
+    reference = date(prior_month.year, prior_month.month, 25)
+    if not is_cme_cl_business_day(reference):
+        reference = _previous_cme_cl_business_day(reference, include_value=False)
+    expiry = reference
+    for _ in range(3):
+        expiry = _previous_cme_cl_business_day(expiry)
+    if not is_cme_cl_business_day(expiry):
+        raise ValueError(f"Calculated CL expiry is not a CME business day: {expiry}")
+    return pd.Timestamp(expiry)
+
+
+def validate_cl_expiration(delivery_year: int, delivery_month: int,
+                           expiration: pd.Timestamp | date | str) -> pd.Timestamp:
+    """Reject any CL expiry that does not match the holiday-adjusted NYMEX rule."""
+    actual = pd.Timestamp(expiration).normalize()
+    expected = _cl_expiry(delivery_year, delivery_month).normalize()
+    if actual != expected or not is_cme_cl_business_day(actual.date()):
+        raise ValueError(
+            f"Invalid NYMEX CL expiration for {delivery_year}-{delivery_month:02d}: "
+            f"{actual.date()} (expected {expected.date()})"
+        )
+    return actual
+
+
+def cme_cl_business_days_between(start: date, end: date) -> int:
+    """Count CME/NYMEX business days in [start, end), matching numpy.busday_count."""
+    if end <= start:
+        return 0
+    return sum(is_cme_cl_business_day(start + timedelta(days=offset))
+               for offset in range((end - start).days))
+
+
 def _contract_expiry(asset: str, year: int, month: int) -> pd.Timestamp:
-    """Approximate exchange last-trade dates to exclude already expired deliveries."""
+    """Return contract last-trade dates; CL uses CME holiday-aware termination dates."""
     first_of_delivery = pd.Timestamp(year, month, 1)
     prior_month_end = first_of_delivery - pd.Timedelta(days=1)
     if asset == "WTI":
-        # NYMEX WTI: third business day before the 25th calendar day of the prior month.
-        reference = prior_month_end.replace(day=min(25, prior_month_end.day))
-        return _third_business_day_before(reference)
+        return validate_cl_expiration(year, month, _cl_expiry(year, month))
     if asset == "Natural Gas":
         # NYMEX NG: third business day before the first calendar day of delivery month.
         return _third_business_day_before(first_of_delivery)
@@ -100,7 +222,7 @@ def _contract_expiry(asset: str, year: int, month: int) -> pd.Timestamp:
 
 def quote_is_fresh(observed_at: pd.Timestamp | date | str, today: date | None = None, max_business_days: int = 3) -> bool:
     observed = pd.Timestamp(observed_at).date()
-    today = today or date.today()
+    today = today or _exchange_today()
     if observed > today:
         return False
     elapsed = int(np.busday_count(observed, today))
@@ -118,9 +240,8 @@ def _yahoo_quote(symbol: str) -> tuple[float, pd.Timestamp] | None:
     if close.empty:
         return None
     observed = pd.Timestamp(close.index[-1])
-    if observed.tzinfo is not None:
-        observed = observed.tz_convert("UTC").tz_localize(None)
-    return float(close.iloc[-1]), observed.normalize()
+    observed_date = observed.date() if observed.hour == 0 and observed.minute == 0 else exchange_trading_date(observed)
+    return float(close.iloc[-1]), pd.Timestamp(observed_date)
 
 
 def _collect_yahoo_quotes(asset: str, today: date | None = None, quote_fetcher: Callable | None = None) -> list[Quote]:
@@ -137,8 +258,8 @@ def _collect_yahoo_quotes(asset: str, today: date | None = None, quote_fetcher: 
                 price, observed_at = result
                 source = "Yahoo Finance individual futures"
             observed = pd.Timestamp(observed_at)
-            if observed.tzinfo is not None:
-                observed = observed.tz_convert("UTC").tz_localize(None)
+            if observed.hour != 0 or observed.minute != 0:
+                observed = pd.Timestamp(exchange_trading_date(observed))
             if price is None or not np.isfinite(float(price)) or float(price) <= 0:
                 continue
             if not quote_is_fresh(observed, today=today):
@@ -185,7 +306,7 @@ def _parse_westmetall(asset: str, request_get: Callable | None = None) -> dict |
 
 def make_rows(today: date | None = None, quote_fetcher: Callable | None = None, request_get: Callable | None = None) -> pd.DataFrame:
     """Fetch current spreads using individual Yahoo listed-contract symbols and Westmetall LME tables."""
-    today = today or date.today()
+    today = today or _exchange_today()
     rows: list[dict] = []
     def fetch_for(asset: str) -> Callable:
         if quote_fetcher:

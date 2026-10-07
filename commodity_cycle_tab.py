@@ -17,6 +17,7 @@ from commodity_cycle.data import (
     load_cftc_snapshot,
     load_fred_history,
     load_monthly_prices,
+    load_tradingview_performance_prices,
     load_commodity_term_structure,
 )
 from commodity_cycle.export import commodity_tables_to_xlsx
@@ -59,12 +60,17 @@ def load_commodity_cycle_snapshot(api_key: str | None, refresh_nonce: int = 0) -
     _ = refresh_nonce
     fred, fred_status = load_fred_history(api_key)
     prices, price_status = load_monthly_prices()
+    performance_prices, performance_status, performance_source = load_tradingview_performance_prices(prices)
     term_history, term_current, term_diagnostics = load_commodity_term_structure()
     cftc, cftc_status = load_cftc_snapshot()
     history, capex, term_history_rt = build_commodity_cycle_history(fred, prices, term_history)
-    commodity, sector = build_market_confirmation(prices, term_history_rt, term_current, cftc)
+    commodity, sector = build_market_confirmation(
+        prices, term_history_rt, term_current, cftc, performance_prices=performance_prices,
+        performance_sources=performance_source,
+    )
     if not commodity.empty:
         commodity["Price Status"] = commodity["Commodity"].map(price_status)
+        commodity["Performance Status"] = commodity["Commodity"].map(performance_status).fillna("MISSING")
         term_freshness: dict[str, str] = {}
         for _, row in term_current.iterrows():
             key = str(row["Asset"])
@@ -76,6 +82,8 @@ def load_commodity_cycle_snapshot(api_key: str | None, refresh_nonce: int = 0) -
         commodity["Term Structure Status"] = commodity["Commodity"].map(term_freshness).fillna("MISSING")
     return {
         "fred": fred, "fred_status": fred_status, "prices": prices, "price_status": price_status,
+        "performance_prices": performance_prices, "performance_status": performance_status,
+        "performance_source": performance_source,
         "term_history": term_history_rt, "term_current": term_current, "term_diagnostics": term_diagnostics, "cftc": cftc,
         "cftc_status": cftc_status, "history": history, "capex": capex,
         "commodity": commodity, "sector": sector,
@@ -165,7 +173,7 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         st.caption("The bundled workbook remains the immutable baseline for Energy and Metals. The downloadable workbook below is generated from the live engine and includes reconstructed Agriculture seasonal history when available.")
         if not commodity.empty:
             st.markdown("#### Input provenance")
-            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Term Structure As Of", "Term Structure Status", "As Of Alignment", "Price Data Quality", "Contract Selection Quality", "CurveDataQuality", "Leg 1", "Leg 2", "Curve Spread", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y", "Seasonal Percentile As Of", "Seasonal Percentile Status", "Seasonal Percentile 5Y HistoryN", "Seasonal Percentile 5Y HistoryStatus", "Seasonal Percentile 10Y", "Seasonal Percentile 10Y HistoryN", "Seasonal Percentile 10Y HistoryStatus", "Seasonal Percentile 10Y Explanation", "Current Curve Vendor", "Seasonal History Vendor", "Vendor Consistency", "Seasonal History Source", "Rollover Method", "Rollover Date", "Days To Expiry", "CFTC As Of", "CFTC Status", "Latest Official CFTC Report Date", "Series Present In Latest Report", "CFTC Contract Market Code", "CFTC Market Name", "CFTC Open Interest", "MM Long", "MM Short", "MM Spreading", "MM Net", "Net Direction", "CFTC Relative State", "History Weeks", "Last Available Date", "Last Available MM Net % OI", "Last Available COT 5Y Percentile", "Reason Current Signal Missing"] if c in commodity]], use_container_width=True)
+            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Performance As Of", "Analytics Return Source", "Performance Status", "Term Structure As Of", "Term Structure Status", "As Of Alignment", "Price Data Quality", "Contract Selection Quality", "CurveDataQuality", "Leg 1", "Leg 2", "Curve Spread", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y", "Seasonal Percentile As Of", "Seasonal Percentile Status", "Seasonal Percentile 5Y HistoryN", "Seasonal Percentile 5Y HistoryStatus", "Seasonal Percentile 10Y", "Seasonal Percentile 10Y HistoryN", "Seasonal Percentile 10Y HistoryStatus", "Seasonal Percentile 10Y Explanation", "Current Curve Vendor", "Seasonal History Vendor", "Vendor Consistency", "Seasonal History Source", "Rollover Method", "Rollover Date", "Days To Expiry", "CFTC As Of", "CFTC Status", "Latest Official CFTC Report Date", "Series Present In Latest Report", "CFTC Contract Market Code", "CFTC Market Name", "CFTC Open Interest", "MM Long", "MM Short", "MM Spreading", "MM Net", "Net Direction", "CFTC Relative State", "History Weeks", "Last Available Date", "Last Available MM Net % OI", "Last Available COT 5Y Percentile", "Reason Current Signal Missing"] if c in commodity]], use_container_width=True)
         diagnostics = data.get("term_diagnostics", pd.DataFrame())
         if not diagnostics.empty:
             seasonal = diagnostics.loc[diagnostics.get("Diagnostic Type", pd.Series(index=diagnostics.index, dtype=object)).eq("Agriculture Seasonal Structure")].copy()
@@ -428,6 +436,9 @@ def _render_data_status(data: dict[str, Any]) -> None:
         rows.append({"Data": name, "Provider": "FRED", "Status": status})
     for name, status in data["price_status"].items():
         rows.append({"Data": f"{name} price", "Provider": "Yahoo Finance", "Status": status})
+    for name, status in data.get("performance_status", {}).items():
+        provider = data.get("performance_source", {}).get(name, "TradingView MCP")
+        rows.append({"Data": f"{name} performance", "Provider": provider, "Status": status})
     for name, status in data["cftc_status"].items():
         rows.append({"Data": name, "Provider": "Shared CFTC positioning service", "Status": status})
     term = data["term_current"]
