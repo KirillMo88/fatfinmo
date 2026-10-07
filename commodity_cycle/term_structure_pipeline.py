@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -134,6 +135,45 @@ class TradingViewFuturesProvider(TermStructureContractProvider):
                 )
             except Exception:
                 continue
+        return frames
+
+    def fetch_historical_contracts(self, contracts: Iterable[ExpectedContract]) -> dict[str, pd.DataFrame]:
+        """Fetch full daily histories for individual expired futures contracts.
+
+        The TradingView MCP client owns its persistent per-symbol OHLCV cache. This
+        provider is only called for symbols that are absent from the term-structure
+        SQLite store, so completed contracts are not downloaded on every refresh.
+        """
+        contracts = list(contracts)
+        if not contracts:
+            return {}
+
+        def fetch_one(contract: ExpectedContract) -> tuple[str, pd.DataFrame | None]:
+            try:
+                from tradingview_mcp import get_ohlcv_data
+
+                symbol = _tradingview_contract_symbol(contract.symbol)
+                raw = get_ohlcv_data(symbol, interval="1D", count=5000, force=False)
+                if raw is None or raw.empty:
+                    return contract.symbol, None
+                out = pd.DataFrame(index=pd.to_datetime(raw["date"], errors="coerce"))
+                out["price"] = pd.to_numeric(raw["close"], errors="coerce").to_numpy()
+                out["volume"] = pd.to_numeric(raw.get("volume"), errors="coerce").to_numpy()
+                out["open_interest"] = np.nan
+                out["source"] = "TradingView MCP daily close"
+                out = out.loc[~out.index.isna()].dropna(subset=["price"]).sort_index()
+                out = out.loc[pd.to_numeric(out["price"], errors="coerce").gt(0)]
+                return contract.symbol, out if not out.empty else None
+            except Exception:
+                return contract.symbol, None
+
+        frames: dict[str, pd.DataFrame] = {}
+        with ThreadPoolExecutor(max_workers=min(6, len(contracts))) as pool:
+            futures = [pool.submit(fetch_one, contract) for contract in contracts]
+            for future in as_completed(futures):
+                symbol, frame = future.result()
+                if frame is not None and not frame.empty:
+                    frames[symbol] = frame
         return frames
 
 
@@ -396,6 +436,182 @@ def expected_contracts(asset: str, today: date | None = None) -> list[ExpectedCo
             month, int(period.year), expiry, first_notice, spec["suffix"],
         ))
     return sorted(contracts, key=lambda item: item.expiry)
+
+
+def _tradingview_contract_symbol(yahoo_symbol: str) -> str:
+    """Translate an individual Yahoo contract symbol into TradingView MCP syntax."""
+    import re
+
+    match = re.fullmatch(r"([A-Z]+)([FGHJKMNQUVXZ])(\d{2})\.(NYM|CBT)", yahoo_symbol)
+    if not match:
+        raise ValueError(f"Unsupported individual futures symbol: {yahoo_symbol}")
+    root, month_code, year_suffix, venue = match.groups()
+    exchange = "NYMEX" if venue == "NYM" else "CBOT"
+    return f"{exchange}:{root}{month_code}20{year_suffix}"
+
+
+def agriculture_contract_pair(asset: str, season_start_year: int) -> tuple[ExpectedContract, ExpectedContract]:
+    """Return the fixed structural CBOT pair for one crop season."""
+    if asset not in AGRICULTURE:
+        raise ValueError(f"Agriculture seasonal pair is not defined for {asset}")
+    root, suffix, _, near_month, deferred_month = AGRICULTURE[asset]
+    near_year = int(season_start_year)
+    deferred_year = near_year + 1
+    near = ExpectedContract(
+        asset=asset,
+        symbol=contract_symbol(root, near_month, near_year, suffix),
+        delivery_month=near_month,
+        delivery_year=near_year,
+        expiry=_contract_expiry(asset, near_year, near_month),
+        first_notice=_first_notice(near_year, near_month),
+        exchange=suffix,
+    )
+    deferred = ExpectedContract(
+        asset=asset,
+        symbol=contract_symbol(root, deferred_month, deferred_year, suffix),
+        delivery_month=deferred_month,
+        delivery_year=deferred_year,
+        expiry=_contract_expiry(asset, deferred_year, deferred_month),
+        first_notice=_first_notice(deferred_year, deferred_month),
+        exchange=suffix,
+    )
+    return near, deferred
+
+
+def trading_day_dte(observation_date: pd.Timestamp | date | str, expiry: pd.Timestamp | date | str) -> int:
+    """Business-day DTE using the same convention for current and historical contracts."""
+    observed = pd.Timestamp(observation_date).normalize().date()
+    expiry_date = pd.Timestamp(expiry).normalize().date()
+    return int(np.busday_count(observed, expiry_date))
+
+
+def agriculture_seasonal_observation(
+    asset: str,
+    season_start_year: int,
+    current_dte: int,
+    histories: dict[str, pd.DataFrame],
+    window: int = 5,
+) -> dict[str, Any]:
+    """Build one DTE-aligned representative median for a completed crop season."""
+    near, deferred = agriculture_contract_pair(asset, season_start_year)
+    near_frame = histories.get(near.symbol, pd.DataFrame()).copy()
+    deferred_frame = histories.get(deferred.symbol, pd.DataFrame()).copy()
+    season = f"{season_start_year}/{str(season_start_year + 1)[-2:]}"
+    base = {
+        "Diagnostic Type": "Agriculture Seasonal Structure",
+        "Asset": asset,
+        "Commodity": asset,
+        "Season": season,
+        "Season Start Year": int(season_start_year),
+        "Near Contract": f"{calendar.month_abbr[near.delivery_month]}-{near.delivery_year}",
+        "Deferred Contract": f"{calendar.month_abbr[deferred.delivery_month]}-{deferred.delivery_year}",
+        "Near Contract Symbol": near.symbol,
+        "Deferred Contract Symbol": deferred.symbol,
+        "TradingView Near Symbol": _tradingview_contract_symbol(near.symbol),
+        "TradingView Deferred Symbol": _tradingview_contract_symbol(deferred.symbol),
+        "PairKey": _pair_key(asset, near, deferred),
+        "Current Near DTE": int(current_dte),
+        "DTE Window": f"{max(1, current_dte - window)}–{current_dte + window} trading days",
+        "Source": "TradingView MCP daily close",
+        "Yahoo Symbol": f"SEASONAL:{asset}:{season}",
+    }
+    missing = []
+    if near_frame.empty:
+        missing.append(near.symbol)
+    if deferred_frame.empty:
+        missing.append(deferred.symbol)
+    if missing:
+        return {
+            **base,
+            "Matched DTE": np.nan,
+            "Valid N": 0,
+            "Median Seasonal Spread": np.nan,
+            "Matched Date Start": pd.NaT,
+            "Matched Date End": pd.NaT,
+            "Data Quality": "INVALID",
+            "Season Quality": "INVALID",
+            "Missing Contracts": ", ".join(missing),
+            "Rejection Reason": "MISSING_CONTRACT_HISTORY",
+        }
+
+    for frame in (near_frame, deferred_frame):
+        frame.index = pd.to_datetime(frame.index, errors="coerce").normalize()
+        frame.drop(frame.index[frame.index.isna()], inplace=True)
+        frame.sort_index(inplace=True)
+    common = near_frame.index.intersection(deferred_frame.index).sort_values()
+    observations = []
+    for dt in common:
+        dte = trading_day_dte(dt, near.expiry)
+        if dte <= 0 or abs(dte - int(current_dte)) > window:
+            continue
+        p1 = _number(near_frame.loc[dt].get("price"))
+        p2 = _number(deferred_frame.loc[dt].get("price"))
+        if not (np.isfinite(p1) and np.isfinite(p2) and p1 > 0 and p2 > 0):
+            continue
+        observations.append({"date": pd.Timestamp(dt), "dte": dte, "spread": p1 / p2 - 1})
+    sample = pd.DataFrame(observations)
+    count = len(sample)
+    if count >= 5:
+        quality, reason = "OK", "OK"
+    elif count >= 3:
+        quality, reason = "ACCEPTABLE", "ACCEPTABLE_3_TO_4_OBSERVATIONS"
+    else:
+        quality, reason = "INSUFFICIENT_DATA", "FEWER_THAN_3_DTE_MATCHED_OBSERVATIONS"
+    return {
+        **base,
+        "Matched DTE": float(sample["dte"].median()) if count else np.nan,
+        "Valid N": count,
+        "Median Seasonal Spread": float(sample["spread"].median()) if count >= 3 else np.nan,
+        "Matched Date Start": sample["date"].min() if count else pd.NaT,
+        "Matched Date End": sample["date"].max() if count else pd.NaT,
+        "Data Quality": quality,
+        "Season Quality": quality,
+        "Missing Contracts": "",
+        "Rejection Reason": reason,
+    }
+
+
+def agriculture_seasonal_percentile(
+    current_spread: float,
+    history: pd.DataFrame,
+    current_season_start_year: int,
+    years: int,
+) -> dict[str, Any]:
+    """Rank the current spread against one representative spread per prior season."""
+    minimum = 4 if years == 5 else 8 if years == 10 else years
+    start_year = int(current_season_start_year) - years
+    end_year = int(current_season_start_year) - 1
+    if history.empty:
+        sample = pd.DataFrame()
+    else:
+        sample = history.copy()
+        sample["Season Start Year"] = pd.to_numeric(sample["Season Start Year"], errors="coerce")
+        sample["Median Seasonal Spread"] = pd.to_numeric(sample["Median Seasonal Spread"], errors="coerce")
+        sample = sample.loc[
+            sample["Season Start Year"].between(start_year, end_year)
+            & sample["Data Quality"].isin(["OK", "ACCEPTABLE"])
+        ].dropna(subset=["Median Seasonal Spread"])
+        sample = sample.sort_values("Season Start Year").drop_duplicates("Season Start Year", keep="last")
+    count = len(sample)
+    if count >= minimum and np.isfinite(current_spread):
+        from commodity_cycle.model import midrank_percentile
+
+        percentile = midrank_percentile(float(current_spread), sample["Median Seasonal Spread"].to_numpy())
+    else:
+        percentile = np.nan
+    if count == years:
+        status = f"FULL_{years}_SEASONS"
+    elif count >= minimum:
+        status = f"ACCEPTABLE_{count}_OF_{years}_SEASONS"
+    else:
+        status = f"INSUFFICIENT_{years}Y_SEASONAL_HISTORY"
+    return {
+        "percentile": percentile,
+        "history_n": count,
+        "history_start": sample.iloc[0]["Season"] if count else None,
+        "history_end": sample.iloc[-1]["Season"] if count else None,
+        "history_status": status,
+    }
 
 
 def _first_notice(year: int, month: int) -> pd.Timestamp:
@@ -739,6 +955,71 @@ def _calculate_curve_seasonality(row: dict[str, Any], baseline: pd.DataFrame, mo
     return result
 
 
+def _load_agriculture_seasonal_history(
+    store: TermStructureStore,
+    provider: Any,
+    asset: str,
+    current_season_start_year: int,
+    current_dte: int,
+    refresh_id: str,
+    today: date | None = None,
+) -> pd.DataFrame:
+    """Load/cache expired contracts and create ten DTE-aligned seasonal observations."""
+    today = today or date.today()
+    pairs = [
+        agriculture_contract_pair(asset, year)
+        for year in range(int(current_season_start_year) - 10, int(current_season_start_year))
+    ]
+    contracts = [contract for pair in pairs for contract in pair]
+    histories = store.quote_history(contract.symbol for contract in contracts)
+    missing = [contract for contract in contracts if histories.get(contract.symbol, pd.DataFrame()).empty]
+    if missing and hasattr(provider, "fetch_historical_contracts"):
+        try:
+            fetched = provider.fetch_historical_contracts(missing)
+        except Exception:
+            fetched = {}
+        completed = {
+            symbol: _completed_eod_frame(frame, today)
+            for symbol, frame in fetched.items()
+            if frame is not None and not frame.empty
+        }
+        completed = {symbol: frame for symbol, frame in completed.items() if not frame.empty}
+        if completed:
+            store.save_quotes(missing, completed, refresh_id)
+            histories.update(completed)
+    rows = [
+        agriculture_seasonal_observation(asset, year, current_dte, histories)
+        for year in range(int(current_season_start_year) - 10, int(current_season_start_year))
+    ]
+    return pd.DataFrame(rows)
+
+
+def _calculate_agriculture_seasonality(row: dict[str, Any], history: pd.DataFrame) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    current_spread = _number(row.get("spread"))
+    season_start = int(row["season_start_year"])
+    for years, label in ((5, "5Y"), (10, "10Y")):
+        info = agriculture_seasonal_percentile(current_spread, history, season_start, years)
+        result[f"Seasonal Pctl {label}"] = info["percentile"]
+        result[f"{label} HistoryN"] = info["history_n"]
+        result[f"{label} HistoryStartDate"] = info["history_start"]
+        result[f"{label} HistoryEndDate"] = info["history_end"]
+        result[f"{label} HistoryStatus"] = info["history_status"]
+    if pd.notna(result.get("Seasonal Pctl 10Y")):
+        result["current_seasonal_status"] = "OFFICIAL"
+    elif pd.notna(result.get("Seasonal Pctl 5Y")):
+        result["current_seasonal_status"] = "OFFICIAL_5Y / INSUFFICIENT_10Y_HISTORY"
+    else:
+        result["current_seasonal_status"] = "INSUFFICIENT_SEASONAL_HISTORY"
+    return result
+
+
+def _seasonal_curve_state(value: Any) -> str:
+    from commodity_cycle.model import classify_seasonal_curve
+
+    return classify_seasonal_curve(_number(value))
+
+
 def fetch_current_term_structure(store: TermStructureStore, baseline: pd.DataFrame, today: date | None = None,
                                  yahoo_provider: TermStructureContractProvider | None = None,
                                  fallback_provider: TermStructureContractProvider | None = None,
@@ -846,6 +1127,12 @@ def fetch_current_term_structure(store: TermStructureStore, baseline: pd.DataFra
                         item["Selected As"] = "Seasonal Leg2"
                 pair_key = _pair_key(asset, active, leg2)
                 row, daily = _pair_row(asset, active, leg2, metrics, histories, asset_source, today, pair_key=pair_key)
+                row["season_start_year"] = active.delivery_year
+                row["current_near_expiry"] = active.expiry
+                row["current_near_dte"] = (
+                    trading_day_dte(row["as_of"], active.expiry)
+                    if pd.notna(row.get("as_of")) else np.nan
+                )
                 daily_rows.extend(_after_current_month_roll(_current_month_daily(daily, today), roll, today))
                 current_rows.append(_add_roll_metadata(row, roll))
         else:
@@ -893,7 +1180,20 @@ def fetch_current_term_structure(store: TermStructureStore, baseline: pd.DataFra
     if not daily_history.empty:
         daily_history["as_of"] = pd.to_datetime(daily_history["as_of"], errors="coerce")
         daily_history = daily_history.loc[daily_history["as_of"].dt.to_period("M").eq(current_month)]
+    agriculture_history_frames: dict[str, pd.DataFrame] = {}
+    agriculture_provider = fallback
     for row in current_rows:
+        if row.get("asset") in AGRICULTURE and pd.notna(row.get("as_of")) and pd.notna(row.get("current_near_dte")):
+            history_frame = _load_agriculture_seasonal_history(
+                store,
+                agriculture_provider,
+                str(row["asset"]),
+                int(row["season_start_year"]),
+                int(row["current_near_dte"]),
+                refresh_id,
+                today,
+            )
+            agriculture_history_frames[str(row["asset"])] = history_frame
         if pd.notna(row.get("as_of")):
             match = daily_history.loc[(daily_history["asset"] == row["asset"])
                                      & (daily_history["pair_key"] == row["pair_key"])] if not daily_history.empty else pd.DataFrame()
@@ -902,14 +1202,68 @@ def fetch_current_term_structure(store: TermStructureStore, baseline: pd.DataFra
             row["mtd_avg_leg1"] = float(pd.to_numeric(match["leg1_price"], errors="coerce").mean()) if not match.empty else np.nan
             row["mtd_avg_leg2"] = float(pd.to_numeric(match["leg2_price"], errors="coerce").mean()) if not match.empty else np.nan
             row["current_seasonal_status"] = "OFFICIAL" if row["mtd_observation_count"] >= 5 else "PROVISIONAL / N/A"
-            row.update(_calculate_curve_seasonality(row, baseline, monthly))
+            if row.get("asset") in AGRICULTURE:
+                row.update(_calculate_agriculture_seasonality(
+                    row,
+                    agriculture_history_frames.get(str(row["asset"]), pd.DataFrame()),
+                ))
+            else:
+                row.update(_calculate_curve_seasonality(row, baseline, monthly))
         else:
             row.update({"mtd_observation_count": 0, "mtd_spread": np.nan, "mtd_avg_leg1": np.nan,
                         "mtd_avg_leg2": np.nan, "current_seasonal_status": "N/A"})
-    diag_frame = pd.DataFrame(diagnostics_rows)
+    agriculture_audit_rows: list[dict[str, Any]] = []
+    current_by_asset = {str(row.get("asset")): row for row in current_rows if row.get("asset") in AGRICULTURE}
+    for asset, history_frame in agriculture_history_frames.items():
+        current_row = current_by_asset.get(asset, {})
+        if not history_frame.empty:
+            history_frame = history_frame.copy()
+            history_frame["5Y Seasonal Percentile"] = current_row.get("Seasonal Pctl 5Y")
+            history_frame["10Y Seasonal Percentile"] = current_row.get("Seasonal Pctl 10Y")
+            history_frame["5Y HistoryN"] = current_row.get("5Y HistoryN")
+            history_frame["10Y HistoryN"] = current_row.get("10Y HistoryN")
+            agriculture_audit_rows.extend(history_frame.to_dict("records"))
+        current_season = int(current_row.get("season_start_year", today.year))
+        agriculture_audit_rows.append({
+            "Diagnostic Type": "Agriculture Seasonal Structure",
+            "Asset": asset,
+            "Commodity": asset,
+            "Season": f"CURRENT {current_season}/{str(current_season + 1)[-2:]}",
+            "Near Contract": current_row.get("leg1_contract"),
+            "Deferred Contract": current_row.get("leg2_contract"),
+            "Near Contract Symbol": current_row.get("leg1_contract"),
+            "Deferred Contract Symbol": current_row.get("leg2_contract"),
+            "Current Near DTE": current_row.get("current_near_dte"),
+            "Current Spread": current_row.get("spread"),
+            "5Y HistoryN": current_row.get("5Y HistoryN"),
+            "5Y History Start": current_row.get("5Y HistoryStartDate"),
+            "5Y History End": current_row.get("5Y HistoryEndDate"),
+            "5Y Seasonal Percentile": current_row.get("Seasonal Pctl 5Y"),
+            "10Y HistoryN": current_row.get("10Y HistoryN"),
+            "10Y History Start": current_row.get("10Y HistoryStartDate"),
+            "10Y History End": current_row.get("10Y HistoryEndDate"),
+            "10Y Seasonal Percentile": current_row.get("Seasonal Pctl 10Y"),
+            "Source": "TradingView MCP daily close",
+            "Last Update": current_row.get("as_of"),
+            "Data Quality": current_row.get("quality"),
+            "Seasonal Curve State": _seasonal_curve_state(
+                current_row.get("Seasonal Pctl 10Y")
+                if pd.notna(current_row.get("Seasonal Pctl 10Y"))
+                else current_row.get("Seasonal Pctl 5Y")
+            ),
+            "Yahoo Symbol": f"SEASONAL:{asset}:CURRENT",
+        })
+    diag_frame = pd.concat(
+        [pd.DataFrame(diagnostics_rows), pd.DataFrame(agriculture_audit_rows)],
+        ignore_index=True,
+        sort=False,
+    )
     store.save_diagnostics(diag_frame, refresh_id)
     return {"current": pd.DataFrame(current_rows), "daily": daily_frame, "daily_history": daily_history,
-            "monthly": monthly, "diagnostics": diag_frame, "source": source}
+            "monthly": monthly, "diagnostics": diag_frame,
+            "agriculture_seasonal": pd.concat(agriculture_history_frames.values(), ignore_index=True)
+            if agriculture_history_frames else pd.DataFrame(),
+            "source": source}
 
 
 def _add_roll_metadata(row: dict[str, Any], roll: dict[str, Any]) -> dict[str, Any]:

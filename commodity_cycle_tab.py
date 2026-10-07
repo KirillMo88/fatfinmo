@@ -154,14 +154,29 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
             st.dataframe(history_view.round(3), use_container_width=True)
     with diagnostics:
         _render_data_status(data)
-        st.caption("The workbook is an immutable historical baseline. Current EOD curves, synchronized daily spreads, MTD averages, contract diagnostics and finalized month-end observations are stored separately. Agriculture percentiles remain N/A until enough real history exists for the same SeasonalPairKey.")
+        st.caption("The workbook remains the immutable historical baseline for Energy and Metals. Agriculture seasonal history is reconstructed from cached individual expired CBOT contracts using DTE-aligned TradingView MCP daily closes.")
         if not commodity.empty:
             st.markdown("#### Input provenance")
-            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Term Structure As Of", "Term Structure Status", "CurveDataQuality", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 10Y", "10Y HistoryN", "10Y HistoryStartDate", "10Y HistoryEndDate", "10Y HistoryStatus", "Rollover Method", "Rollover Date", "Days To Expiry", "Updated Date", "CFTC Status"] if c in commodity]], use_container_width=True)
+            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Term Structure As Of", "Term Structure Status", "CurveDataQuality", "Leg 1", "Leg 2", "Curve Spread", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y", "5Y HistoryN", "5Y HistoryStartDate", "5Y HistoryEndDate", "5Y HistoryStatus", "Seasonal Percentile 10Y", "10Y HistoryN", "10Y HistoryStartDate", "10Y HistoryEndDate", "10Y HistoryStatus", "Rollover Method", "Rollover Date", "Days To Expiry", "Updated Date", "CFTC Status"] if c in commodity]], use_container_width=True)
         diagnostics = data.get("term_diagnostics", pd.DataFrame())
         if not diagnostics.empty:
-            st.markdown("#### Contract discovery / selection diagnostics")
-            st.dataframe(diagnostics, use_container_width=True, hide_index=True)
+            seasonal = diagnostics.loc[diagnostics.get("Diagnostic Type", pd.Series(index=diagnostics.index, dtype=object)).eq("Agriculture Seasonal Structure")].copy()
+            contracts = diagnostics.drop(seasonal.index)
+            if not seasonal.empty:
+                st.markdown("#### Agriculture seasonal structure")
+                seasonal_columns = [
+                    "Commodity", "Season", "Near Contract", "Deferred Contract",
+                    "Near Contract Symbol", "Deferred Contract Symbol", "Current Near DTE",
+                    "Matched DTE", "DTE Window", "Valid N", "Median Seasonal Spread",
+                    "Current Spread", "5Y HistoryN", "5Y History Start", "5Y History End",
+                    "5Y Seasonal Percentile", "10Y HistoryN", "10Y History Start",
+                    "10Y History End", "10Y Seasonal Percentile", "Seasonal Curve State",
+                    "Source", "Last Update", "Data Quality", "Missing Contracts", "Rejection Reason",
+                ]
+                st.dataframe(seasonal[[column for column in seasonal_columns if column in seasonal]], use_container_width=True, hide_index=True)
+            if not contracts.empty:
+                st.markdown("#### Contract discovery / selection diagnostics")
+                st.dataframe(contracts, use_container_width=True, hide_index=True)
 
 
 def _render_market_section(commodity: pd.DataFrame, sectors: pd.DataFrame, prices: pd.DataFrame, term_history: pd.DataFrame) -> None:

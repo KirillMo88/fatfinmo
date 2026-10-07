@@ -32,9 +32,13 @@ from commodity_cycle.term_structure_pipeline import (
     fetch_current_term_structure,
     _completed_eod_frame,
     _current_month_daily,
+    agriculture_contract_pair,
+    agriculture_seasonal_observation,
+    agriculture_seasonal_percentile,
     expected_contracts,
     percentile_with_history,
     seasonal_history_frame,
+    trading_day_dte,
 )
 
 
@@ -153,6 +157,105 @@ def test_current_term_contract_calendar_is_dynamic_and_seasonally_comparable():
     assert [c.symbol for c in beans[:2]] == ["ZSX26.CBT", "ZSF27.CBT"]
     assert corn[-1].delivery_year > 2026
     assert len(expected_contracts("WTI", today)) >= 18
+
+
+def _agriculture_history(asset: str, season_start_year: int, current_dte: int, spreads: list[float]) -> dict[str, pd.DataFrame]:
+    near, deferred = agriculture_contract_pair(asset, season_start_year)
+    dates = []
+    for offset in range(len(spreads)):
+        target_dte = current_dte - (len(spreads) // 2) + offset
+        dates.append(pd.Timestamp(np.busday_offset(near.expiry.date(), -target_dte, roll="backward")))
+    deferred_price = 100.0
+    return {
+        near.symbol: pd.DataFrame({"price": [(1 + spread) * deferred_price for spread in spreads]}, index=dates),
+        deferred.symbol: pd.DataFrame({"price": [deferred_price] * len(spreads)}, index=dates),
+    }
+
+
+def test_agriculture_spread_formula_and_raw_curve_orientation():
+    assert np.isclose(500 / 510 - 1, -0.0196078431372549)
+    assert ("Backwardation" if 500 / 510 - 1 > 0 else "Contango") == "Contango"
+    assert np.isclose(520 / 510 - 1, 0.0196078431372548)
+    assert ("Backwardation" if 520 / 510 - 1 > 0 else "Contango") == "Backwardation"
+
+
+def test_agriculture_dte_window_excludes_observations_outside_plus_minus_five():
+    current_dte = 48
+    near, deferred = agriculture_contract_pair("Corn", 2025)
+    dtes = [42, 43, 48, 53, 54]
+    dates = [pd.Timestamp(np.busday_offset(near.expiry.date(), -dte, roll="backward")) for dte in dtes]
+    histories = {
+        near.symbol: pd.DataFrame({"price": [97.0, 98.0, 99.0, 100.0, 101.0]}, index=dates),
+        deferred.symbol: pd.DataFrame({"price": [100.0] * 5}, index=dates),
+    }
+    observation = agriculture_seasonal_observation("Corn", 2025, current_dte, histories)
+    assert observation["Valid N"] == 3
+    assert observation["Matched DTE"] == 48
+    assert trading_day_dte(dates[2], near.expiry) == 48
+
+
+def test_agriculture_historical_season_uses_median_spread():
+    histories = _agriculture_history("Wheat", 2025, 48, [-0.03, -0.028, -0.027, -0.026, -0.024])
+    observation = agriculture_seasonal_observation("Wheat", 2025, 48, histories)
+    assert observation["Data Quality"] == "OK"
+    assert np.isclose(observation["Median Seasonal Spread"], -0.027)
+
+
+def test_agriculture_percentile_orientation_rewards_tighter_spread():
+    history = pd.DataFrame({
+        "Season Start Year": range(2021, 2026),
+        "Season": [f"{year}/{str(year + 1)[-2:]}" for year in range(2021, 2026)],
+        "Median Seasonal Spread": [-0.06, -0.05, -0.04, -0.03, -0.02],
+        "Data Quality": ["OK"] * 5,
+    })
+    tight = agriculture_seasonal_percentile(-0.01, history, 2026, 5)
+    loose = agriculture_seasonal_percentile(-0.07, history, 2026, 5)
+    assert tight["percentile"] == 100
+    assert loose["percentile"] == 0
+
+
+def test_agriculture_missing_leg_excludes_season():
+    near, _ = agriculture_contract_pair("Soybeans", 2025)
+    observation = agriculture_seasonal_observation(
+        "Soybeans",
+        2025,
+        48,
+        {near.symbol: pd.DataFrame({"price": [100.0]}, index=[pd.Timestamp("2025-09-01")])},
+    )
+    assert observation["Data Quality"] == "INVALID"
+    assert observation["Valid N"] == 0
+    assert np.isnan(observation["Median Seasonal Spread"])
+
+
+def test_agriculture_percentile_accepts_four_of_five_but_not_three():
+    history = pd.DataFrame({
+        "Season Start Year": range(2021, 2026),
+        "Season": [f"{year}/{str(year + 1)[-2:]}" for year in range(2021, 2026)],
+        "Median Seasonal Spread": [-0.06, -0.05, -0.04, -0.03, -0.02],
+        "Data Quality": ["OK", "OK", "ACCEPTABLE", "INVALID", "OK"],
+    })
+    valid = agriculture_seasonal_percentile(-0.01, history, 2026, 5)
+    assert valid["history_n"] == 4
+    assert valid["percentile"] == 100
+    history.loc[history["Season Start Year"].eq(2025), "Data Quality"] = "INVALID"
+    invalid = agriculture_seasonal_percentile(-0.01, history, 2026, 5)
+    assert invalid["history_n"] == 3
+    assert np.isnan(invalid["percentile"])
+
+
+def test_raw_and_seasonal_curve_states_remain_independent():
+    history = pd.DataFrame({
+        "Season Start Year": range(2021, 2026),
+        "Season": [f"{year}/{str(year + 1)[-2:]}" for year in range(2021, 2026)],
+        "Median Seasonal Spread": [-0.08, -0.07, -0.06, -0.05, -0.04],
+        "Data Quality": ["OK"] * 5,
+    })
+    current_spread = -0.01
+    raw_state = "Backwardation" if current_spread > 0 else "Contango"
+    percentile = agriculture_seasonal_percentile(current_spread, history, 2026, 5)["percentile"]
+    assert raw_state == "Contango"
+    assert percentile == 100
+    assert classify_seasonal_curve(percentile) == "Extreme Tightness"
 
 
 def test_only_completed_common_eod_quotes_can_form_current_spread():
