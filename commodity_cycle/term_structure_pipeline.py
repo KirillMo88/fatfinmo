@@ -1246,7 +1246,7 @@ def fetch_current_term_structure(store: TermStructureStore, baseline: pd.DataFra
             "Source": "TradingView MCP daily close",
             "Last Update": current_row.get("as_of"),
             "Data Quality": current_row.get("quality"),
-            "Seasonal Curve State": _seasonal_curve_state(
+            "Seasonal Relative State": _seasonal_curve_state(
                 current_row.get("Seasonal Pctl 10Y")
                 if pd.notna(current_row.get("Seasonal Pctl 10Y"))
                 else current_row.get("Seasonal Pctl 5Y")

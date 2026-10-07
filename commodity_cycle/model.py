@@ -114,18 +114,18 @@ def classify_seasonal_curve(percentile: float) -> str:
     if pd.isna(percentile):
         return "N/A"
     if percentile < 10:
-        return "Extreme Loose"
+        return "Extreme Loose vs Seasonal"
     if percentile < 25:
-        return "Strong Loose"
+        return "Strong Loose vs Seasonal"
     if percentile < 40:
-        return "Loose"
+        return "Mild Loose vs Seasonal"
     if percentile < 60:
         return "Neutral"
     if percentile < 75:
-        return "Tight"
+        return "Mild Tight vs Seasonal"
     if percentile <= 90:
-        return "Strong Tightness"
-    return "Extreme Tightness"
+        return "Strong Tight vs Seasonal"
+    return "Extreme Tight vs Seasonal"
 
 
 def classify_cftc_relative_state(percentile: float) -> str:
@@ -150,8 +150,12 @@ def resolve_price_curve_market_state(price_state: str, curve_state: str) -> str:
         else None
     )
     curve_group = (
-        "Tight" if curve_state in {"Tight", "Strong Tightness", "Extreme Tightness"}
-        else "Loose" if curve_state in {"Loose", "Strong Loose", "Extreme Loose"}
+        "Tight" if curve_state in {
+            "Mild Tight vs Seasonal", "Strong Tight vs Seasonal", "Extreme Tight vs Seasonal"
+        }
+        else "Loose" if curve_state in {
+            "Mild Loose vs Seasonal", "Strong Loose vs Seasonal", "Extreme Loose vs Seasonal"
+        }
         else "Neutral" if curve_state == "Neutral"
         else None
     )
@@ -161,18 +165,19 @@ def resolve_price_curve_market_state(price_state: str, curve_state: str) -> str:
         ("Bullish", "Tight"): "Bullish Confirmation",
         ("Bullish", "Neutral"): "Price-Led / Unconfirmed",
         ("Bullish", "Loose"): "Mixed / Divergent",
-        ("Neutral", "Tight"): "Physical Tightness / Price Lag",
+        ("Neutral", "Tight"): "Seasonal Tightness / Price Lag",
         ("Neutral", "Neutral"): "Mixed / Divergent",
         ("Neutral", "Loose"): "Mixed / Divergent",
-        ("Bearish", "Tight"): "Physical Tightness / Price Lag",
+        ("Bearish", "Tight"): "Seasonal Tightness / Price Lag",
         ("Bearish", "Neutral"): "Mixed / Divergent",
         ("Bearish", "Loose"): "Confirmed Weakness",
     }
     result = matrix[(price_group, curve_group)]
     if result == "Bullish Confirmation" and (
-        price_state == "Strong Bullish" or curve_state in {"Strong Tightness", "Extreme Tightness"}
+        price_state == "Strong Bullish"
+        or curve_state in {"Strong Tight vs Seasonal", "Extreme Tight vs Seasonal"}
     ):
-        return "Strong Physical Confirmation"
+        return "Strong Seasonal Confirmation"
     return result
 
 

@@ -73,17 +73,25 @@ def test_sector_price_state_uses_both_directions():
 
 
 def test_seasonal_curve_half_open_boundaries():
-    expected = {9.999: "Extreme Loose", 10: "Strong Loose", 25: "Loose", 40: "Neutral",
-                60: "Tight", 75: "Strong Tightness", 90: "Strong Tightness", 90.001: "Extreme Tightness"}
+    expected = {
+        9.999: "Extreme Loose vs Seasonal",
+        10: "Strong Loose vs Seasonal",
+        25: "Mild Loose vs Seasonal",
+        40: "Neutral",
+        60: "Mild Tight vs Seasonal",
+        75: "Strong Tight vs Seasonal",
+        90: "Strong Tight vs Seasonal",
+        90.001: "Extreme Tight vs Seasonal",
+    }
     assert {value: classify_seasonal_curve(value) for value in expected} == expected
 
 
-def test_price_curve_matrix_and_strong_physical_upgrade():
-    assert resolve_price_curve_market_state("Bullish", "Tight") == "Bullish Confirmation"
-    assert resolve_price_curve_market_state("Strong Bullish", "Tight") == "Strong Physical Confirmation"
-    assert resolve_price_curve_market_state("Bullish", "Strong Tightness") == "Strong Physical Confirmation"
-    assert resolve_price_curve_market_state("Mixed / Neutral", "Tight") == "Physical Tightness / Price Lag"
-    assert resolve_price_curve_market_state("Strong Bearish", "Extreme Loose") == "Confirmed Weakness"
+def test_price_curve_matrix_uses_seasonal_semantics_without_changing_logic():
+    assert resolve_price_curve_market_state("Bullish", "Mild Tight vs Seasonal") == "Bullish Confirmation"
+    assert resolve_price_curve_market_state("Strong Bullish", "Mild Tight vs Seasonal") == "Strong Seasonal Confirmation"
+    assert resolve_price_curve_market_state("Bullish", "Strong Tight vs Seasonal") == "Strong Seasonal Confirmation"
+    assert resolve_price_curve_market_state("Mixed / Neutral", "Mild Tight vs Seasonal") == "Seasonal Tightness / Price Lag"
+    assert resolve_price_curve_market_state("Strong Bearish", "Extreme Loose vs Seasonal") == "Confirmed Weakness"
 
 
 def test_cftc_relative_state_half_open_boundaries():
@@ -255,7 +263,7 @@ def test_raw_and_seasonal_curve_states_remain_independent():
     percentile = agriculture_seasonal_percentile(current_spread, history, 2026, 5)["percentile"]
     assert raw_state == "Contango"
     assert percentile == 100
-    assert classify_seasonal_curve(percentile) == "Extreme Tightness"
+    assert classify_seasonal_curve(percentile) == "Extreme Tight vs Seasonal"
 
 
 def test_only_completed_common_eod_quotes_can_form_current_spread():
@@ -363,15 +371,15 @@ def test_sector_confirmation_falls_back_to_valid_5y_curve_percentile():
     )}, index=dates)
     term_current = pd.DataFrame([
         {"Asset": "WTI", "Structure": "F1/F3", "As Of": dates[-1], "Official Seasonal Pctl 5Y": 20.0,
-         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Strong Loose"},
+         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Strong Loose vs Seasonal"},
         {"Asset": "Natural Gas", "Structure": "F1/F3", "As Of": dates[-1], "Official Seasonal Pctl 5Y": 80.0,
-         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Strong Tightness"},
+         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Strong Tight vs Seasonal"},
         {"Asset": "RBOB", "Structure": "F1/F3", "As Of": dates[-1], "Official Seasonal Pctl 5Y": 0.0,
-         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Extreme Loose"},
+         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Extreme Loose vs Seasonal"},
         {"Asset": "Copper", "Structure": "Cash/3M", "As Of": dates[-1], "Official Seasonal Pctl 5Y": 80.0,
-         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Strong Tightness"},
+         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Strong Tight vs Seasonal"},
         {"Asset": "Aluminum", "Structure": "Cash/3M", "As Of": dates[-1], "Official Seasonal Pctl 5Y": 60.0,
-         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Tight"},
+         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Mild Tight vs Seasonal"},
     ])
 
     _, sectors = build_market_confirmation(prices, pd.DataFrame(), term_current, {})

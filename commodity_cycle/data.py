@@ -353,8 +353,8 @@ def build_market_confirmation(
             "Raw Curve State": raw,
             "Seasonal Percentile 10Y": seasonal_pctl,
             "Seasonal Percentile 5Y": seasonal_5y,
-            "Seasonal Curve State": curve_state,
-            "Price × Curve": resolve_price_curve_market_state(pstate, curve_state),
+            "Seasonal Relative State": curve_state,
+            "Price × Seasonal Curve": resolve_price_curve_market_state(pstate, curve_state),
             **{
                 "MM Net % OI": np.nan, "Net Direction": "N/A", "3Y Percentile": np.nan,
                 "5Y Percentile": np.nan, "4W Change": np.nan, "13W Change": np.nan,
@@ -386,8 +386,10 @@ def build_market_confirmation(
         net = pd.to_numeric(part["MM Net % OI"], errors="coerce")
         dispersion = float(values.max() - values.min()) if values.notna().sum() >= 2 else np.nan
         qualifier = resolve_cftc_qualifier(values.tolist(), net.tolist()) if values.notna().any() else "N/A"
-        curves = part["Seasonal Curve State"].tolist()
-        tight_count = sum(v in {"Tight", "Strong Tightness", "Extreme Tightness"} for v in curves)
+        curves = part["Seasonal Relative State"].tolist()
+        tight_count = sum(v in {
+            "Mild Tight vs Seasonal", "Strong Tight vs Seasonal", "Extreme Tight vs Seasonal"
+        } for v in curves)
         curve_percentiles_10y = pd.to_numeric(part["Seasonal Percentile 10Y"], errors="coerce")
         curve_percentiles_5y = pd.to_numeric(part["Seasonal Percentile 5Y"], errors="coerce")
         # Prefer the structural 10Y percentile, but keep the sector model usable
