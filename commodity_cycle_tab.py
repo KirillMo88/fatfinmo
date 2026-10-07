@@ -115,6 +115,25 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
     sectors = data["sector"]
     sector_states = {str(r["Sector"]): str(r["Market Confirmation"]) for _, r in sectors.iterrows()}
 
+    st.markdown(
+        """
+        <style>
+        .st-key-commodity-cycle-summary [data-testid="stMetricValue"],
+        .st-key-commodity-cycle-summary [data-testid="stMetricValue"] > div,
+        .st-key-commodity-cycle-sector-dashboard [data-testid="stMetricValue"],
+        .st-key-commodity-cycle-sector-dashboard [data-testid="stMetricValue"] > div {
+            font-size: clamp(0.95rem, 1.15vw, 1.4rem) !important;
+            line-height: 1.2 !important;
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            overflow-wrap: anywhere;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     summary = [
         ("Core State", current.get("Core State", "N/A")),
         ("PPI Confirmation", current.get("PPI Confirmation", "N/A")),
@@ -125,10 +144,11 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         ("Metals", sector_states.get("Metals", "N/A")),
         ("Agriculture", sector_states.get("Agriculture", "N/A")),
     ]
-    cards = st.columns(4)
-    for idx, (label, value) in enumerate(summary):
-        with cards[idx % 4]:
-            st.metric(label, _format_state(value))
+    with st.container(key="commodity-cycle-summary"):
+        cards = st.columns(4)
+        for idx, (label, value) in enumerate(summary):
+            with cards[idx % 4]:
+                st.metric(label, _format_state(value))
 
     overview, physical, market, capex_tab, diagnostics = st.tabs(
         ["Overview", "FRED Inventory/Sales Regime", "Market Confirmation", "CAPEX Vulnerability", "Diagnostics / Data"]
@@ -202,20 +222,21 @@ def _render_market_section(
     term_history: pd.DataFrame,
     term_diagnostics: pd.DataFrame,
 ) -> None:
-    st.markdown("#### Sector dashboard")
-    if sectors.empty:
-        st.info("Market confirmation data is unavailable.")
-    else:
-        cols = st.columns(len(sectors))
-        for col, (_, row) in zip(cols, sectors.iterrows()):
-            with col:
-                st.markdown(f"**{row['Sector']}**")
-                st.metric("Market Confirmation", str(row["Market Confirmation"]))
-                st.caption(f"Price: {row['Price State']} · Bullish {row['Bullish Count']} / Bearish {row['Bearish Count']}")
-                st.caption(f"Curve tight breadth: {_fmt(row['Curve Tight Breadth'], '%')}")
-                avg_cftc = row.get("CFTC Average 5Y Percentile", np.nan)
-                avg_cftc_text = "N/A" if pd.isna(avg_cftc) else f"{float(avg_cftc):.1f}"
-                st.caption(f"Avg CFTC: {avg_cftc_text}, CFTC Dispersion: {_fmt(row['CFTC Dispersion'], ' pts')}")
+    with st.container(key="commodity-cycle-sector-dashboard"):
+        st.markdown("#### Sector dashboard")
+        if sectors.empty:
+            st.info("Market confirmation data is unavailable.")
+        else:
+            cols = st.columns(len(sectors))
+            for col, (_, row) in zip(cols, sectors.iterrows()):
+                with col:
+                    st.markdown(f"**{row['Sector']}**")
+                    st.metric("Market Confirmation", str(row["Market Confirmation"]))
+                    st.caption(f"Price: {row['Price State']} · Bullish {row['Bullish Count']} / Bearish {row['Bearish Count']}")
+                    st.caption(f"Curve tight breadth: {_fmt(row['Curve Tight Breadth'], '%')}")
+                    avg_cftc = row.get("CFTC Average 5Y Percentile", np.nan)
+                    avg_cftc_text = "N/A" if pd.isna(avg_cftc) else f"{float(avg_cftc):.1f}"
+                    st.caption(f"Avg CFTC: {avg_cftc_text}, CFTC Dispersion: {_fmt(row['CFTC Dispersion'], ' pts')}")
     st.markdown("#### Commodity confirmation table")
     if commodity.empty:
         st.info("No commodity market observations are currently available.")
@@ -233,9 +254,16 @@ def _render_market_section(
             st.markdown("#### Additional commodity diagnostics")
             st.dataframe(_style_commodity_table(auxiliary), use_container_width=True, hide_index=True)
         st.markdown("#### Price momentum × CFTC positioning")
+        momentum_period = st.selectbox(
+            "Price Momentum",
+            options=("1M", "3M", "6M", "12M"),
+            index=2,
+            key="commodity_cycle_price_momentum_period",
+        )
+        momentum_column = f"Return {momentum_period}"
         fig = go.Figure()
         for _, row in commodity.iterrows():
-            x, y = row.get("Return 12M"), row.get("5Y Percentile")
+            x, y = row.get(momentum_column), row.get("5Y Percentile")
             if pd.notna(x) and pd.notna(y):
                 raw_curve_state = row.get("Raw Curve State", "N/A")
                 fig.add_trace(go.Scatter(
@@ -243,11 +271,11 @@ def _render_market_section(
                     textposition="top center", name=row["Commodity"],
                     marker=_curve_scatter_marker(raw_curve_state),
                     hovertemplate=(
-                        f"{row['Commodity']}<br>12M price return: %{{x:.1f}}%"
+                        f"{row['Commodity']}<br>{momentum_period} price return: %{{x:.1f}}%"
                         f"<br>CFTC 5Y pctl: %{{y:.0f}}<br>Raw curve: {raw_curve_state}<extra></extra>"
                     ),
                 ))
-        fig.update_layout(template="plotly_dark", height=380, xaxis_title="Price return 12M (%)", yaxis_title="CFTC 5Y percentile", showlegend=False, margin=dict(l=30, r=20, t=20, b=30))
+        fig.update_layout(template="plotly_dark", height=380, xaxis_title=f"Price return {momentum_period} (%)", yaxis_title="CFTC 5Y percentile", showlegend=False, margin=dict(l=30, r=20, t=20, b=30))
         fig.add_hline(y=75, line_dash="dot", line_color="#f59e0b")
         fig.add_hline(y=25, line_dash="dot", line_color="#38bdf8")
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
