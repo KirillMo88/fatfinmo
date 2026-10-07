@@ -15,6 +15,7 @@ from positioning import (
     cftc_latest_status,
     load_positioning_data,
 )
+from commodity_cycle.term_structure import AGRICULTURE, ENERGY, MONTH_CODES, _contract_expiry
 
 ROOT = Path(__file__).resolve().parent
 TERM_STRUCTURE_WORKBOOK = ROOT / "data" / "commodity_term_structure_seasonal_10y.xlsx"
@@ -439,6 +440,61 @@ def price_returns_from_daily(series: pd.Series) -> dict[str, float]:
     return out
 
 
+def annualized_curve_spread(
+    asset: str,
+    leg1_contract: Any,
+    leg2_contract: Any,
+    curve_spread: Any,
+    as_of: Any,
+) -> float:
+    """Compound the observed leg1/leg2 spread to a one-year equivalent.
+
+    Futures use the actual gap between the two contract expiry dates. LME
+    Cash/3M uses its three-month tenor measured from the observation date.
+    """
+    spread = pd.to_numeric(pd.Series([curve_spread]), errors="coerce").iloc[0]
+    observed = pd.to_datetime(as_of, errors="coerce")
+    if pd.isna(spread) or pd.isna(observed) or 1.0 + float(spread) <= 0:
+        return np.nan
+
+    if asset in {"Copper", "Aluminum"}:
+        days = (observed + pd.DateOffset(months=3) - observed).days
+    else:
+        spec = ENERGY.get(asset) or AGRICULTURE.get(asset)
+        if not spec or pd.isna(leg1_contract) or pd.isna(leg2_contract):
+            return np.nan
+        root = spec[0]
+        month_number = {code: month for month, code in MONTH_CODES.items()}
+
+        def expiry_for(symbol: Any) -> pd.Timestamp | None:
+            contract = str(symbol).split(".", 1)[0]
+            if not contract.startswith(root) or len(contract) < len(root) + 3:
+                return None
+            month = month_number.get(contract[len(root)])
+            try:
+                short_year = int(contract[len(root) + 1:len(root) + 3])
+            except ValueError:
+                return None
+            if month is None:
+                return None
+            year = (observed.year // 100) * 100 + short_year
+            if year < observed.year - 20:
+                year += 100
+            elif year > observed.year + 79:
+                year -= 100
+            return _contract_expiry(asset, year, month)
+
+        expiry1 = expiry_for(leg1_contract)
+        expiry2 = expiry_for(leg2_contract)
+        if expiry1 is None or expiry2 is None:
+            return np.nan
+        days = (expiry2 - expiry1).days
+
+    if days <= 0:
+        return np.nan
+    return float((1.0 + float(spread)) ** (365.0 / days) - 1.0)
+
+
 def load_monthly_prices() -> tuple[pd.DataFrame, dict[str, str]]:
     """Fetch Yahoo daily continuous-futures prices for displayed price and charts."""
     try:
@@ -706,6 +762,13 @@ def build_market_confirmation(
             "10Y HistoryEndDate": curve_row.get("10Y HistoryEndDate"), "10Y HistoryStatus": curve_row.get("10Y HistoryStatus"),
             "Leg 1": curve_row.get("Leg1 Contract", curve_row.get("Leg1")), "Leg 2": curve_row.get("Leg2 Contract", curve_row.get("Leg2")),
             "Curve Spread": curve_row.get("Spread %"),
+            "Annualized Curve Spread": annualized_curve_spread(
+                asset,
+                curve_row.get("Leg1 Contract", curve_row.get("Leg1")),
+                curve_row.get("Leg2 Contract", curve_row.get("Leg2")),
+                curve_row.get("Spread %"),
+                curve_row.get("As Of"),
+            ),
             "Raw Curve State": raw,
             "Seasonal Percentile 10Y": seasonal_pctl,
             "Seasonal Percentile 5Y": seasonal_5y,

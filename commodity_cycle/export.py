@@ -11,7 +11,7 @@ import xlsxwriter
 
 
 PERCENT_COLUMNS = {
-    "Return 1M", "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread",
+    "Return 1M", "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "Annualized Curve Spread", "MTD Average Spread",
 }
 
 
