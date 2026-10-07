@@ -6,6 +6,7 @@ from commodity_cycle_tab import (
     PRIMARY_COMMODITY_COLUMNS,
     _commodity_confirmation_frames,
     _commodity_numeric_formatters,
+    _curve_scatter_marker,
     _raw_curve_state_style,
     _return_gradient_styles,
 )
@@ -62,3 +63,14 @@ def test_return_gradient_and_curve_state_colors_follow_requested_direction():
     assert styles[3] == ""
     assert "#14532d" in _raw_curve_state_style("Contango")
     assert "#7f1d1d" in _raw_curve_state_style("Backwardation")
+
+
+def test_price_positioning_markers_are_large_and_follow_absolute_curve_state():
+    backwardation = _curve_scatter_marker("Backwardation")
+    contango = _curve_scatter_marker("Contango")
+    unavailable = _curve_scatter_marker("N/A")
+
+    assert backwardation["size"] == 14
+    assert backwardation["color"] == "#ef4444"
+    assert contango["color"] == "#22c55e"
+    assert unavailable["color"] == "#94a3b8"

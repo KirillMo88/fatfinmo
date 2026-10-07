@@ -212,7 +212,16 @@ def _render_market_section(commodity: pd.DataFrame, sectors: pd.DataFrame, price
         for _, row in commodity.iterrows():
             x, y = row.get("Return 12M"), row.get("5Y Percentile")
             if pd.notna(x) and pd.notna(y):
-                fig.add_trace(go.Scatter(x=[x * 100], y=[y], mode="markers+text", text=[row["Commodity"]], textposition="top center", name=row["Commodity"], hovertemplate=f"{row['Commodity']}<br>12M price return: %{{x:.1f}}%<br>CFTC 5Y pctl: %{{y:.0f}}<extra></extra>"))
+                raw_curve_state = row.get("Raw Curve State", "N/A")
+                fig.add_trace(go.Scatter(
+                    x=[x * 100], y=[y], mode="markers+text", text=[row["Commodity"]],
+                    textposition="top center", name=row["Commodity"],
+                    marker=_curve_scatter_marker(raw_curve_state),
+                    hovertemplate=(
+                        f"{row['Commodity']}<br>12M price return: %{{x:.1f}}%"
+                        f"<br>CFTC 5Y pctl: %{{y:.0f}}<br>Raw curve: {raw_curve_state}<extra></extra>"
+                    ),
+                ))
         fig.update_layout(template="plotly_dark", height=380, xaxis_title="Price return 12M (%)", yaxis_title="CFTC 5Y percentile", showlegend=False, margin=dict(l=30, r=20, t=20, b=30))
         fig.add_hline(y=75, line_dash="dot", line_color="#f59e0b")
         fig.add_hline(y=25, line_dash="dot", line_color="#38bdf8")
@@ -268,6 +277,13 @@ def _raw_curve_state_style(value: Any) -> str:
     if state == "backwardation":
         return "background-color: #7f1d1d; color: #ffffff"
     return ""
+
+
+def _curve_scatter_marker(value: Any) -> dict[str, Any]:
+    """Use a prominent marker whose color represents absolute curve structure."""
+    state = str(value).strip().lower()
+    color = "#ef4444" if state == "backwardation" else "#22c55e" if state == "contango" else "#94a3b8"
+    return {"size": 14, "color": color, "line": {"color": "#f8fafc", "width": 1}}
 
 
 def _style_commodity_table(frame: pd.DataFrame, *, highlight_primary: bool = False) -> pd.io.formats.style.Styler:
