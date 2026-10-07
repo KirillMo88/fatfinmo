@@ -73,6 +73,7 @@ from treasury_funding_policy import read_snapshot as read_treasury_funding_polic
 from gold_regime_tab import render_gold_regime_tab
 from knowledge_base_tab import render_knowledge_base_tab
 from btc_cycle_tab import render_btc_cycle_tab
+from commodity_cycle_tab import render_commodity_cycle_tab
 from market_cycle_tab import load_market_cycle_snapshot_cached, render_market_cycle_tab
 from technical_outlook_simple_v3_tab import render_technical_outlook_simple_v3_tab
 from global_m2_cycle import (
@@ -6846,6 +6847,7 @@ def main():
         "AI Dashboard",
         "Technical Outlook",
         "Market Cycle",
+        "Commodity Cycle",
         "Liquidity Cycle",
         "Business Cycle",
         "Rates & Financial Conditions",
@@ -7123,6 +7125,8 @@ def main():
         render_market_regime_tab(market_snapshot)
     elif active_view == "Market Cycle":
         render_market_cycle_tab(get_fred_api_key_for_app())
+    elif active_view == "Commodity Cycle":
+        render_commodity_cycle_tab(get_fred_api_key_for_app())
     elif active_view == "Business Cycle":
         render_business_cycle_tab(get_fred_api_key_for_app())
     elif active_view == "Global Macro":
