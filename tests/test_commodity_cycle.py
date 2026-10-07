@@ -228,6 +228,19 @@ def test_agriculture_baseline_pair_names_map_to_exact_contract_pair_keys():
     assert normalized["PairKey"].tolist() == ["Corn_Z_H", "Wheat_Z_H", "Soybeans_X_F"]
 
 
+def test_term_baseline_without_structure_column_uses_canonical_asset_mapping():
+    baseline = pd.DataFrame({
+        "Asset": ["WTI", "Corn", "Soybeans", "Copper"],
+        "Date": pd.to_datetime(["2023-10-01"] * 4),
+        "Month": [10] * 4,
+        "Spread %": [0.01, 0.02, 0.03, 0.04],
+        "Leg1": [80.0, 100.0, 100.0, 9000.0],
+        "Leg2": [79.0, 101.0, 101.0, 9100.0],
+    })
+    normalized = seasonal_history_frame(baseline, pd.DataFrame())
+    assert normalized["PairKey"].tolist() == ["WTI_F1/F3", "Corn_Z_H", "Soybeans_X_F", "Copper_Cash_3M"]
+
+
 def test_current_curve_refresh_builds_synchronized_energy_ag_and_lme_rows(tmp_path):
     today = date(2026, 10, 7)
     dates = pd.bdate_range(end="2026-10-06", periods=12)

@@ -682,7 +682,22 @@ def _baseline_pair_key(asset: str, structure: str) -> str:
 def seasonal_history_frame(baseline: pd.DataFrame, monthly: pd.DataFrame) -> pd.DataFrame:
     frames = []
     if not baseline.empty:
-        base = baseline.loc[:, ["Asset", "Date", "Month", "Spread %", "Structure"]].copy()
+        base = baseline.copy()
+        required = {"Asset", "Date", "Spread %"}
+        missing = required.difference(base.columns)
+        if missing:
+            raise ValueError(f"Term-structure baseline is missing required columns: {', '.join(sorted(missing))}")
+        if "Month" not in base:
+            base["Month"] = pd.to_datetime(base["Date"], errors="coerce").dt.month
+        if "Structure" not in base:
+            # The supplied App_Export has no Structure column. Its contract legs are
+            # represented by the asset's canonical seasonal mapping instead.
+            base["Structure"] = base["Asset"].map({
+                "WTI": "F1/F3", "Natural Gas": "F1/F3", "RBOB": "F1/F3",
+                "Copper": "Cash/3M", "Aluminum": "Cash/3M",
+                "Corn": "Dec/Mar", "Wheat": "Dec/Mar", "Soybeans": "Nov/Jan",
+            })
+        base = base.loc[:, ["Asset", "Date", "Month", "Spread %", "Structure"]].copy()
         base = base.rename(columns={"Spread %": "Spread"})
         base["PairKey"] = [_baseline_pair_key(row.Asset, row.Structure) for row in base.itertuples()]
         frames.append(base[["Asset", "Date", "Month", "Spread", "PairKey"]])
