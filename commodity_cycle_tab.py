@@ -33,7 +33,7 @@ FINAL_COLORS = {
     "Low Inflation / Neutral": "#38bdf8", "Reflation / Early Inflation": "#fde047",
     "Inflation Expansion": "#f43f5e", "Late Cycle / Peak Risk": "#c084fc",
     "Disinflation Transition": "#4ade80", "Confirmed Disinflation": "#22d3ee",
-    "Broad Inflation": "#fb923c", "N/A": "#64748b",
+    "Broad Inflation": "#f43f5e", "N/A": "#64748b",
 }
 STATE_BAND_OPACITY = 0.30
 PRIMARY_COMMODITY_COLUMNS = (
@@ -150,8 +150,8 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
             with cards[idx % 4]:
                 st.metric(label, _format_state(value))
 
-    overview, physical, market, capex_tab, diagnostics = st.tabs(
-        ["Overview", "FRED Inventory/Sales Regime", "Market Confirmation", "CAPEX Vulnerability", "Diagnostics / Data"]
+    overview, market, capex_tab, diagnostics = st.tabs(
+        ["Overview", "Market Confirmation", "CAPEX Vulnerability", "Diagnostics / Data"]
     )
     with overview:
         if history.empty:
@@ -162,10 +162,11 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
             view = st.radio("Regime shading", ["Final State", "Final State 2"], index=1, horizontal=True,
                             key="commodity_cycle_final_view_v2")
             _render_final_state_chart(history, st.session_state["commodity_cycle_overview_range"], view)
-    with physical:
-        if history.empty:
-            st.info("No FRED history is currently available.")
-        else:
+            if not capex.empty:
+                _render_capex_intensity_chart(
+                    capex, history, st.session_state["commodity_cycle_overview_range"]
+                )
+            st.markdown("#### FRED Inventory / Sales Regime")
             _render_fred_heatmap(history)
             st.markdown("#### Core stress and breadth diagnostics")
             cols = [c for c in history if c.endswith("Rolling Stress") or c.endswith("Seasonal Stress")]
@@ -424,28 +425,36 @@ def _render_fred_heatmap(history: pd.DataFrame) -> None:
     st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
 
 
-def _render_capex_charts(capex: pd.DataFrame, history: pd.DataFrame) -> None:
-    recent = _slice_range(capex, st.session_state.get("commodity_cycle_overview_range", "10Y"))
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
-                        specs=[[{"secondary_y": True}], [{}]],
-                        subplot_titles=("CAPEX Intensity vs FRED PPIACO", "CAPEX Vulnerability — expanding, no look-ahead percentile"))
+def _render_capex_intensity_chart(capex: pd.DataFrame, history: pd.DataFrame, selected_range: str) -> None:
+    recent = _slice_range(capex, selected_range)
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Scatter(x=recent.index, y=recent["CAPEX Intensity"], name="CAPEX / FPI", line=dict(color="#facc15")), row=1, col=1)
     if not history.empty:
         ppi = history["PPIACO"].dropna()
-        ppi = _slice_range(ppi.to_frame(), st.session_state.get("commodity_cycle_overview_range", "10Y"))["PPIACO"]
+        ppi = _slice_range(ppi.to_frame(), selected_range)["PPIACO"]
         fig.add_trace(go.Scatter(x=ppi.index, y=ppi, name="PPIACO", line=dict(color="#38bdf8")), row=1, col=1, secondary_y=True)
-    fig.add_trace(go.Scatter(x=recent.index, y=recent["CAPEX Vulnerability RT"], name="Vulnerability", line=dict(color="#fb7185")), row=2, col=1)
+    fig.update_layout(template="plotly_dark", height=350, title="CAPEX Intensity vs FRED PPIACO",
+                      margin=dict(l=35, r=30, t=50, b=30), legend=dict(orientation="h"))
+    fig.update_yaxes(title_text="CAPEX / FPI", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="PPIACO index", row=1, col=1, secondary_y=True)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def _render_capex_charts(capex: pd.DataFrame, history: pd.DataFrame) -> None:
+    selected_range = st.session_state.get("commodity_cycle_overview_range", "10Y")
+    recent = _slice_range(capex, selected_range)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=recent.index, y=recent["CAPEX Vulnerability RT"], name="Vulnerability", line=dict(color="#fb7185")))
     for low, high, color, label in (
         (0, 20, "#22c55e", "Very Low / Low"), (20, 40, "#38bdf8", "Neutral"),
         (40, 60, "#facc15", "Moderate-High"), (60, 80, "#f97316", "High"),
         (80, 100, "#ef4444", "Extreme"),
     ):
-        fig.add_hrect(y0=low, y1=high, fillcolor=color, opacity=0.08, line_width=0, row=2, col=1,
+        fig.add_hrect(y0=low, y1=high, fillcolor=color, opacity=0.08, line_width=0,
                       annotation_text=label, annotation_position="top left")
-    fig.update_layout(template="plotly_dark", height=580, margin=dict(l=35, r=30, t=45, b=25), legend=dict(orientation="h"))
-    fig.update_yaxes(title_text="CAPEX / FPI", row=1, col=1, secondary_y=False)
-    fig.update_yaxes(title_text="PPIACO index", row=1, col=1, secondary_y=True)
-    fig.update_yaxes(title_text="Vulnerability (100 − expanding percentile)", range=[0, 100], row=2, col=1)
+    fig.update_layout(template="plotly_dark", height=360, title="CAPEX Vulnerability — expanding, no look-ahead percentile",
+                      margin=dict(l=35, r=30, t=50, b=35), legend=dict(orientation="h"))
+    fig.update_yaxes(title_text="Vulnerability (100 − expanding percentile)", range=[0, 100])
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     if not history.empty:
         common = history[["Final State 2"]].join(capex[["CAPEX Vulnerability RT"]], how="inner").dropna()
