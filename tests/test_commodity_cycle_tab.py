@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from commodity_cycle_tab import (
+    DISPLAY_COLUMN_NAMES,
     PRIMARY_COMMODITY_COLUMNS,
     _commodity_confirmation_frames,
     _commodity_numeric_formatters,
@@ -19,8 +20,22 @@ def test_primary_commodity_table_has_requested_columns_and_auxiliary_keeps_rest(
 
     primary, auxiliary = _commodity_confirmation_frames(frame)
 
-    assert primary.columns.tolist() == list(PRIMARY_COMMODITY_COLUMNS)
+    assert primary.columns.tolist() == [DISPLAY_COLUMN_NAMES.get(column, column) for column in PRIMARY_COMMODITY_COLUMNS]
     assert auxiliary.columns.tolist() == ["Sector", "Commodity", "Leg 1", "CFTC Status"]
+
+
+def test_percentile_labels_identify_cot_and_spread_sources():
+    frame = pd.DataFrame([{
+        "Sector": "Energy", "Commodity": "WTI", "5Y Percentile": 80.0,
+        "3Y Percentile": 70.0, "Seasonal Percentile 5Y": 60.0, "Seasonal Percentile 10Y": 50.0,
+    }])
+
+    primary, auxiliary = _commodity_confirmation_frames(frame)
+
+    assert "COT 5Y Percentile" in primary
+    assert "Spread 5Y Seasonal Percentile" in primary
+    assert "COT 3Y Percentile" in auxiliary
+    assert "Spread 10Y Seasonal Percentile" in auxiliary
 
 
 def test_commodity_table_formats_all_numeric_values_to_two_decimals():
