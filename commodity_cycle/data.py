@@ -8,7 +8,13 @@ import numpy as np
 import pandas as pd
 
 from fred_client import download_fred_series
-from positioning import cftc_asset_series, cftc_latest_status, load_positioning_data
+from positioning import (
+    cftc_asset_config,
+    cftc_asset_series,
+    cftc_contract_status,
+    cftc_latest_status,
+    load_positioning_data,
+)
 
 ROOT = Path(__file__).resolve().parent
 TERM_STRUCTURE_WORKBOOK = ROOT / "data" / "commodity_term_structure_seasonal_10y.xlsx"
@@ -43,6 +49,235 @@ CFTC_ASSET_MAP = {
 }
 
 
+def _source_vendor_set(value: Any) -> set[str]:
+    text = "" if value is None or (not isinstance(value, (str, bytes)) and pd.isna(value)) else str(value).lower()
+    vendors = set()
+    for needle, label in (
+        ("yahoo", "Yahoo Finance"),
+        ("tradingview", "TradingView"),
+        ("eia.gov", "EIA"),
+        ("westmetall", "Westmetall"),
+        ("barchart", "Barchart"),
+        ("cme", "CME"),
+    ):
+        if needle in text:
+            vendors.add(label)
+    return vendors
+
+
+def _safe_history_count(value: Any) -> int:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    return int(numeric) if pd.notna(numeric) else 0
+
+
+def _seasonal_history_sources(
+    seasonal_history: pd.DataFrame,
+    asset: str,
+    pair_key: str,
+    before: pd.Timestamp,
+    *,
+    month: int | None,
+    count: int,
+) -> tuple[str, set[str]]:
+    if seasonal_history.empty or "Source" not in seasonal_history:
+        return "N/A", set()
+    dates = pd.to_datetime(seasonal_history["Date"], errors="coerce")
+    mask = (
+        seasonal_history["Asset"].astype(str).eq(asset)
+        & seasonal_history["PairKey"].astype(str).eq(pair_key)
+        & dates.lt(pd.Timestamp(before))
+    )
+    if month is not None:
+        mask &= dates.dt.month.eq(month)
+    sample = seasonal_history.loc[mask].copy()
+    sample["Date"] = pd.to_datetime(sample["Date"], errors="coerce")
+    sources = sample.sort_values("Date").tail(count)["Source"].dropna().astype(str).unique().tolist()
+    vendors: set[str] = set()
+    for source in sources:
+        vendors.update(_source_vendor_set(source))
+    return " + ".join(sources) if sources else "N/A", vendors
+
+
+def _official_seasonal_result(
+    row: pd.Series,
+    seasonal_history: pd.DataFrame,
+    percentile_with_history: Any,
+) -> dict[str, Any]:
+    """Resolve official curve percentiles and their same-configuration provenance."""
+    asset = str(row.get("asset", row.get("Asset", "")))
+    pair_key = str(row.get("pair_key", row.get("PairKey", "")))
+    as_of = pd.to_datetime(row.get("As Of", row.get("as_of")), errors="coerce")
+    p5 = row.get("Seasonal Pctl 5Y", np.nan)
+    p10 = row.get("Seasonal Pctl 10Y", np.nan)
+    source = str(row.get("Source", row.get("source", "N/A")))
+    current_vendors = _source_vendor_set(source)
+    result: dict[str, Any] = {
+        "p5": np.nan,
+        "p10": np.nan,
+        "as_of": None,
+        "status": "N/A",
+        "history_5y_n": 0,
+        "history_5y_status": "INSUFFICIENT_5Y_HISTORY",
+        "history_10y_n": 0,
+        "history_10y_status": "INSUFFICIENT_10Y_HISTORY",
+        "history_source": "N/A",
+        "history_vendor": "N/A",
+        "current_curve_vendor": " + ".join(sorted(current_vendors)) if current_vendors else "UNKNOWN",
+        "vendor_consistency": "UNKNOWN",
+        "10y_explanation": "N/A: no comparable seasonal observation",
+    }
+
+    def finish(
+        value5: float,
+        value10: float,
+        observation_date: pd.Timestamp,
+        status: str,
+        info5: dict[str, Any],
+        info10: dict[str, Any],
+        *,
+        month_specific: bool,
+        as_of_format: str,
+    ) -> dict[str, Any]:
+        source_text, history_vendors = _seasonal_history_sources(
+            seasonal_history,
+            asset,
+            pair_key,
+            observation_date,
+            month=observation_date.month if month_specific else None,
+            count=10 if _safe_history_count(info10.get("history_n", 0)) else 5,
+        )
+        consistency = "UNKNOWN"
+        if current_vendors and history_vendors:
+            consistency = "SAME_VENDOR" if current_vendors == history_vendors else "CROSS_VENDOR"
+        history_10y_n = _safe_history_count(info10.get("history_n", 0))
+        explanation = (
+            "AVAILABLE"
+            if pd.notna(value10)
+            else f"N/A: requires 10 prior comparable observations; {history_10y_n}/10 available"
+        )
+        return {
+            **result,
+            "p5": value5,
+            "p10": value10,
+            "as_of": observation_date.strftime(as_of_format),
+            "status": status,
+            "history_5y_n": _safe_history_count(info5.get("history_n", 0)),
+            "history_5y_status": info5.get("history_status", "INSUFFICIENT_5Y_HISTORY"),
+            "history_10y_n": history_10y_n,
+            "history_10y_status": info10.get("history_status", "INSUFFICIENT_10Y_HISTORY"),
+            "history_source": source_text,
+            "history_vendor": " + ".join(sorted(history_vendors)) if history_vendors else "UNKNOWN",
+            "vendor_consistency": consistency,
+            "10y_explanation": explanation,
+        }
+
+    if asset in {"Corn", "Wheat", "Soybeans"}:
+        status = "CURRENT_MTD" if pd.notna(p5) or pd.notna(p10) else "N/A"
+        if pd.isna(as_of):
+            return result
+        info5 = {
+            "history_n": row.get("5Y HistoryN", 0),
+            "history_status": row.get("5Y HistoryStatus", "INSUFFICIENT_5Y_HISTORY"),
+        }
+        info10 = {
+            "history_n": row.get("10Y HistoryN", 0),
+            "history_status": row.get("10Y HistoryStatus", "INSUFFICIENT_10Y_HISTORY"),
+        }
+        return finish(p5, p10, pd.Timestamp(as_of), status, info5, info10,
+                      month_specific=False, as_of_format="%Y-%m-%d")
+    if pd.notna(as_of) and int(row.get("mtd_observation_count", 0) or 0) >= 5:
+        current_period = pd.Timestamp(as_of).to_period("M")
+        current_value = float(row.get("mtd_spread", row.get("spread", np.nan)))
+        info5 = percentile_with_history(
+            current_value, seasonal_history, asset, current_period.month, pair_key, 5,
+            before=current_period.to_timestamp()
+        )
+        info10 = percentile_with_history(
+            current_value, seasonal_history, asset, current_period.month, pair_key, 10,
+            before=current_period.to_timestamp()
+        )
+        return finish(p5, p10, pd.Timestamp(as_of), "CURRENT_MTD", info5, info10,
+                      month_specific=True, as_of_format="%Y-%m-%d")
+    if pd.isna(as_of) or seasonal_history.empty:
+        return result
+
+    current_period = pd.Timestamp(as_of).to_period("M")
+    dates = pd.to_datetime(seasonal_history["Date"], errors="coerce")
+    completed_current = seasonal_history.loc[
+        seasonal_history["Asset"].astype(str).eq(asset)
+        & seasonal_history["PairKey"].astype(str).eq(pair_key)
+        & dates.dt.to_period("M").eq(current_period)
+    ].copy()
+    if not completed_current.empty:
+        completed_current["Date"] = pd.to_datetime(completed_current["Date"], errors="coerce")
+        latest = completed_current.sort_values("Date").iloc[-1]
+        completed_date = pd.Timestamp(latest["Date"])
+        completed_spread = float(latest["Spread"])
+        info5 = percentile_with_history(
+            completed_spread, seasonal_history, asset, completed_date.month, pair_key, 5, before=completed_date
+        )
+        info10 = percentile_with_history(
+            completed_spread, seasonal_history, asset, completed_date.month, pair_key, 10, before=completed_date
+        )
+        return finish(info5["percentile"], info10["percentile"], completed_date,
+                      "CURRENT_COMPLETE_MONTH", info5, info10,
+                      month_specific=True, as_of_format="%Y-%m")
+    candidates = seasonal_history.loc[
+        seasonal_history["Asset"].astype(str).eq(asset)
+        & seasonal_history["PairKey"].astype(str).eq(pair_key)
+        & dates.dt.month.eq(current_period.month)
+        & (dates < current_period.to_timestamp())
+    ].copy()
+    if candidates.empty:
+        return result
+    candidates["Date"] = pd.to_datetime(candidates["Date"], errors="coerce")
+    latest = candidates.sort_values("Date").iloc[-1]
+    fallback_date = pd.Timestamp(latest["Date"])
+    fallback_spread = float(latest["Spread"])
+    info5 = percentile_with_history(
+        fallback_spread, seasonal_history, asset, fallback_date.month, pair_key, 5, before=fallback_date
+    )
+    info10 = percentile_with_history(
+        fallback_spread, seasonal_history, asset, fallback_date.month, pair_key, 10, before=fallback_date
+    )
+    return finish(info5["percentile"], info10["percentile"], fallback_date,
+                  "HISTORICAL_FALLBACK_SAME_MONTH", info5, info10,
+                  month_specific=True, as_of_format="%Y-%m")
+
+
+def _official_seasonal_percentiles(
+    row: pd.Series,
+    seasonal_history: pd.DataFrame,
+    percentile_with_history: Any,
+) -> tuple[float, float, str | None, str]:
+    """Compatibility wrapper for the four primary seasonal outputs."""
+    result = _official_seasonal_result(row, seasonal_history, percentile_with_history)
+    return result["p5"], result["p10"], result["as_of"], result["status"]
+
+
+def _contract_selection_quality(asset: str, rollover_method: Any) -> str:
+    if asset in {"Copper", "Aluminum"}:
+        return "NOT_APPLICABLE_CASH_3M"
+    return {
+        "VOLUME_CROSSOVER": "HIGH",
+        "OPEN_INTEREST_CROSSOVER": "MEDIUM",
+        "HARD_EXPIRY_ROLL": "MEDIUM",
+        "CALENDAR_FALLBACK": "LOW",
+    }.get(str(rollover_method or ""), "UNKNOWN")
+
+
+def _combined_curve_quality(price_quality: Any, selection_quality: Any) -> str:
+    price = str(price_quality or "INVALID")
+    selection = str(selection_quality or "UNKNOWN")
+    if price not in {"HIGH", "LOW_LIQUIDITY"}:
+        return price
+    if selection == "LOW":
+        return "LOW_CONTRACT_SELECTION"
+    if selection == "MEDIUM":
+        return "MEDIUM_CONTRACT_SELECTION"
+    return price
+
+
 def load_commodity_term_structure() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load immutable monthly baseline and refresh normalized current/live curve data."""
     if not TERM_STRUCTURE_WORKBOOK.exists():
@@ -74,6 +309,8 @@ def load_commodity_term_structure() -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
                 "Month": pd.to_datetime(valid_agriculture["Matched Date End"], errors="coerce").dt.month,
                 "Spread": pd.to_numeric(valid_agriculture["Median Seasonal Spread"], errors="coerce"),
                 "PairKey": valid_agriculture["PairKey"].astype(str),
+                "Source": valid_agriculture.get("Source", "TradingView MCP daily close"),
+                "History Data Quality": valid_agriculture.get("Data Quality", "N/A"),
             })
             seasonal_history = pd.concat([seasonal_history, ag_history], ignore_index=True).dropna(
                 subset=["Asset", "Date", "Spread", "PairKey"]
@@ -97,55 +334,42 @@ def load_commodity_term_structure() -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
         current["Structure"] = current.get("structure", current.get("pair_key"))
         current["Source"] = current.get("source")
         current["Raw Curve State"] = current.get("raw_state", "N/A")
-        current["CurveDataQuality"] = current.get("quality", "INVALID")
+        current["PriceDataQuality"] = current.get("quality", "INVALID")
+        current["ContractSelectionQuality"] = [
+            _contract_selection_quality(str(asset), method)
+            for asset, method in zip(current["asset"], current.get("rollover_method", pd.Series(index=current.index, dtype=object)))
+        ]
+        current["CurveDataQuality"] = [
+            _combined_curve_quality(price_quality, selection_quality)
+            for price_quality, selection_quality in zip(current["PriceDataQuality"], current["ContractSelectionQuality"])
+        ]
         current["Status"] = current["CurveDataQuality"]
         current["Seasonal Pctl 5Y"] = current.get("Seasonal Pctl 5Y", np.nan)
         current["Seasonal Pctl 10Y"] = current.get("Seasonal Pctl 10Y", np.nan)
         current["Current Month Seasonal Pctl 5Y"] = current["Seasonal Pctl 5Y"]
         current["Current Month Seasonal Pctl 10Y"] = current["Seasonal Pctl 10Y"]
-        # Until MTD reaches five synchronized business-day spreads, keep the last finalized
-        # month as the official model state; the current month remains explicitly provisional.
-        official5, official10, official_state = [], [], []
+        # Until MTD reaches five synchronized business-day spreads, keep only the
+        # latest historical observation from the same calendar month as the fallback.
+        seasonal_results: list[dict[str, Any]] = []
         for _, row in current.iterrows():
-            if str(row.get("asset")) in {"Corn", "Wheat", "Soybeans"}:
-                p5, p10 = row.get("Seasonal Pctl 5Y"), row.get("Seasonal Pctl 10Y")
-            elif int(row.get("mtd_observation_count", 0) or 0) >= 5:
-                p5, p10 = row.get("Seasonal Pctl 5Y"), row.get("Seasonal Pctl 10Y")
-            else:
-                finalized = store.last_finalized_for(str(row["asset"]), str(row["pair_key"]))
-                if finalized:
-                    finalized_date = pd.Timestamp(f"{finalized['month']}-01")
-                    p5 = percentile_with_history(float(finalized["monthly_spread"]), seasonal_history,
-                                                 str(row["asset"]), finalized_date.month, str(row["pair_key"]), 5,
-                                                 before=finalized_date)
-                    p10 = percentile_with_history(float(finalized["monthly_spread"]), seasonal_history,
-                                                  str(row["asset"]), finalized_date.month, str(row["pair_key"]), 10,
-                                                  before=finalized_date)
-                    p5 = p5["percentile"]
-                    p10 = p10["percentile"]
-                else:
-                    candidates = seasonal_history.loc[
-                        (seasonal_history["Asset"] == row["asset"])
-                        & (seasonal_history["PairKey"] == row["pair_key"])
-                        & (pd.to_datetime(seasonal_history["Date"], errors="coerce") < pd.Timestamp(row["As Of"]).to_period("M").to_timestamp())
-                    ].sort_values("Date")
-                    if candidates.empty:
-                        p5, p10 = np.nan, np.nan
-                    else:
-                        latest_hist = candidates.iloc[-1]
-                        finalized_date = pd.Timestamp(latest_hist["Date"])
-                        p5 = percentile_with_history(float(latest_hist["Spread"]), seasonal_history,
-                                                     str(row["asset"]), finalized_date.month, str(row["pair_key"]), 5,
-                                                     before=finalized_date)["percentile"]
-                        p10 = percentile_with_history(float(latest_hist["Spread"]), seasonal_history,
-                                                      str(row["asset"]), finalized_date.month, str(row["pair_key"]), 10,
-                                                      before=finalized_date)["percentile"]
-            official5.append(p5)
-            official10.append(p10)
-            official_state.append(_term_curve_state(p10 if pd.notna(p10) else p5))
-        current["Official Seasonal Pctl 5Y"] = official5
-        current["Official Seasonal Pctl 10Y"] = official10
-        current["Official Seasonal State"] = official_state
+            seasonal_results.append(_official_seasonal_result(row, seasonal_history, percentile_with_history))
+        current["Official Seasonal Pctl 5Y"] = [item["p5"] for item in seasonal_results]
+        current["Official Seasonal Pctl 10Y"] = [item["p10"] for item in seasonal_results]
+        current["Official Seasonal State"] = [
+            _term_curve_state(item["p10"] if pd.notna(item["p10"]) else item["p5"])
+            for item in seasonal_results
+        ]
+        current["Seasonal Percentile As Of"] = [item["as_of"] for item in seasonal_results]
+        current["Seasonal Percentile Status"] = [item["status"] for item in seasonal_results]
+        current["Seasonal Percentile 5Y HistoryN"] = [item["history_5y_n"] for item in seasonal_results]
+        current["Seasonal Percentile 5Y HistoryStatus"] = [item["history_5y_status"] for item in seasonal_results]
+        current["Seasonal Percentile 10Y HistoryN"] = [item["history_10y_n"] for item in seasonal_results]
+        current["Seasonal Percentile 10Y HistoryStatus"] = [item["history_10y_status"] for item in seasonal_results]
+        current["Seasonal Percentile 10Y Explanation"] = [item["10y_explanation"] for item in seasonal_results]
+        current["Current Curve Vendor"] = [item["current_curve_vendor"] for item in seasonal_results]
+        current["Seasonal History Source"] = [item["history_source"] for item in seasonal_results]
+        current["Seasonal History Vendor"] = [item["history_vendor"] for item in seasonal_results]
+        current["Vendor Consistency"] = [item["vendor_consistency"] for item in seasonal_results]
         current["MTD Average Spread"] = current.get("mtd_spread")
         current["MTD Average Leg1 Price"] = current.get("mtd_avg_leg1")
         current["MTD Average Leg2 Price"] = current.get("mtd_avg_leg2")
@@ -225,8 +449,28 @@ def load_fred_history(api_key: str | None, start: str = "1970-01-01") -> tuple[p
     return combined, statuses
 
 
+def _price_at_or_before(series: pd.Series, target: pd.Timestamp) -> float:
+    history = pd.to_numeric(series, errors="coerce").dropna().sort_index()
+    eligible = history.loc[history.index <= pd.Timestamp(target)]
+    return float(eligible.iloc[-1]) if not eligible.empty else np.nan
+
+
+def price_returns_from_daily(series: pd.Series) -> dict[str, float]:
+    """Calculate current-price returns against prices 4/13/26/52 calendar weeks ago."""
+    history = pd.to_numeric(series, errors="coerce").dropna().sort_index()
+    if history.empty:
+        return {label: np.nan for label in ("Return 1M", "Return 3M", "Return 6M", "Return 12M")}
+    current_date = pd.Timestamp(history.index[-1])
+    current_price = float(history.iloc[-1])
+    out: dict[str, float] = {}
+    for label, weeks in (("Return 1M", 4), ("Return 3M", 13), ("Return 6M", 26), ("Return 12M", 52)):
+        reference = _price_at_or_before(history, current_date - pd.Timedelta(weeks=weeks))
+        out[label] = current_price / reference - 1.0 if np.isfinite(reference) and reference != 0 else np.nan
+    return out
+
+
 def load_monthly_prices() -> tuple[pd.DataFrame, dict[str, str]]:
-    """Fetch monthly continuous futures closes; unavailable histories stay absent."""
+    """Fetch daily continuous-futures prices for current price and week-based momentum."""
     try:
         import yfinance as yf
     except Exception as exc:
@@ -235,7 +479,7 @@ def load_monthly_prices() -> tuple[pd.DataFrame, dict[str, str]]:
     status: dict[str, str] = {}
     for asset, ticker in PRICE_TICKERS.items():
         try:
-            frame = yf.download(ticker, period="max", interval="1mo", auto_adjust=False, progress=False, threads=False)
+            frame = yf.download(ticker, period="max", interval="1d", auto_adjust=False, progress=False, threads=False)
             if frame is None or frame.empty:
                 status[asset] = "MISSING"
                 continue
@@ -243,21 +487,92 @@ def load_monthly_prices() -> tuple[pd.DataFrame, dict[str, str]]:
             if isinstance(close, pd.DataFrame):
                 close = close.iloc[:, 0]
             series = pd.to_numeric(close, errors="coerce").dropna()
-            series.index = pd.to_datetime(series.index, errors="coerce").tz_localize(None).to_period("M").to_timestamp("M")
+            series.index = pd.to_datetime(series.index, errors="coerce").tz_localize(None).normalize()
             series = series[~series.index.isna()].groupby(level=0).last()
-            current_month = pd.Timestamp.now(tz="UTC").tz_localize(None).to_period("M")
-            series = series.loc[series.index.to_period("M") < current_month]
             if series.empty:
                 status[asset] = "MISSING"
                 continue
             series.name = asset
             frames.append(series)
             age_days = (pd.Timestamp.now().normalize() - series.index.max().normalize()).days
-            freshness = "STALE" if age_days > 62 else "CURRENT"
+            freshness = "STALE" if age_days > 7 else "CURRENT"
             status[asset] = f"{freshness}: {series.index.max().date().isoformat()} via Yahoo Finance ({ticker})"
         except Exception as exc:
             status[asset] = f"FAILED: {exc}"
     return (pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()), status
+
+
+def cftc_snapshot_from_master(
+    master: pd.DataFrame,
+    *,
+    source_error: bool = False,
+    reference_date: pd.Timestamp | str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Build current commodity CFTC signals while retaining non-current history for diagnostics."""
+    out: dict[str, dict[str, Any]] = {}
+    for asset in CFTC_ASSET_MAP:
+        series = cftc_asset_series(master, CFTC_ASSET_MAP[asset], "Managed Money")
+        contract = cftc_contract_status(
+            master,
+            CFTC_ASSET_MAP[asset],
+            source_error=source_error,
+            reference_date=reference_date,
+        )
+        cfg = cftc_asset_config(CFTC_ASSET_MAP[asset])
+        if series.empty:
+            out[asset] = {
+                "Status": contract["status"],
+                "CFTC Status": contract["status"],
+                "CFTC Contract Market Code": contract.get("code"),
+                "Latest Official CFTC Report Date": contract.get("latest_report_date"),
+                "Series Present In Latest Report": "NO",
+                "Reason Current Signal Missing": "EXACT_CFTC_SERIES_UNAVAILABLE",
+            }
+            continue
+        row = series.sort_values("Date").iloc[-1]
+        is_current = contract["status"] == "CURRENT"
+        last_date = pd.to_datetime(row.get("Date"), errors="coerce")
+        last_net = row.get("NetPctOI")
+        last_pctl = row.get("NetPctOI_5Y_Percentile")
+        missing_reason = None
+        if not is_current:
+            missing_reason = (
+                "OUTRIGHT_ALUMINUM_SERIES_NOT_PRESENT_IN_LATEST_CFTC_REPORT"
+                if asset == "Aluminum" and contract["status"] == "SERIES_NOT_CURRENT"
+                else "EXACT_CFTC_SERIES_NOT_CURRENT"
+            )
+        out[asset] = {
+                "MM Net % OI": last_net if is_current else np.nan,
+                "Net Direction": "Net Long" if is_current and pd.notna(last_net) and last_net > 0 else "Net Short" if is_current and pd.notna(last_net) and last_net < 0 else "Neutral" if is_current and pd.notna(last_net) else "N/A",
+                "3Y Percentile": row.get("NetPctOI_3Y_Percentile") if is_current else np.nan,
+                "5Y Percentile": last_pctl if is_current else np.nan,
+                "4W Change": row.get("NetPctOI_4W_Change") if is_current else np.nan,
+                "13W Change": row.get("NetPctOI_13W_Change") if is_current else np.nan,
+                "Updated Date": last_date if is_current else pd.NaT,
+                "CFTC As Of": last_date if is_current else pd.NaT,
+                "Series Observation Date": last_date,
+                "History Weeks": row.get("History_Weeks"),
+                "History Quality": "READY" if float(row.get("History_Weeks", 0) or 0) >= 260 else "INSUFFICIENT_5Y_HISTORY",
+                "Status": contract["status"],
+                "CFTC Status": contract["status"],
+                "CFTC Contract Market Code": contract.get("code") or (cfg.code_patterns[0] if cfg and cfg.code_patterns else None),
+                "CFTC Market Name": row.get("Market_Name", row.get("Raw_Contract_Name")),
+                "Latest Official CFTC Report Date": contract.get("latest_report_date"),
+                "Series Present In Latest Report": "YES" if contract.get("present_in_latest_report") else "NO",
+                "CFTC Open Interest": row.get("Open_Interest") if is_current else np.nan,
+                "MM Long": row.get("Long") if is_current else np.nan,
+                "MM Short": row.get("Short") if is_current else np.nan,
+                "MM Spreading": row.get("Spreading") if is_current else np.nan,
+                "MM Net": row.get("Net") if is_current else np.nan,
+                "MM Traders Long": row.get("Traders_Long") if is_current else np.nan,
+                "MM Traders Short": row.get("Traders_Short") if is_current else np.nan,
+                "MM Traders Spreading": row.get("Traders_Spread") if is_current else np.nan,
+                "Last Available Date": last_date,
+                "Last Available MM Net % OI": last_net,
+                "Last Available COT 5Y Percentile": last_pctl,
+                "Reason Current Signal Missing": missing_reason,
+        }
+    return out
 
 
 def load_cftc_snapshot() -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
@@ -265,29 +580,22 @@ def load_cftc_snapshot() -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     try:
         result = load_positioning_data(force_update=False)
         master = result.get("cftc_master", pd.DataFrame())
+        source_details = result.get("status", {}).get("CFTC Commodities", {})
+        source_error = str(source_details.get("status", "")).startswith("SOURCE_FAILED")
         source_freshness = cftc_latest_status(master, "Disaggregated").get("status", "DATA UNAVAILABLE")
-        out: dict[str, dict[str, Any]] = {}
-        for asset in CFTC_ASSET_MAP:
-            series = cftc_asset_series(master, CFTC_ASSET_MAP[asset], "Managed Money")
-            if series.empty:
-                out[asset] = {}
-                continue
-            row = series.sort_values("Date").iloc[-1]
-            out[asset] = {
-                "MM Net % OI": row.get("NetPctOI"),
-                "Net Direction": "Net Long" if pd.notna(row.get("NetPctOI")) and row.get("NetPctOI") > 0 else "Net Short" if pd.notna(row.get("NetPctOI")) and row.get("NetPctOI") < 0 else "Flat / N/A",
-                "3Y Percentile": row.get("NetPctOI_3Y_Percentile"),
-                "5Y Percentile": row.get("NetPctOI_5Y_Percentile"),
-                "4W Change": row.get("NetPctOI_4W_Change"),
-                "13W Change": row.get("NetPctOI_13W_Change"),
-                "Updated Date": pd.to_datetime(row.get("Date"), errors="coerce"),
-                "History Weeks": row.get("History_Weeks"),
-                "Status": source_freshness,
-            }
+        out = cftc_snapshot_from_master(master, source_error=source_error)
         status = {"CFTC": source_freshness if out else "MISSING"}
         return out, status
     except Exception as exc:
         return {}, {"CFTC": f"FAILED: {exc}"}
+
+
+def _as_of_alignment(*values: Any) -> str:
+    parsed = [pd.to_datetime(value, errors="coerce") for value in values]
+    valid = [pd.Timestamp(value).normalize() for value in parsed if pd.notna(value)]
+    if len(valid) != len(values):
+        return "INCOMPLETE_AS_OF"
+    return "ALIGNED" if len(set(valid)) == 1 else "MIXED_AS_OF"
 
 
 def build_market_confirmation(
@@ -308,12 +616,10 @@ def build_market_confirmation(
     )
 
     current_rows: list[dict[str, Any]] = []
-    history_rows: list[pd.DataFrame] = []
     for asset in PRICE_TICKERS:
         price = monthly_prices.get(asset, pd.Series(dtype=float)).dropna() if not monthly_prices.empty else pd.Series(dtype=float)
-        r3 = price.iloc[-1] / price.iloc[-4] - 1 if len(price) >= 4 else np.nan
-        r6 = price.iloc[-1] / price.iloc[-7] - 1 if len(price) >= 7 else np.nan
-        r12 = price.iloc[-1] / price.iloc[-13] - 1 if len(price) >= 13 else np.nan
+        returns = price_returns_from_daily(price)
+        r1, r3, r6, r12 = (returns[label] for label in ("Return 1M", "Return 3M", "Return 6M", "Return 12M"))
         pstate = classify_commodity_price_momentum(r3, r6, r12)
         curve = term_current.loc[term_current["Asset"].eq(asset)] if not term_current.empty else pd.DataFrame()
         if not curve.empty and "Structure" in curve:
@@ -332,13 +638,15 @@ def build_market_confirmation(
             "Commodity": asset,
             "Price": float(price.iloc[-1]) if len(price) else np.nan,
             "Price Date": price.index[-1] if len(price) else pd.NaT,
-            "Return 3M": r3, "Return 6M": r6, "Return 12M": r12,
+            "Return 1M": r1, "Return 3M": r3, "Return 6M": r6, "Return 12M": r12,
             "Price State": pstate,
             "Term Structure As Of": curve_row.get("As Of"),
             "Term Structure Source": curve_row.get("Source"),
             "Term Structure Structure": curve_row.get("Structure"),
             "F1 Symbol": curve_row.get("F1 Symbol"), "F3 Symbol": curve_row.get("F3 Symbol"), "F6 Symbol": curve_row.get("F6 Symbol"),
             "CurveDataQuality": curve_row.get("CurveDataQuality"),
+            "Price Data Quality": curve_row.get("PriceDataQuality"),
+            "Contract Selection Quality": curve_row.get("ContractSelectionQuality"),
             "MTD Average Spread": curve_row.get("MTD Average Spread"),
             "MTD Daily Observations": curve_row.get("MTD Daily Observations"),
             "Current Seasonal Status": curve_row.get("Current Seasonal Status"),
@@ -353,6 +661,17 @@ def build_market_confirmation(
             "Raw Curve State": raw,
             "Seasonal Percentile 10Y": seasonal_pctl,
             "Seasonal Percentile 5Y": seasonal_5y,
+            "Seasonal Percentile As Of": curve_row.get("Seasonal Percentile As Of"),
+            "Seasonal Percentile Status": curve_row.get("Seasonal Percentile Status", "N/A"),
+            "Seasonal Percentile 5Y HistoryN": curve_row.get("Seasonal Percentile 5Y HistoryN"),
+            "Seasonal Percentile 5Y HistoryStatus": curve_row.get("Seasonal Percentile 5Y HistoryStatus"),
+            "Seasonal Percentile 10Y HistoryN": curve_row.get("Seasonal Percentile 10Y HistoryN"),
+            "Seasonal Percentile 10Y HistoryStatus": curve_row.get("Seasonal Percentile 10Y HistoryStatus"),
+            "Seasonal Percentile 10Y Explanation": curve_row.get("Seasonal Percentile 10Y Explanation"),
+            "Current Curve Vendor": curve_row.get("Current Curve Vendor"),
+            "Seasonal History Source": curve_row.get("Seasonal History Source"),
+            "Seasonal History Vendor": curve_row.get("Seasonal History Vendor"),
+            "Vendor Consistency": curve_row.get("Vendor Consistency"),
             "Seasonal Relative State": curve_state,
             "Price × Seasonal Curve": resolve_price_curve_market_state(pstate, curve_state),
             **{
@@ -362,21 +681,20 @@ def build_market_confirmation(
             },
             "CFTC Status": c.get("Status", "MISSING"),
             "CFTC Relative State": classify_cftc_relative_state(c.get("5Y Percentile", np.nan)),
+            "Relative Positioning State": classify_cftc_relative_state(c.get("5Y Percentile", np.nan)),
             "CFTC Qualifier": "N/A",
         }
         row["CFTC Qualifier"] = resolve_cftc_qualifier(
             [c.get("5Y Percentile", np.nan)], [c.get("MM Net % OI", np.nan)]
         ) if c else "N/A"
+        row["As Of Alignment"] = _as_of_alignment(
+            row.get("Price Date"),
+            row.get("Term Structure As Of"),
+            row.get("CFTC As Of"),
+            row.get("Seasonal Percentile As Of"),
+        )
         current_rows.append(row)
 
-        if len(price):
-            h = price.rename("Price").to_frame()
-            h["Return 3M"] = h["Price"].div(h["Price"].shift(3)).sub(1)
-            h["Return 6M"] = h["Price"].div(h["Price"].shift(6)).sub(1)
-            h["Return 12M"] = h["Price"].div(h["Price"].shift(12)).sub(1)
-            h["Price State"] = [classify_commodity_price_momentum(a, b, c_) for a, b, c_ in zip(h["Return 3M"], h["Return 6M"], h["Return 12M"])]
-            h["Commodity"] = asset
-            history_rows.append(h)
     commodity = pd.DataFrame(current_rows)
     sectors = []
     for sector, assets in COMMODITY_SECTORS.items():

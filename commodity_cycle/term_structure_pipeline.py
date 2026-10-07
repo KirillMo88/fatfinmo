@@ -913,17 +913,21 @@ def seasonal_history_frame(baseline: pd.DataFrame, monthly: pd.DataFrame) -> pd.
                 "Copper": "Cash/3M", "Aluminum": "Cash/3M",
                 "Corn": "Dec/Mar", "Wheat": "Dec/Mar", "Soybeans": "Nov/Jan",
             })
-        base = base.loc[:, ["Asset", "Date", "Month", "Spread %", "Structure"]].copy()
+        base["Source"] = base.get("Source URL", "Historical baseline")
+        base["History Data Quality"] = base.get("Data Quality", "N/A")
+        base = base.loc[:, ["Asset", "Date", "Month", "Spread %", "Structure", "Source", "History Data Quality"]].copy()
         base = base.rename(columns={"Spread %": "Spread"})
         base["PairKey"] = [_baseline_pair_key(row.Asset, row.Structure) for row in base.itertuples()]
-        frames.append(base[["Asset", "Date", "Month", "Spread", "PairKey"]])
+        frames.append(base[["Asset", "Date", "Month", "Spread", "PairKey", "Source", "History Data Quality"]])
     if not monthly.empty:
         app = monthly.rename(columns={"asset": "Asset", "month": "Date", "monthly_spread": "Spread", "pair_key": "PairKey"}).copy()
         app["Date"] = pd.to_datetime(app["Date"], errors="coerce")
         app["Month"] = app["Date"].dt.month
-        frames.append(app[["Asset", "Date", "Month", "Spread", "PairKey"]])
+        app["Source"] = app.get("source", "Application month-end store")
+        app["History Data Quality"] = "APPLICATION_FINALIZED_MONTH"
+        frames.append(app[["Asset", "Date", "Month", "Spread", "PairKey", "Source", "History Data Quality"]])
     if not frames:
-        return pd.DataFrame(columns=["Asset", "Date", "Month", "Spread", "PairKey"])
+        return pd.DataFrame(columns=["Asset", "Date", "Month", "Spread", "PairKey", "Source", "History Data Quality"])
     result = pd.concat(frames, ignore_index=True)
     result["Date"] = pd.to_datetime(result["Date"], errors="coerce")
     result["Spread"] = pd.to_numeric(result["Spread"], errors="coerce")
@@ -1006,9 +1010,9 @@ def _calculate_agriculture_seasonality(row: dict[str, Any], history: pd.DataFram
         result[f"{label} HistoryEndDate"] = info["history_end"]
         result[f"{label} HistoryStatus"] = info["history_status"]
     if pd.notna(result.get("Seasonal Pctl 10Y")):
-        result["current_seasonal_status"] = "OFFICIAL"
+        result["current_seasonal_status"] = "MODEL_CALCULATED"
     elif pd.notna(result.get("Seasonal Pctl 5Y")):
-        result["current_seasonal_status"] = "OFFICIAL_5Y / INSUFFICIENT_10Y_HISTORY"
+        result["current_seasonal_status"] = "MODEL_CALCULATED_5Y / INSUFFICIENT_10Y_HISTORY"
     else:
         result["current_seasonal_status"] = "INSUFFICIENT_SEASONAL_HISTORY"
     return result

@@ -10,6 +10,7 @@ from positioning import (
     calculate_naaim_metrics,
     cftc_asset_series,
     cftc_dashboard_frame,
+    cftc_contract_status,
     export_positioning_xlsx,
     normalize_cftc,
     parse_aaii_live_results_html,
@@ -17,6 +18,7 @@ from positioning import (
     resolve_canonical_contracts,
     validate_cftc_master,
 )
+from commodity_cycle.data import cftc_snapshot_from_master
 
 
 def test_normalize_disaggregated_gold_and_calculate_metrics():
@@ -45,6 +47,82 @@ def test_normalize_disaggregated_gold_and_calculate_metrics():
     assert np.isfinite(gold.iloc[-1]["NetPctOI_3Y_Percentile"])
     assert np.isfinite(gold.iloc[-1]["NetPctOI_5Y_Percentile"])
     assert not validate_cftc_master(master)
+
+
+def test_managed_money_net_excludes_spreading_and_keeps_trader_counts():
+    raw = pd.DataFrame({
+        "Report_Date_as_YYYY-MM-DD": [pd.Timestamp("2026-09-29")],
+        "Market_and_Exchange_Names": ["WTI-PHYSICAL - NEW YORK MERCANTILE EXCHANGE"],
+        "Contract_Market_Name": ["WTI-PHYSICAL"],
+        "CFTC_Contract_Market_Code": ["067651"],
+        "Open_Interest_All": [500],
+        "M_Money_Positions_Long_All": [100],
+        "M_Money_Positions_Short_All": [70],
+        "M_Money_Positions_Spread_All": [200],
+        "Traders_M_Money_Long_All": [12],
+        "Traders_M_Money_Short_All": [9],
+        "Traders_M_Money_Spread_All": [7],
+    })
+    master = calculate_cftc_positioning_metrics(resolve_canonical_contracts(normalize_cftc(raw, pd.DataFrame())))
+    row = cftc_asset_series(master, "WTI", "Managed Money").iloc[-1]
+
+    assert row["Net"] == 30
+    assert row["NetPctOI"] == 6
+    assert row["Spreading"] == 200
+    assert row["Traders_Long"] == 12
+    assert row["Traders_Short"] == 9
+    assert row["Traders_Spread"] == 7
+
+
+def test_absent_aluminum_outright_is_not_current_or_spliced_to_mwp():
+    aluminum_dates = pd.date_range(end="2026-06-09", periods=260, freq="W-TUE")
+    raw = pd.DataFrame({
+        "Report_Date_as_YYYY-MM-DD": aluminum_dates,
+        "Market_and_Exchange_Names": ["ALUMINUM - COMMODITY EXCHANGE INC."] * len(aluminum_dates),
+        "Contract_Market_Name": ["ALUMINUM"] * len(aluminum_dates),
+        "CFTC_Contract_Market_Code": ["191691"] * len(aluminum_dates),
+        "Open_Interest_All": [1000] * len(aluminum_dates),
+        "M_Money_Positions_Long_All": np.arange(300, 560),
+        "M_Money_Positions_Short_All": np.arange(100, 360),
+        "M_Money_Positions_Spread_All": [50] * len(aluminum_dates),
+    })
+    latest = pd.DataFrame({
+        "Report_Date_as_YYYY-MM-DD": [pd.Timestamp("2026-09-29"), pd.Timestamp("2026-09-29")],
+        "Market_and_Exchange_Names": ["WTI-PHYSICAL - NEW YORK MERCANTILE EXCHANGE", "ALUMINUM MWP - COMMODITY EXCHANGE INC."],
+        "Contract_Market_Name": ["WTI-PHYSICAL", "ALUMINUM MWP"],
+        "CFTC_Contract_Market_Code": ["067651", "191693"],
+        "Open_Interest_All": [1000, 1000],
+        "M_Money_Positions_Long_All": [400, 900],
+        "M_Money_Positions_Short_All": [200, 100],
+        "M_Money_Positions_Spread_All": [50, 50],
+    })
+    master = calculate_cftc_positioning_metrics(
+        resolve_canonical_contracts(normalize_cftc(pd.concat([raw, latest], ignore_index=True), pd.DataFrame()))
+    )
+
+    contract = cftc_contract_status(master, "Aluminum", reference_date="2026-10-07")
+    snapshots = cftc_snapshot_from_master(master, reference_date="2026-10-07")
+    snapshot = snapshots["Aluminum"]
+    wti_snapshot = snapshots["WTI"]
+    historical = cftc_asset_series(master, "Aluminum", "Managed Money")
+
+    assert contract["status"] == "SERIES_NOT_CURRENT"
+    assert contract["latest_report_date"] == "2026-09-29"
+    assert contract["series_date"] == "2026-06-09"
+    assert len(historical) == 260
+    assert set(historical["CFTC_Code"]) == {"191691"}
+    assert not master.loc[master["CFTC_Code"].eq("191693"), "Preferred_For_Dashboard"].any()
+    assert pd.isna(snapshot["MM Net % OI"])
+    assert pd.isna(snapshot["4W Change"])
+    assert pd.isna(snapshot["13W Change"])
+    assert pd.isna(snapshot["5Y Percentile"])
+    assert snapshot["Status"] == "SERIES_NOT_CURRENT"
+    assert snapshot["Reason Current Signal Missing"] == "OUTRIGHT_ALUMINUM_SERIES_NOT_PRESENT_IN_LATEST_CFTC_REPORT"
+    assert snapshot["Last Available Date"] == pd.Timestamp("2026-06-09")
+    assert wti_snapshot["Status"] == "CURRENT"
+    assert np.isclose(wti_snapshot["MM Net % OI"], 20.0)
+    assert pd.isna(wti_snapshot["5Y Percentile"])
+    assert wti_snapshot["History Quality"] == "INSUFFICIENT_5Y_HISTORY"
 
 
 def test_wti_same_code_history_continues_across_name_change_without_ice_splice():

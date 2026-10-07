@@ -191,6 +191,53 @@ def cftc_latest_status(master: pd.DataFrame, report_type: str) -> dict[str, Any]
     return {"last_report_date": latest.date().isoformat(), "status": "STALE DATA" if age > CFTC_STALE_DAYS else "CURRENT"}
 
 
+def cftc_contract_status(
+    master: pd.DataFrame,
+    asset: str,
+    *,
+    source_error: bool = False,
+    reference_date: pd.Timestamp | str | None = None,
+) -> dict[str, Any]:
+    """Validate that an asset's exact configured CFTC code is present in the latest official report."""
+    cfg = cftc_asset_config(asset)
+    if source_error:
+        return {"status": "SOURCE_ERROR", "latest_report_date": None, "series_date": None,
+                "present_in_latest_report": False, "code": cfg.code_patterns[0] if cfg and cfg.code_patterns else None}
+    if cfg is None or master.empty:
+        return {"status": "SOURCE_ERROR", "latest_report_date": None, "series_date": None,
+                "present_in_latest_report": False, "code": None}
+    report = master.loc[master["Report_Type"].eq(cfg.report_type)].copy()
+    report["Date"] = pd.to_datetime(report["Date"], errors="coerce")
+    report = report.dropna(subset=["Date"])
+    if report.empty:
+        return {"status": "SOURCE_ERROR", "latest_report_date": None, "series_date": None,
+                "present_in_latest_report": False, "code": cfg.code_patterns[0] if cfg.code_patterns else None}
+    latest_report = pd.Timestamp(report["Date"].max()).normalize()
+    codes = {str(code).strip().upper() for code in cfg.code_patterns}
+    code_values = report["CFTC_Code"].fillna("").astype(str).str.strip().str.upper()
+    exact = (
+        report.loc[code_values.isin(codes)]
+        if codes
+        else report.loc[report["Canonical_Asset"].eq(asset) & report["Preferred_For_Dashboard"].astype(bool)]
+    )
+    series_date = pd.Timestamp(exact["Date"].max()).normalize() if not exact.empty else pd.NaT
+    present = bool(pd.notna(series_date) and series_date == latest_report)
+    today = (
+        pd.Timestamp(reference_date).tz_localize(None).normalize()
+        if reference_date is not None
+        else pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    )
+    age = (today - latest_report).days
+    status = "CURRENT" if present and age <= CFTC_STALE_DAYS else "STALE" if present else "SERIES_NOT_CURRENT"
+    return {
+        "status": status,
+        "latest_report_date": latest_report.date().isoformat(),
+        "series_date": series_date.date().isoformat() if pd.notna(series_date) else None,
+        "present_in_latest_report": present,
+        "code": cfg.code_patterns[0] if cfg.code_patterns else None,
+    }
+
+
 def export_positioning_xlsx(master: pd.DataFrame, aaii: pd.DataFrame, naaim: pd.DataFrame, status: dict[str, Any]) -> bytes:
     output = io.BytesIO()
     dashboard = cftc_dashboard_frame(master)
@@ -277,6 +324,8 @@ def normalize_cftc_report(raw: pd.DataFrame, report_type: str, participants: tup
         {
             "Date": parse_cftc_dates(frame[date_col]),
             "Raw_Contract_Name": frame[contract_col].astype(str),
+            "Contract_Market_Name": frame[contract_col].astype(str),
+            "Market_Name": frame[market_col].astype(str) if market_col else frame[contract_col].astype(str),
             "Exchange": frame[exchange_col].astype(str) if exchange_col else "",
             "CFTC_Code": frame[code_col].astype(str) if code_col else "",
             "Open_Interest": parse_number(frame[oi_col]),
@@ -295,6 +344,12 @@ def normalize_cftc_report(raw: pd.DataFrame, report_type: str, participants: tup
         part["Long"] = parse_number(frame[long_col])
         part["Short"] = parse_number(frame[short_col])
         part["Spreading"] = parse_number(frame[spread_col]) if spread_col and spread_col in frame.columns else np.nan
+        trader_long_col = f"traders_{long_col.replace('_positions_', '_')}"
+        trader_short_col = f"traders_{short_col.replace('_positions_', '_')}"
+        trader_spread_col = f"traders_{spread_col.replace('_positions_', '_')}" if spread_col else None
+        part["Traders_Long"] = parse_number(frame[trader_long_col]) if trader_long_col in frame.columns else np.nan
+        part["Traders_Short"] = parse_number(frame[trader_short_col]) if trader_short_col in frame.columns else np.nan
+        part["Traders_Spread"] = parse_number(frame[trader_spread_col]) if trader_spread_col and trader_spread_col in frame.columns else np.nan
         part["Source"] = source
         out.append(part)
     if not out:
@@ -752,7 +807,8 @@ def trailing_percentile(series: pd.Series, window: int = CFTC_PERCENTILE_WINDOW,
         clean = window_values[np.isfinite(window_values)]
         if len(clean) < min_periods or not np.isfinite(window_values[-1]):
             return np.nan
-        return float((clean <= window_values[-1]).sum() / len(clean) * 100.0)
+        from commodity_cycle.model import midrank_percentile
+        return midrank_percentile(float(window_values[-1]), clean)
 
     return values.rolling(window, min_periods=min_periods).apply(rank_last, raw=True)
 
@@ -763,6 +819,8 @@ def cftc_master_columns() -> list[str]:
         "Asset_Group",
         "Canonical_Asset",
         "Raw_Contract_Name",
+        "Contract_Market_Name",
+        "Market_Name",
         "Exchange",
         "CFTC_Code",
         "Report_Type",
@@ -770,6 +828,9 @@ def cftc_master_columns() -> list[str]:
         "Long",
         "Short",
         "Spreading",
+        "Traders_Long",
+        "Traders_Short",
+        "Traders_Spread",
         "Open_Interest",
         "Net",
         "NetPctOI",

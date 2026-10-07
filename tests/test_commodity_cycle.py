@@ -3,9 +3,14 @@ import pandas as pd
 from datetime import date
 from commodity_cycle.data import (
     FRED_SERIES,
+    _combined_curve_quality,
+    _contract_selection_quality,
+    _official_seasonal_result,
+    _official_seasonal_percentiles,
     build_commodity_cycle_history,
     build_market_confirmation,
     latest_complete_commodity_cycle_row,
+    price_returns_from_daily,
 )
 
 from commodity_cycle.model import (
@@ -32,6 +37,7 @@ from commodity_cycle.term_structure_pipeline import (
     fetch_current_term_structure,
     _completed_eod_frame,
     _current_month_daily,
+    _calculate_agriculture_seasonality,
     agriculture_contract_pair,
     agriculture_seasonal_observation,
     agriculture_seasonal_percentile,
@@ -49,6 +55,117 @@ def test_price_momentum_priority_and_edges():
     assert classify_commodity_price_momentum(0.01, -0.02, -0.03) == "Bearish"
     assert classify_commodity_price_momentum(0.0, 0.02, 0.03) == "Bullish"
     assert classify_commodity_price_momentum(0.01, 0.0, 0.03) == "Neutral"
+
+
+def test_price_returns_use_current_price_and_calendar_week_lags():
+    dates = pd.date_range("2025-10-08", periods=53, freq="W-WED")
+    prices = pd.Series(np.arange(1.0, 54.0), index=dates)
+
+    returns = price_returns_from_daily(prices)
+
+    assert np.isclose(returns["Return 1M"], 53 / 49 - 1)
+    assert np.isclose(returns["Return 3M"], 53 / 40 - 1)
+    assert np.isclose(returns["Return 6M"], 53 / 27 - 1)
+    assert np.isclose(returns["Return 12M"], 53 / 1 - 1)
+
+
+def test_energy_seasonal_fallback_uses_latest_same_calendar_month_only():
+    october_dates = pd.to_datetime([f"{year}-10-01" for year in range(2018, 2024)])
+    history = pd.DataFrame({
+        "Asset": ["WTI"] * 7,
+        "Date": list(october_dates) + [pd.Timestamp("2023-12-01")],
+        "Month": [10] * 6 + [12],
+        "Spread": [0.01, 0.02, 0.03, 0.04, 0.05, 0.03, 99.0],
+        "PairKey": ["WTI_F1/F3"] * 7,
+    })
+    row = pd.Series({
+        "asset": "WTI", "pair_key": "WTI_F1/F3", "As Of": pd.Timestamp("2026-10-06"),
+        "mtd_observation_count": 4, "Seasonal Pctl 5Y": np.nan, "Seasonal Pctl 10Y": np.nan,
+    })
+
+    p5, p10, as_of, status = _official_seasonal_percentiles(row, history, percentile_with_history)
+
+    assert p5 == 50.0
+    assert pd.isna(p10)
+    assert as_of == "2023-10"
+    assert status == "HISTORICAL_FALLBACK_SAME_MONTH"
+
+    current = row.copy()
+    current["mtd_observation_count"] = 5
+    current["Seasonal Pctl 5Y"] = 80.0
+    current["Seasonal Pctl 10Y"] = 60.0
+    p5, p10, as_of, status = _official_seasonal_percentiles(current, history, percentile_with_history)
+    assert (p5, p10, as_of, status) == (80.0, 60.0, "2026-10-06", "CURRENT_MTD")
+
+
+def test_metals_fallback_stays_in_same_month_and_explains_missing_10y():
+    dates = pd.to_datetime([f"{year}-10-01" for year in range(2016, 2026)] + ["2025-12-01"])
+    history = pd.DataFrame({
+        "Asset": ["Copper"] * len(dates),
+        "Date": dates,
+        "Month": [10] * 10 + [12],
+        "Spread": np.arange(1.0, len(dates) + 1.0) / 100,
+        "PairKey": ["Copper_Cash_3M"] * len(dates),
+        "Source": ["https://www.westmetall.com/"] * len(dates),
+    })
+    row = pd.Series({
+        "asset": "Copper", "pair_key": "Copper_Cash_3M", "As Of": pd.Timestamp("2026-10-06"),
+        "mtd_observation_count": 4, "Seasonal Pctl 5Y": np.nan, "Seasonal Pctl 10Y": np.nan,
+        "Source": "Westmetall LME Cash/3M",
+    })
+
+    result = _official_seasonal_result(row, history, percentile_with_history)
+
+    assert result["as_of"] == "2025-10"
+    assert result["status"] == "HISTORICAL_FALLBACK_SAME_MONTH"
+    assert result["history_10y_n"] == 9
+    assert pd.isna(result["p10"])
+    assert result["10y_explanation"] == "N/A: requires 10 prior comparable observations; 9/10 available"
+    assert result["vendor_consistency"] == "SAME_VENDOR"
+
+
+def test_cross_vendor_seasonal_comparison_is_exposed():
+    history = pd.DataFrame({
+        "Asset": ["WTI"] * 6,
+        "Date": pd.to_datetime([f"{year}-10-01" for year in range(2018, 2024)]),
+        "Month": [10] * 6,
+        "Spread": np.arange(1.0, 7.0) / 100,
+        "PairKey": ["WTI_F1/F3"] * 6,
+        "Source": ["https://www.eia.gov/"] * 6,
+    })
+    row = pd.Series({
+        "asset": "WTI", "pair_key": "WTI_F1/F3", "As Of": pd.Timestamp("2026-10-06"),
+        "mtd_observation_count": 4, "Seasonal Pctl 5Y": np.nan, "Seasonal Pctl 10Y": np.nan,
+        "Source": "Yahoo Finance",
+    })
+
+    result = _official_seasonal_result(row, history, percentile_with_history)
+
+    assert result["current_curve_vendor"] == "Yahoo Finance"
+    assert result["history_vendor"] == "EIA"
+    assert result["vendor_consistency"] == "CROSS_VENDOR"
+
+
+def test_agriculture_seasonal_status_is_model_calculated_not_official():
+    history = pd.DataFrame({
+        "Season Start Year": range(2016, 2026),
+        "Season": [f"{year}/{str(year + 1)[-2:]}" for year in range(2016, 2026)],
+        "Median Seasonal Spread": np.arange(1.0, 11.0) / 100,
+        "Data Quality": ["OK"] * 10,
+    })
+    result = _calculate_agriculture_seasonality(
+        {"spread": 0.11, "season_start_year": 2026},
+        history,
+    )
+
+    assert result["current_seasonal_status"] == "MODEL_CALCULATED"
+
+
+def test_curve_quality_separates_price_and_contract_selection():
+    assert _contract_selection_quality("WTI", "CALENDAR_FALLBACK") == "LOW"
+    assert _combined_curve_quality("HIGH", "LOW") == "LOW_CONTRACT_SELECTION"
+    assert _contract_selection_quality("Copper", None) == "NOT_APPLICABLE_CASH_3M"
+    assert _combined_curve_quality("HIGH", "NOT_APPLICABLE_CASH_3M") == "HIGH"
 
 
 def test_inventory_sales_stress_inverts_ratio_percentile_without_lookahead():
@@ -84,6 +201,7 @@ def test_seasonal_curve_half_open_boundaries():
         90.001: "Extreme Tight vs Seasonal",
     }
     assert {value: classify_seasonal_curve(value) for value in expected} == expected
+    assert classify_seasonal_curve(60.0 - 1e-10) == "Mild Tight vs Seasonal"
 
 
 def test_price_curve_matrix_uses_seasonal_semantics_without_changing_logic():
@@ -102,12 +220,12 @@ def test_cftc_relative_state_half_open_boundaries():
 def test_sector_cftc_qualifier_exact_boundaries_and_absolute_direction():
     def qualifier(pctl, net):
         return resolve_cftc_qualifier([pctl, pctl], [net, net])
-    assert qualifier(10, -1) == "Short / Contrarian"
-    assert qualifier(25, -1) == "Not Crowded"
-    assert qualifier(75, 1) == "Crowded"
-    assert qualifier(90, 1) == "Crowded"
-    assert qualifier(90.01, 1) == "Extremely Crowded"
-    assert qualifier(80, -1) == "High Relative Positioning / Still Net Short"
+    assert qualifier(10, -1) == "Net Short / Low Relative Positioning"
+    assert qualifier(25, -1) == "Net Short / Neutral Relative Positioning"
+    assert qualifier(20, 1) == "Net Long / Low Relative Positioning"
+    assert qualifier(75, 1) == "Net Long / High Relative Positioning"
+    assert qualifier(90.01, 1) == "Net Long / Extreme High Relative Positioning"
+    assert qualifier(80, -1) == "Net Short / High Relative Positioning"
 
 
 def test_yahoo_contract_symbols_are_generated_for_rolling_years():

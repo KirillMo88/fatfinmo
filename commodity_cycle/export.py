@@ -11,12 +11,17 @@ import xlsxwriter
 
 
 PERCENT_COLUMNS = {
-    "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread",
+    "Return 1M", "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread",
 }
 
 
-def commodity_tables_to_xlsx(primary: pd.DataFrame, diagnostics: pd.DataFrame) -> bytes:
-    """Export the two Commodity Cycle tables as a formatted two-sheet workbook."""
+def commodity_tables_to_xlsx(
+    primary: pd.DataFrame,
+    diagnostics: pd.DataFrame,
+    seasonal_history: pd.DataFrame | None = None,
+    term_structure_audit: pd.DataFrame | None = None,
+) -> bytes:
+    """Export current tables plus the seasonal history actually used by the engine."""
     output = BytesIO()
     workbook = xlsxwriter.Workbook(output, {"in_memory": True, "nan_inf_to_errors": True})
     formats = {
@@ -28,6 +33,24 @@ def commodity_tables_to_xlsx(primary: pd.DataFrame, diagnostics: pd.DataFrame) -
     }
     _write_table_sheet(workbook, "Confirmation", "CommodityConfirmation", primary, formats, highlight=True)
     _write_table_sheet(workbook, "Diagnostics", "CommodityDiagnostics", diagnostics, formats, highlight=False)
+    if seasonal_history is not None and not seasonal_history.empty:
+        _write_table_sheet(
+            workbook,
+            "Seasonal History",
+            "CommoditySeasonalHistory",
+            seasonal_history,
+            formats,
+            highlight=False,
+        )
+    if term_structure_audit is not None and not term_structure_audit.empty:
+        _write_table_sheet(
+            workbook,
+            "Term Structure Audit",
+            "CommodityTermStructureAudit",
+            term_structure_audit,
+            formats,
+            highlight=False,
+        )
     workbook.close()
     return output.getvalue()
 
@@ -63,7 +86,7 @@ def _write_table_sheet(
     if not highlight or frame.empty:
         return
 
-    for column in ("Return 3M", "Return 6M", "Return 12M"):
+    for column in ("Return 1M", "Return 3M", "Return 6M", "Return 12M"):
         if column not in columns:
             continue
         index = columns.index(column)

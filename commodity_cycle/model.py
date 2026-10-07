@@ -113,6 +113,10 @@ def classify_sector_price_state(price_states: Sequence[str], sector: str | None 
 def classify_seasonal_curve(percentile: float) -> str:
     if pd.isna(percentile):
         return "N/A"
+    # Percentiles are displayed to two decimals, while upstream calculations may
+    # land microscopically below an exact threshold (for example 59.999999999).
+    # Normalize numerical noise before applying the centralized half-open bands.
+    percentile = round(float(percentile), 8)
     if percentile < 10:
         return "Extreme Loose vs Seasonal"
     if percentile < 25:
@@ -140,6 +144,16 @@ def classify_cftc_relative_state(percentile: float) -> str:
     if percentile <= 90:
         return "High"
     return "Extreme High"
+
+
+def classify_net_direction(net_pct_oi: float, tolerance: float = 1e-9) -> str:
+    if pd.isna(net_pct_oi):
+        return "N/A"
+    if float(net_pct_oi) > tolerance:
+        return "Net Long"
+    if float(net_pct_oi) < -tolerance:
+        return "Net Short"
+    return "Neutral"
 
 
 def resolve_price_curve_market_state(price_state: str, curve_state: str) -> str:
@@ -191,20 +205,12 @@ def resolve_cftc_qualifier(percentiles: Sequence[float], net_positions: Sequence
     net = net[np.isfinite(net)]
     if not len(net):
         return "N/A"
-    majority_long = np.count_nonzero(net > 0) > len(net) / 2
-    majority_short = np.count_nonzero(net < 0) > len(net) / 2
-    if pctl < 25:
-        base = "Short / Contrarian"
-    elif pctl < 75:
-        base = "Not Crowded"
-    elif pctl <= 90 and majority_long:
-        base = "Crowded"
-    elif pctl > 90 and majority_long:
-        base = "Extremely Crowded"
-    elif pctl >= 75 and majority_short:
-        base = "High Relative Positioning / Still Net Short"
-    else:
-        base = "High Relative Positioning"
+    direction_value = float(np.median(net))
+    direction = classify_net_direction(direction_value)
+    relative = classify_cftc_relative_state(pctl)
+    if direction == "N/A" or relative == "N/A":
+        return "N/A"
+    base = f"{direction} / {relative} Relative Positioning"
     if valid.sum() >= 2 and float(np.max(values[valid]) - np.min(values[valid])) >= 50:
         return f"{base} / High Dispersion"
     return base
