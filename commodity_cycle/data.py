@@ -437,7 +437,7 @@ def build_commodity_cycle_history(
         for idx, row in curve_history.iterrows():
             for years, label, col in ((5, "5Y", "Seasonal Pctl 5Y RT"), (10, "10Y", "Seasonal Pctl 10Y RT")):
                 info = percentile_with_history(float(row["Spread %"]) if pd.notna(row["Spread %"]) else np.nan,
-                                               curve_history.rename(columns={"Spread %": "Spread"}),
+                                               curve_history,
                                                str(row["Asset"]), int(row["Month"]), str(row["PairKey"]), years,
                                                before=pd.Timestamp(row["Date"]))
                 curve_history.at[idx, col] = info["percentile"]

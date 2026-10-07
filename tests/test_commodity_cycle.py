@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from datetime import date
+from commodity_cycle.data import FRED_SERIES, build_commodity_cycle_history
 
 from commodity_cycle.model import (
     calculate_capex_current_percentile,
@@ -216,6 +217,24 @@ def test_seasonal_percentile_requires_full_same_month_same_pair_history():
     assert np.isnan(wrong_pair["percentile"])
 
 
+def test_commodity_cycle_history_keeps_single_spread_column_for_percentiles():
+    dates = pd.date_range("2020-01-01", periods=36, freq="MS")
+    fred = pd.DataFrame(index=dates)
+    for i, name in enumerate(FRED_SERIES):
+        fred[name] = np.linspace(100 + i, 140 + i, len(dates))
+    term_history = pd.DataFrame({
+        "Asset": ["WTI", "WTI"],
+        "Date": pd.to_datetime(["2024-01-31", "2025-01-31"]),
+        "Spread %": [-0.02, -0.01],
+        "Structure": ["F1/F3", "F1/F3"],
+    })
+
+    _, _, history = build_commodity_cycle_history(fred, pd.DataFrame(), term_history)
+
+    assert list(history.columns).count("Spread") == 1
+    assert history["Spread"].tolist() == [-0.02, -0.01]
+
+
 def test_agriculture_baseline_pair_names_map_to_exact_contract_pair_keys():
     baseline = pd.DataFrame({
         "Asset": ["Corn", "Wheat", "Soybeans"],
@@ -281,7 +300,8 @@ def test_current_curve_refresh_builds_synchronized_energy_ag_and_lme_rows(tmp_pa
 
     bundle = fetch_current_term_structure(
         PersistentCurveStore(tmp_path / "integration.sqlite3"),
-        pd.DataFrame(columns=["Asset", "Date", "Month", "Spread %", "Structure"]),
+        pd.read_excel("commodity_cycle/data/commodity_term_structure_seasonal_10y.xlsx",
+                      sheet_name="App_Export", engine="openpyxl"),
         today=today, yahoo_provider=FakeYahoo(), fallback_provider=FakeTV(), lme_provider=FakeLME(),
     )
     assert len(bundle["current"]) == 11, bundle["current"].to_dict("records")
