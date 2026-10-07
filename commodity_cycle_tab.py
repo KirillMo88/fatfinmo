@@ -23,16 +23,17 @@ from commodity_cycle.data import (
 TTL_SECONDS = 21600
 RANGE_OPTIONS = ("1Y", "3Y", "5Y", "10Y", "20Y", "Full")
 CORE_COLORS = {
-    "Neutral": "#94a3b8", "Early Broadening": "#facc15", "Confirmed Broadening": "#f97316",
-    "Systemic Broadening": "#ef4444", "Mature": "#a855f7", "Early Easing": "#22c55e",
-    "Confirmed Easing": "#38bdf8", "DATA INCOMPLETE": "#475569",
+    "Neutral": "#e2e8f0", "Early Broadening": "#fde047", "Confirmed Broadening": "#fb923c",
+    "Systemic Broadening": "#f43f5e", "Mature": "#c084fc", "Early Easing": "#4ade80",
+    "Confirmed Easing": "#38bdf8", "DATA INCOMPLETE": "#64748b",
 }
 FINAL_COLORS = {
-    "Low Inflation / Neutral": "#38bdf8", "Reflation / Early Inflation": "#facc15",
-    "Inflation Expansion": "#ef4444", "Late Cycle / Peak Risk": "#a855f7",
-    "Disinflation Transition": "#22c55e", "Confirmed Disinflation": "#0ea5e9",
-    "Broad Inflation": "#f97316", "N/A": "#64748b",
+    "Low Inflation / Neutral": "#38bdf8", "Reflation / Early Inflation": "#fde047",
+    "Inflation Expansion": "#f43f5e", "Late Cycle / Peak Risk": "#c084fc",
+    "Disinflation Transition": "#4ade80", "Confirmed Disinflation": "#22d3ee",
+    "Broad Inflation": "#fb923c", "N/A": "#64748b",
 }
+STATE_BAND_OPACITY = 0.30
 PRIMARY_COMMODITY_COLUMNS = (
     "Sector", "Commodity", "Price", "Return 3M", "Return 6M", "Return 12M", "Price State",
     "Curve Spread", "Raw Curve State", "MM Net % OI", "4W Change", "13W Change", "5Y Percentile",
@@ -121,9 +122,9 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         else:
             _range_picker("commodity_cycle_overview_range")
             _render_ppi_core_chart(history, st.session_state["commodity_cycle_overview_range"])
-            view = st.radio("Regime shading", ["Final State", "Final State 2"], horizontal=True, key="commodity_cycle_final_view")
+            view = st.radio("Regime shading", ["Final State", "Final State 2"], index=1, horizontal=True,
+                            key="commodity_cycle_final_view_v2")
             _render_final_state_chart(history, st.session_state["commodity_cycle_overview_range"], view)
-            _render_core_breadth_chart(history, st.session_state["commodity_cycle_overview_range"])
     with physical:
         if history.empty:
             st.info("No FRED history is currently available.")
@@ -280,8 +281,11 @@ def _render_ppi_core_chart(history: pd.DataFrame, selected_range: str) -> None:
     view = _slice_range(history, selected_range)
     fig = go.Figure()
     _add_state_bands(fig, view, "Core State", CORE_COLORS)
-    fig.add_trace(go.Scatter(x=view.index, y=view["PPIACO"], name="PPIACO", line=dict(color="white", width=2), customdata=np.column_stack([view["PPI12M"], view["PPI Impulse 3M pp"], view["Core Median Stress"], view["Seasonal Tightening 5"], view["Rolling Tightening 5"], view["Confirmation Net 5"]]), hovertemplate="%{x|%Y-%m}<br>PPIACO %{y:.2f}<br>PPI12M %{customdata[0]:.2f}%<br>PPI impulse %{customdata[1]:.2f} pp<br>Core stress %{customdata[2]:.1f}<br>Seasonal tightening %{customdata[3]:.0f}/3<br>Rolling tightening %{customdata[4]:.0f}/3<br>Confirmation net %{customdata[5]:.0%}<extra></extra>"))
-    fig.update_layout(template="plotly_dark", title="PPIACO + Core State", height=410, margin=dict(l=35, r=25, t=55, b=25), yaxis_title="PPIACO index", legend=dict(orientation="h"))
+    fig.add_trace(go.Scatter(x=view.index, y=view["PPIACO"], name="PPIACO", showlegend=False, line=dict(color="white", width=2), customdata=np.column_stack([view["PPI12M"], view["PPI Impulse 3M pp"], view["Core Median Stress"], view["Seasonal Tightening 5"], view["Rolling Tightening 5"], view["Confirmation Net 5"]]), hovertemplate="%{x|%Y-%m}<br>PPIACO %{y:.2f}<br>PPI12M %{customdata[0]:.2f}%<br>PPI impulse %{customdata[1]:.2f} pp<br>Core stress %{customdata[2]:.1f}<br>Seasonal tightening %{customdata[3]:.0f}/3<br>Rolling tightening %{customdata[4]:.0f}/3<br>Confirmation net %{customdata[5]:.0%}<extra></extra>"))
+    _add_state_legend(fig, view, "Core State", CORE_COLORS)
+    fig.update_layout(template="plotly_dark", title="PPIACO + Core State", height=470,
+                      margin=dict(l=35, r=25, t=55, b=105), yaxis_title="PPIACO index",
+                      legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="left", x=0, title_text="State"))
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
@@ -291,22 +295,12 @@ def _render_final_state_chart(history: pd.DataFrame, selected_range: str, view: 
     fig = go.Figure()
     _add_state_bands(fig, view_data, data_col, FINAL_COLORS)
     custom = np.column_stack([view_data["PPI12M"], view_data["PPI Impulse 3M pp"], view_data["Core State"], view_data["Final State"], view_data["Final State 2"]])
-    fig.add_trace(go.Scatter(x=view_data.index, y=view_data["PPIACO"], name="PPIACO", line=dict(color="white", width=2), customdata=custom,
+    fig.add_trace(go.Scatter(x=view_data.index, y=view_data["PPIACO"], name="PPIACO", showlegend=False, line=dict(color="white", width=2), customdata=custom,
                              hovertemplate="%{x|%Y-%m}<br>PPIACO %{y:.2f}<br>PPI12M %{customdata[0]:.2f}%<br>3M impulse %{customdata[1]:.2f} pp<br>Core %{customdata[2]}<br>Final State %{customdata[3]}<br>Final State 2 %{customdata[4]}<extra></extra>"))
-    fig.update_layout(template="plotly_dark", title=f"PPIACO + {view}", height=390, margin=dict(l=35, r=25, t=55, b=25), yaxis_title="PPIACO index")
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-
-def _render_core_breadth_chart(history: pd.DataFrame, selected_range: str) -> None:
-    view = _slice_range(history, selected_range)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, subplot_titles=("Core Median Stress / Confirmation Net Breadth", "Core Tightening Breadth (3 sectors)"))
-    fig.add_trace(go.Scatter(x=view.index, y=view["Core Median Stress"], name="Core median rolling stress", line=dict(color="#f97316")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["Confirmation Net 5"] * 100, name="Confirmation net breadth (5)", line=dict(color="#38bdf8")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["Seasonal Tightening 5"], name="Seasonal tightening >5", line=dict(color="#facc15", shape="hv")), row=2, col=1)
-    fig.add_trace(go.Scatter(x=view.index, y=view["Rolling Tightening 5"], name="Rolling tightening >5", line=dict(color="#a78bfa", shape="hv")), row=2, col=1)
-    fig.update_yaxes(range=[0, 100], title_text="Percentile / breadth", row=1, col=1)
-    fig.update_yaxes(range=[0, 3], dtick=1, title_text="Count / 3", row=2, col=1)
-    fig.update_layout(template="plotly_dark", height=480, margin=dict(l=30, r=20, t=45, b=25), legend=dict(orientation="h"))
+    _add_state_legend(fig, view_data, data_col, FINAL_COLORS)
+    fig.update_layout(template="plotly_dark", title=f"PPIACO + {view}", height=450,
+                      margin=dict(l=35, r=25, t=55, b=105), yaxis_title="PPIACO index",
+                      legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="left", x=0, title_text="State"))
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
@@ -355,8 +349,12 @@ def _render_capex_charts(capex: pd.DataFrame, history: pd.DataFrame) -> None:
         if not common.empty:
             overlay = go.Figure()
             _add_state_bands(overlay, common, "Final State 2", FINAL_COLORS)
-            overlay.add_trace(go.Scatter(x=common.index, y=common["CAPEX Vulnerability RT"], name="CAPEX Vulnerability RT", line=dict(color="white", width=2), connectgaps=False))
-            overlay.update_layout(template="plotly_dark", height=360, title="CAPEX Vulnerability + Final State 2", yaxis_title="Vulnerability", margin=dict(l=35, r=20, t=55, b=25))
+            overlay.add_trace(go.Scatter(x=common.index, y=common["CAPEX Vulnerability RT"], name="CAPEX Vulnerability RT",
+                                         showlegend=False, line=dict(color="white", width=2), connectgaps=False))
+            _add_state_legend(overlay, common, "Final State 2", FINAL_COLORS)
+            overlay.update_layout(template="plotly_dark", height=420, title="CAPEX Vulnerability + Final State 2",
+                                  yaxis_title="Vulnerability", margin=dict(l=35, r=20, t=55, b=105),
+                                  legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="left", x=0, title_text="State"))
             st.plotly_chart(overlay, use_container_width=True, config={"displayModeBar": False})
 
 
@@ -392,8 +390,22 @@ def _add_state_bands(fig: go.Figure, frame: pd.DataFrame, column: str, colors: d
             if state in colors:
                 left = dates[start].to_period("M").to_timestamp()
                 right = (dates[end - 1].to_period("M") + 1).to_timestamp() if end == len(frame) else dates[end].to_period("M").to_timestamp()
-                fig.add_vrect(x0=left, x1=right, fillcolor=colors[state], opacity=0.15, line_width=0, layer="below", annotation_text=state if end - start >= 3 else None)
+                fig.add_vrect(x0=left, x1=right, fillcolor=colors[state], opacity=STATE_BAND_OPACITY,
+                              line_width=0, layer="below")
             start = end
+
+
+def _add_state_legend(fig: go.Figure, frame: pd.DataFrame, column: str, colors: dict[str, str]) -> None:
+    if frame.empty or column not in frame:
+        return
+    present = set(frame[column].dropna().astype(str))
+    for state, color in colors.items():
+        if state not in present:
+            continue
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers", name=state,
+            marker=dict(symbol="square", size=12, color=color), hoverinfo="skip",
+        ))
 
 
 def _range_picker(key: str) -> None:
