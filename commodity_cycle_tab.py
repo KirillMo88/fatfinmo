@@ -38,7 +38,7 @@ STATE_BAND_OPACITY = 0.30
 PRIMARY_COMMODITY_COLUMNS = (
     "Sector", "Commodity", "Price", "Return 3M", "Return 6M", "Return 12M", "Price State",
     "Curve Spread", "Raw Curve State", "MM Net % OI", "4W Change", "13W Change", "5Y Percentile",
-    "Seasonal Percentile 5Y", "CFTC Relative State", "Seasonal Curve State", "Price × Curve",
+    "Seasonal Percentile 5Y", "CFTC Relative State", "Seasonal Relative State", "Price × Seasonal Curve",
     "Price Date", "Term Structure As Of",
 )
 PERCENT_COLUMNS = {
@@ -170,7 +170,7 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
                     "Matched DTE", "DTE Window", "Valid N", "Median Seasonal Spread",
                     "Current Spread", "5Y HistoryN", "5Y History Start", "5Y History End",
                     "5Y Seasonal Percentile", "10Y HistoryN", "10Y History Start",
-                    "10Y History End", "10Y Seasonal Percentile", "Seasonal Curve State",
+                    "10Y History End", "10Y Seasonal Percentile", "Seasonal Relative State",
                     "Source", "Last Update", "Data Quality", "Missing Contracts", "Rejection Reason",
                 ]
                 st.dataframe(seasonal[[column for column in seasonal_columns if column in seasonal]], use_container_width=True, hide_index=True)

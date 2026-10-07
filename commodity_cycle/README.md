@@ -27,3 +27,10 @@ tickers (`CL=F`, `NG=F`, `RB=F`, `HG=F`, `ALI=F`, `ZC=F`, `ZW=F`, `ZS=F`). The
 current incomplete month is excluded. CFTC positioning is read from the
 application's shared `positioning.py` service; Commodity Cycle does not own a
 separate CFTC refresh/parser.
+
+The curve outputs intentionally keep two different concepts separate. `Raw
+Curve State` is based only on the sign of the current spread (backwardation or
+contango). `Seasonal Relative State` is the level of that spread within its
+comparable seasonal distribution; it does not describe the direction of change.
+The existing price/seasonal-curve interaction is displayed as `Price × Seasonal
+Curve`, without changing its thresholds or weights.
