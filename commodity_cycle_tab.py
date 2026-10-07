@@ -38,7 +38,7 @@ FINAL_COLORS = {
 STATE_BAND_OPACITY = 0.30
 PRIMARY_COMMODITY_COLUMNS = (
     "Sector", "Commodity", "Price", "Return 1M", "Return 3M", "Return 6M", "Return 12M", "Price State",
-    "Curve Spread", "Annualized Curve Spread", "Raw Curve State", "Seasonal Percentile 5Y", "Seasonal Relative State",
+    "Curve Spread", "Annualized Curve Spread", "Raw Curve State", "Seasonal Percentile 10Y", "Seasonal Relative State",
     "MM Net % OI", "4W Change", "13W Change", "5Y Percentile", "CFTC Relative State", "Price × Seasonal Curve",
     "Price Date", "Term Structure As Of",
 )
@@ -212,7 +212,10 @@ def _render_market_section(
                 st.markdown(f"**{row['Sector']}**")
                 st.metric("Market Confirmation", str(row["Market Confirmation"]))
                 st.caption(f"Price: {row['Price State']} · Bullish {row['Bullish Count']} / Bearish {row['Bearish Count']}")
-                st.caption(f"Curve tight breadth: {_fmt(row['Curve Tight Breadth'], '%')} · CFTC dispersion: {_fmt(row['CFTC Dispersion'], ' pts')}")
+                st.caption(f"Curve tight breadth: {_fmt(row['Curve Tight Breadth'], '%')}")
+                avg_cftc = row.get("CFTC Average 5Y Percentile", np.nan)
+                avg_cftc_text = "N/A" if pd.isna(avg_cftc) else f"{float(avg_cftc):.1f}"
+                st.caption(f"Avg CFTC: {avg_cftc_text}, CFTC Dispersion: {_fmt(row['CFTC Dispersion'], ' pts')}")
     st.markdown("#### Commodity confirmation table")
     if commodity.empty:
         st.info("No commodity market observations are currently available.")

@@ -625,12 +625,22 @@ def test_sector_confirmation_falls_back_to_valid_5y_curve_percentile():
          "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Mild Tight vs Seasonal"},
     ])
 
-    _, sectors = build_market_confirmation(prices, pd.DataFrame(), term_current, {})
-    states = sectors.set_index("Sector")["Market Confirmation"].to_dict()
+    cftc = {
+        "WTI": {"5Y Percentile": 10.0, "MM Net % OI": 1.0},
+        "Natural Gas": {"5Y Percentile": 60.0, "MM Net % OI": 2.0},
+        "RBOB": {"5Y Percentile": 100.0, "MM Net % OI": 3.0},
+    }
+    _, sectors = build_market_confirmation(
+        prices, pd.DataFrame(), term_current, cftc, performance_prices=prices
+    )
+    by_sector = sectors.set_index("Sector")
+    states = by_sector["Market Confirmation"].to_dict()
 
     assert states["Energy"] != "N/A"
     assert states["Metals"] != "N/A"
     assert states["Agriculture"] == "N/A"
+    assert np.isclose(by_sector.loc["Energy", "CFTC Average 5Y Percentile"], 170 / 3)
+    assert by_sector.loc["Energy", "CFTC Dispersion"] == 90.0
 
 
 def test_agriculture_baseline_pair_names_map_to_exact_contract_pair_keys():
