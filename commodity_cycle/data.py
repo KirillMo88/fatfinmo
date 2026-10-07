@@ -837,6 +837,7 @@ def build_market_confirmation(
                         "Curve Loose Breadth": float(curve_percentiles.lt(40).sum() / curve_percentiles.notna().sum()) if curve_percentiles.notna().any() else np.nan,
                         "Curve Median Percentile": sector_curve_percentile,
                         "Curve State": sector_curve_state,
+                        "CFTC Average 5Y Percentile": float(values.mean()) if values.notna().any() else np.nan,
                         "CFTC Median 5Y Percentile": float(values.median()) if values.notna().any() else np.nan,
                         "CFTC Dispersion": dispersion, "CFTC Qualifier": qualifier,
                         "Market Confirmation": market_state})
