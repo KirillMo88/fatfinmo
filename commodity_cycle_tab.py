@@ -113,7 +113,6 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
     capex_current = capex.dropna(subset=["CAPEX Intensity"]).iloc[-1] if not capex.empty else pd.Series(dtype=object)
     commodity = data["commodity"]
     sectors = data["sector"]
-    sector_states = {str(r["Sector"]): str(r["Market Confirmation"]) for _, r in sectors.iterrows()}
 
     st.markdown(
         """
@@ -135,14 +134,13 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
     )
 
     summary = [
+        ("Final State 2", current.get("Final State 2", "N/A")),
         ("Core State", current.get("Core State", "N/A")),
         ("PPI Confirmation", current.get("PPI Confirmation", "N/A")),
-        ("Final State", current.get("Final State", "N/A")),
-        ("Final State 2", current.get("Final State 2", "N/A")),
-        ("CAPEX Vulnerability", capex_current.get("CAPEX State", "N/A")),
-        ("Energy", sector_states.get("Energy", "N/A")),
-        ("Metals", sector_states.get("Metals", "N/A")),
-        ("Agriculture", sector_states.get("Agriculture", "N/A")),
+        (
+            "CAPEX Full-History Percentile",
+            f"{_fmt(capex_current.get('CAPEX Current Percentile'), '%')} ({_format_state(capex_current.get('CAPEX Direction', 'N/A'))})",
+        ),
     ]
     with st.container(key="commodity-cycle-summary"):
         cards = st.columns(4)
@@ -150,27 +148,45 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
             with cards[idx % 4]:
                 st.metric(label, _format_state(value))
 
-    overview, market, capex_tab, diagnostics = st.tabs(
-        ["Overview", "Market Confirmation", "CAPEX Vulnerability", "Diagnostics / Data"]
-    )
+    overview, market = st.tabs(["Overview", "Market Confirmation"])
     with overview:
+        _range_picker("commodity_cycle_overview_range")
         if history.empty:
             st.info("The FRED Inventory/Sales model is unavailable. Check the data diagnostics below; market and positioning sections remain available where their feeds loaded.")
         else:
-            _range_picker("commodity_cycle_overview_range")
             _render_ppi_core_chart(history, st.session_state["commodity_cycle_overview_range"])
             view = st.radio("Regime shading", ["Final State", "Final State 2"], index=1, horizontal=True,
                             key="commodity_cycle_final_view_v2")
             _render_final_state_chart(history, st.session_state["commodity_cycle_overview_range"], view)
-            if not capex.empty:
-                _render_capex_intensity_chart(
-                    capex, history, st.session_state["commodity_cycle_overview_range"]
-                )
+        if not capex.empty:
+            st.markdown("#### CAPEX Vulnerability")
+            capex_metrics = st.columns(3)
+            capex_metrics[0].metric(
+                "CAPEX intensity",
+                _fmt(capex_current.get("CAPEX Intensity")),
+                help="E318RC1Q027SBEA / FPI; quarterly, not seasonally normalized.",
+            )
+            capex_metrics[1].metric(
+                "Full-history percentile",
+                _fmt(capex_current.get("CAPEX Current Percentile"), "%"),
+            )
+            capex_metrics[2].metric(
+                "24M direction",
+                f"{_fmt(capex_current.get('CAPEX 24M Change'), '%')} · {capex_current.get('CAPEX Direction', 'N/A')}",
+            )
+            _render_capex_intensity_chart(
+                capex, history, st.session_state["commodity_cycle_overview_range"]
+            )
+            _render_capex_charts(capex, history)
+            history_view = capex[["CAPEX Intensity", "CAPEX Expanding Percentile", "CAPEX Vulnerability RT", "CAPEX 24M Change", "CAPEX Direction"]].tail(20).copy()
+            st.dataframe(history_view.round(3), use_container_width=True)
+        if not history.empty:
             st.markdown("#### FRED Inventory / Sales Regime")
             _render_fred_heatmap(history)
             st.markdown("#### Core stress and breadth diagnostics")
             cols = [c for c in history if c.endswith("Rolling Stress") or c.endswith("Seasonal Stress")]
             st.dataframe(history[cols].tail(24).round(1), use_container_width=True)
+        _render_diagnostics_section(data, commodity)
     with market:
         _render_market_section(
             commodity,
@@ -179,41 +195,6 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
             data["term_history"],
             data.get("term_diagnostics", pd.DataFrame()),
         )
-    with capex_tab:
-        if capex.empty:
-            st.info("CAPEX intensity requires both quarterly FRED series E318RC1Q027SBEA and FPI.")
-        else:
-            st.metric("CAPEX intensity", _fmt(capex_current.get("CAPEX Intensity")), help="E318RC1Q027SBEA / FPI; quarterly, not seasonally normalized.")
-            st.metric("Full-history percentile", _fmt(capex_current.get("CAPEX Current Percentile"), "%"))
-            st.metric("24M direction", f"{_fmt(capex_current.get('CAPEX 24M Change'), '%')} · {capex_current.get('CAPEX Direction', 'N/A')}")
-            _render_capex_charts(capex, history)
-            history_view = capex[["CAPEX Intensity", "CAPEX Expanding Percentile", "CAPEX Vulnerability RT", "CAPEX 24M Change", "CAPEX Direction"]].tail(20).copy()
-            st.dataframe(history_view.round(3), use_container_width=True)
-    with diagnostics:
-        _render_data_status(data)
-        st.caption("The bundled workbook remains the immutable baseline for Energy and Metals. The downloadable workbook below is generated from the live engine and includes reconstructed Agriculture seasonal history when available.")
-        if not commodity.empty:
-            st.markdown("#### Input provenance")
-            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Performance As Of", "Analytics Return Source", "Performance Status", "Term Structure As Of", "Term Structure Status", "As Of Alignment", "Price Data Quality", "Contract Selection Quality", "CurveDataQuality", "Leg 1", "Leg 2", "Curve Spread", "Annualized Curve Spread", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y", "Seasonal Percentile As Of", "Seasonal Percentile Status", "Seasonal Percentile 5Y HistoryN", "Seasonal Percentile 5Y HistoryStatus", "Seasonal Percentile 10Y", "Seasonal Percentile 10Y HistoryN", "Seasonal Percentile 10Y HistoryStatus", "Seasonal Percentile 10Y Explanation", "Current Curve Vendor", "Seasonal History Vendor", "Vendor Consistency", "Seasonal History Source", "Rollover Method", "Rollover Date", "Days To Expiry", "CFTC As Of", "CFTC Status", "Latest Official CFTC Report Date", "Series Present In Latest Report", "CFTC Contract Market Code", "CFTC Market Name", "CFTC Open Interest", "MM Long", "MM Short", "MM Spreading", "MM Net", "Net Direction", "CFTC Relative State", "History Weeks", "Last Available Date", "Last Available MM Net % OI", "Last Available COT 5Y Percentile", "Reason Current Signal Missing"] if c in commodity]], use_container_width=True)
-        diagnostics = data.get("term_diagnostics", pd.DataFrame())
-        if not diagnostics.empty:
-            seasonal = diagnostics.loc[diagnostics.get("Diagnostic Type", pd.Series(index=diagnostics.index, dtype=object)).eq("Agriculture Seasonal Structure")].copy()
-            contracts = diagnostics.drop(seasonal.index)
-            if not seasonal.empty:
-                st.markdown("#### Agriculture seasonal structure")
-                seasonal_columns = [
-                    "Commodity", "Season", "Near Contract", "Deferred Contract",
-                    "Near Contract Symbol", "Deferred Contract Symbol", "Current Near DTE",
-                    "Matched DTE", "DTE Window", "Valid N", "Median Seasonal Spread",
-                    "Current Spread", "5Y HistoryN", "5Y History Start", "5Y History End",
-                    "5Y Seasonal Percentile", "10Y HistoryN", "10Y History Start",
-                    "10Y History End", "10Y Seasonal Percentile", "Seasonal Relative State",
-                    "Source", "Last Update", "Data Quality", "Missing Contracts", "Rejection Reason",
-                ]
-                st.dataframe(seasonal[[column for column in seasonal_columns if column in seasonal]], use_container_width=True, hide_index=True)
-            if not contracts.empty:
-                st.markdown("#### Contract discovery / selection diagnostics")
-                st.dataframe(contracts, use_container_width=True, hide_index=True)
 
 
 def _render_market_section(
@@ -458,6 +439,7 @@ def _render_capex_charts(capex: pd.DataFrame, history: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     if not history.empty:
         common = history[["Final State 2"]].join(capex[["CAPEX Vulnerability RT"]], how="inner").dropna()
+        common = _slice_range(common, selected_range)
         if not common.empty:
             overlay = go.Figure()
             _add_state_bands(overlay, common, "Final State 2", FINAL_COLORS)
@@ -468,6 +450,59 @@ def _render_capex_charts(capex: pd.DataFrame, history: pd.DataFrame) -> None:
                                   yaxis_title="Vulnerability", margin=dict(l=35, r=20, t=55, b=105),
                                   legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="left", x=0, title_text="State"))
             st.plotly_chart(overlay, use_container_width=True, config={"displayModeBar": False})
+
+
+def _render_diagnostics_section(data: dict[str, Any], commodity: pd.DataFrame) -> None:
+    st.markdown("#### Diagnostics / Data")
+    _render_data_status(data)
+    st.caption("The bundled workbook remains the immutable baseline for Energy and Metals. The downloadable workbook below is generated from the live engine and includes reconstructed Agriculture seasonal history when available.")
+    if not commodity.empty:
+        st.markdown("#### Input provenance")
+        provenance_columns = [
+            "Commodity", "Price Date", "Price Status", "Performance As Of", "Analytics Return Source",
+            "Performance Status", "Term Structure As Of", "Term Structure Status", "As Of Alignment",
+            "Price Data Quality", "Contract Selection Quality", "CurveDataQuality", "Leg 1", "Leg 2",
+            "Curve Spread", "Annualized Curve Spread", "Raw Curve State", "MTD Average Spread",
+            "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y",
+            "Seasonal Percentile As Of", "Seasonal Percentile Status", "Seasonal Percentile 5Y HistoryN",
+            "Seasonal Percentile 5Y HistoryStatus", "Seasonal Percentile 10Y",
+            "Seasonal Percentile 10Y HistoryN", "Seasonal Percentile 10Y HistoryStatus",
+            "Seasonal Percentile 10Y Explanation", "Current Curve Vendor", "Seasonal History Vendor",
+            "Vendor Consistency", "Seasonal History Source", "Rollover Method", "Rollover Date",
+            "Days To Expiry", "CFTC As Of", "CFTC Status", "Latest Official CFTC Report Date",
+            "Series Present In Latest Report", "CFTC Contract Market Code", "CFTC Market Name",
+            "CFTC Open Interest", "MM Long", "MM Short", "MM Spreading", "MM Net", "Net Direction",
+            "CFTC Relative State", "History Weeks", "Last Available Date", "Last Available MM Net % OI",
+            "Last Available COT 5Y Percentile", "Reason Current Signal Missing",
+        ]
+        available_columns = [column for column in provenance_columns if column in commodity]
+        st.dataframe(commodity[available_columns], use_container_width=True)
+
+    diagnostics = data.get("term_diagnostics", pd.DataFrame())
+    if not diagnostics.empty:
+        seasonal = diagnostics.loc[
+            diagnostics.get("Diagnostic Type", pd.Series(index=diagnostics.index, dtype=object)).eq("Agriculture Seasonal Structure")
+        ].copy()
+        contracts = diagnostics.drop(seasonal.index)
+        if not seasonal.empty:
+            st.markdown("#### Agriculture seasonal structure")
+            seasonal_columns = [
+                "Commodity", "Season", "Near Contract", "Deferred Contract",
+                "Near Contract Symbol", "Deferred Contract Symbol", "Current Near DTE",
+                "Matched DTE", "DTE Window", "Valid N", "Median Seasonal Spread",
+                "Current Spread", "5Y HistoryN", "5Y History Start", "5Y History End",
+                "5Y Seasonal Percentile", "10Y HistoryN", "10Y History Start",
+                "10Y History End", "10Y Seasonal Percentile", "Seasonal Relative State",
+                "Source", "Last Update", "Data Quality", "Missing Contracts", "Rejection Reason",
+            ]
+            st.dataframe(
+                seasonal[[column for column in seasonal_columns if column in seasonal]],
+                use_container_width=True,
+                hide_index=True,
+            )
+        if not contracts.empty:
+            st.markdown("#### Contract discovery / selection diagnostics")
+            st.dataframe(contracts, use_container_width=True, hide_index=True)
 
 
 def _render_data_status(data: dict[str, Any]) -> None:
