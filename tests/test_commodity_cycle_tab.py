@@ -7,6 +7,7 @@ from commodity_cycle_tab import (
     _commodity_confirmation_frames,
     _commodity_numeric_formatters,
     _curve_scatter_marker,
+    _price_momentum_series,
     _raw_curve_state_style,
     _return_gradient_styles,
 )
@@ -74,3 +75,19 @@ def test_price_positioning_markers_are_large_and_follow_absolute_curve_state():
     assert backwardation["color"] == "#ef4444"
     assert contango["color"] == "#22c55e"
     assert unavailable["color"] == "#94a3b8"
+
+
+def test_asset_price_momentum_uses_the_selected_weekly_horizon():
+    dates = pd.date_range("2025-01-03", periods=60, freq="W-FRI")
+    prices = pd.Series(np.arange(100.0, 160.0), index=dates)
+
+    one_month = _price_momentum_series(prices, "1M")
+    three_month = _price_momentum_series(prices, "3M")
+    six_month = _price_momentum_series(prices, "6M")
+    twelve_month = _price_momentum_series(prices, "12M")
+
+    assert one_month.iloc[4] == 4.0
+    assert three_month.iloc[13] == 13.0
+    assert six_month.iloc[26] == 26.0
+    assert twelve_month.iloc[52] == 52.0
+    assert _price_momentum_series(prices, "2M").empty
