@@ -3,6 +3,9 @@ import pandas as pd
 from datetime import date
 from commodity_cycle.data import (
     FRED_SERIES,
+    _combined_curve_quality,
+    _contract_selection_quality,
+    _official_seasonal_result,
     _official_seasonal_percentiles,
     build_commodity_cycle_history,
     build_market_confirmation,
@@ -34,6 +37,7 @@ from commodity_cycle.term_structure_pipeline import (
     fetch_current_term_structure,
     _completed_eod_frame,
     _current_month_daily,
+    _calculate_agriculture_seasonality,
     agriculture_contract_pair,
     agriculture_seasonal_observation,
     agriculture_seasonal_percentile,
@@ -94,6 +98,76 @@ def test_energy_seasonal_fallback_uses_latest_same_calendar_month_only():
     assert (p5, p10, as_of, status) == (80.0, 60.0, "2026-10-06", "CURRENT_MTD")
 
 
+def test_metals_fallback_stays_in_same_month_and_explains_missing_10y():
+    dates = pd.to_datetime([f"{year}-10-01" for year in range(2016, 2026)] + ["2025-12-01"])
+    history = pd.DataFrame({
+        "Asset": ["Copper"] * len(dates),
+        "Date": dates,
+        "Month": [10] * 10 + [12],
+        "Spread": np.arange(1.0, len(dates) + 1.0) / 100,
+        "PairKey": ["Copper_Cash_3M"] * len(dates),
+        "Source": ["https://www.westmetall.com/"] * len(dates),
+    })
+    row = pd.Series({
+        "asset": "Copper", "pair_key": "Copper_Cash_3M", "As Of": pd.Timestamp("2026-10-06"),
+        "mtd_observation_count": 4, "Seasonal Pctl 5Y": np.nan, "Seasonal Pctl 10Y": np.nan,
+        "Source": "Westmetall LME Cash/3M",
+    })
+
+    result = _official_seasonal_result(row, history, percentile_with_history)
+
+    assert result["as_of"] == "2025-10"
+    assert result["status"] == "HISTORICAL_FALLBACK_SAME_MONTH"
+    assert result["history_10y_n"] == 9
+    assert pd.isna(result["p10"])
+    assert result["10y_explanation"] == "N/A: requires 10 prior comparable observations; 9/10 available"
+    assert result["vendor_consistency"] == "SAME_VENDOR"
+
+
+def test_cross_vendor_seasonal_comparison_is_exposed():
+    history = pd.DataFrame({
+        "Asset": ["WTI"] * 6,
+        "Date": pd.to_datetime([f"{year}-10-01" for year in range(2018, 2024)]),
+        "Month": [10] * 6,
+        "Spread": np.arange(1.0, 7.0) / 100,
+        "PairKey": ["WTI_F1/F3"] * 6,
+        "Source": ["https://www.eia.gov/"] * 6,
+    })
+    row = pd.Series({
+        "asset": "WTI", "pair_key": "WTI_F1/F3", "As Of": pd.Timestamp("2026-10-06"),
+        "mtd_observation_count": 4, "Seasonal Pctl 5Y": np.nan, "Seasonal Pctl 10Y": np.nan,
+        "Source": "Yahoo Finance",
+    })
+
+    result = _official_seasonal_result(row, history, percentile_with_history)
+
+    assert result["current_curve_vendor"] == "Yahoo Finance"
+    assert result["history_vendor"] == "EIA"
+    assert result["vendor_consistency"] == "CROSS_VENDOR"
+
+
+def test_agriculture_seasonal_status_is_model_calculated_not_official():
+    history = pd.DataFrame({
+        "Season Start Year": range(2016, 2026),
+        "Season": [f"{year}/{str(year + 1)[-2:]}" for year in range(2016, 2026)],
+        "Median Seasonal Spread": np.arange(1.0, 11.0) / 100,
+        "Data Quality": ["OK"] * 10,
+    })
+    result = _calculate_agriculture_seasonality(
+        {"spread": 0.11, "season_start_year": 2026},
+        history,
+    )
+
+    assert result["current_seasonal_status"] == "MODEL_CALCULATED"
+
+
+def test_curve_quality_separates_price_and_contract_selection():
+    assert _contract_selection_quality("WTI", "CALENDAR_FALLBACK") == "LOW"
+    assert _combined_curve_quality("HIGH", "LOW") == "LOW_CONTRACT_SELECTION"
+    assert _contract_selection_quality("Copper", None) == "NOT_APPLICABLE_CASH_3M"
+    assert _combined_curve_quality("HIGH", "NOT_APPLICABLE_CASH_3M") == "HIGH"
+
+
 def test_inventory_sales_stress_inverts_ratio_percentile_without_lookahead():
     idx = pd.date_range("2000-01-01", periods=121, freq="MS")
     rising = pd.DataFrame({"series": np.arange(1.0, 122.0)}, index=idx)
@@ -127,6 +201,7 @@ def test_seasonal_curve_half_open_boundaries():
         90.001: "Extreme Tight vs Seasonal",
     }
     assert {value: classify_seasonal_curve(value) for value in expected} == expected
+    assert classify_seasonal_curve(60.0 - 1e-10) == "Mild Tight vs Seasonal"
 
 
 def test_price_curve_matrix_uses_seasonal_semantics_without_changing_logic():

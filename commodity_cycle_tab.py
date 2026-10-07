@@ -49,6 +49,8 @@ DISPLAY_COLUMN_NAMES = {
     "5Y Percentile": "COT 5Y Percentile",
     "Seasonal Percentile 5Y": "Spread 5Y Seasonal Percentile",
     "Seasonal Percentile 10Y": "Spread 10Y Seasonal Percentile",
+    "Price Date": "Price As Of",
+    "Term Structure As Of": "Curve As Of",
 }
 
 
@@ -141,7 +143,13 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
             cols = [c for c in history if c.endswith("Rolling Stress") or c.endswith("Seasonal Stress")]
             st.dataframe(history[cols].tail(24).round(1), use_container_width=True)
     with market:
-        _render_market_section(commodity, sectors, data["prices"], data["term_history"])
+        _render_market_section(
+            commodity,
+            sectors,
+            data["prices"],
+            data["term_history"],
+            data.get("term_diagnostics", pd.DataFrame()),
+        )
     with capex_tab:
         if capex.empty:
             st.info("CAPEX intensity requires both quarterly FRED series E318RC1Q027SBEA and FPI.")
@@ -154,10 +162,10 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
             st.dataframe(history_view.round(3), use_container_width=True)
     with diagnostics:
         _render_data_status(data)
-        st.caption("The workbook remains the immutable historical baseline for Energy and Metals. Agriculture seasonal history is reconstructed from cached individual expired CBOT contracts using DTE-aligned TradingView MCP daily closes.")
+        st.caption("The bundled workbook remains the immutable baseline for Energy and Metals. The downloadable workbook below is generated from the live engine and includes reconstructed Agriculture seasonal history when available.")
         if not commodity.empty:
             st.markdown("#### Input provenance")
-            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Term Structure As Of", "Term Structure Status", "CurveDataQuality", "Leg 1", "Leg 2", "Curve Spread", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y", "Seasonal Percentile As Of", "Seasonal Percentile Status", "5Y HistoryN", "5Y HistoryStartDate", "5Y HistoryEndDate", "5Y HistoryStatus", "Seasonal Percentile 10Y", "10Y HistoryN", "10Y HistoryStartDate", "10Y HistoryEndDate", "10Y HistoryStatus", "Rollover Method", "Rollover Date", "Days To Expiry", "CFTC As Of", "CFTC Status", "Latest Official CFTC Report Date", "Series Present In Latest Report", "CFTC Contract Market Code", "CFTC Market Name", "CFTC Open Interest", "MM Long", "MM Short", "MM Spreading", "MM Net", "Net Direction", "CFTC Relative State", "History Weeks", "Last Available Date", "Last Available MM Net % OI", "Last Available COT 5Y Percentile", "Reason Current Signal Missing"] if c in commodity]], use_container_width=True)
+            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Term Structure As Of", "Term Structure Status", "As Of Alignment", "Price Data Quality", "Contract Selection Quality", "CurveDataQuality", "Leg 1", "Leg 2", "Curve Spread", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y", "Seasonal Percentile As Of", "Seasonal Percentile Status", "Seasonal Percentile 5Y HistoryN", "Seasonal Percentile 5Y HistoryStatus", "Seasonal Percentile 10Y", "Seasonal Percentile 10Y HistoryN", "Seasonal Percentile 10Y HistoryStatus", "Seasonal Percentile 10Y Explanation", "Current Curve Vendor", "Seasonal History Vendor", "Vendor Consistency", "Seasonal History Source", "Rollover Method", "Rollover Date", "Days To Expiry", "CFTC As Of", "CFTC Status", "Latest Official CFTC Report Date", "Series Present In Latest Report", "CFTC Contract Market Code", "CFTC Market Name", "CFTC Open Interest", "MM Long", "MM Short", "MM Spreading", "MM Net", "Net Direction", "CFTC Relative State", "History Weeks", "Last Available Date", "Last Available MM Net % OI", "Last Available COT 5Y Percentile", "Reason Current Signal Missing"] if c in commodity]], use_container_width=True)
         diagnostics = data.get("term_diagnostics", pd.DataFrame())
         if not diagnostics.empty:
             seasonal = diagnostics.loc[diagnostics.get("Diagnostic Type", pd.Series(index=diagnostics.index, dtype=object)).eq("Agriculture Seasonal Structure")].copy()
@@ -179,7 +187,13 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
                 st.dataframe(contracts, use_container_width=True, hide_index=True)
 
 
-def _render_market_section(commodity: pd.DataFrame, sectors: pd.DataFrame, prices: pd.DataFrame, term_history: pd.DataFrame) -> None:
+def _render_market_section(
+    commodity: pd.DataFrame,
+    sectors: pd.DataFrame,
+    prices: pd.DataFrame,
+    term_history: pd.DataFrame,
+    term_diagnostics: pd.DataFrame,
+) -> None:
     st.markdown("#### Sector dashboard")
     if sectors.empty:
         st.info("Market confirmation data is unavailable.")
@@ -197,8 +211,8 @@ def _render_market_section(commodity: pd.DataFrame, sectors: pd.DataFrame, price
     else:
         primary, auxiliary = _commodity_confirmation_frames(commodity)
         st.download_button(
-            "Download Commodity Tables (.xlsx)",
-            data=commodity_tables_to_xlsx(primary, auxiliary),
+            "Download Commodity Tables + Seasonal History (.xlsx)",
+            data=commodity_tables_to_xlsx(primary, auxiliary, term_history, term_diagnostics),
             file_name=f"commodity_cycle_tables_{pd.Timestamp.now(tz='UTC'):%Y-%m-%d}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="commodity_cycle_tables_download",

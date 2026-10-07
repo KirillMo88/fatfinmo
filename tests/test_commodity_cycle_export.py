@@ -36,3 +36,26 @@ def test_commodity_tables_export_to_two_formatted_xlsx_sheets():
     formatting = list(confirmation.conditional_formatting)
     assert len(formatting) == 2
     assert sorted(len(item.rules) for item in formatting) == [1, 2]
+
+
+def test_export_includes_engine_seasonal_history_and_term_audit_when_supplied():
+    primary = pd.DataFrame({"Commodity": ["Corn"], "Price": [500.0]})
+    diagnostics = pd.DataFrame({"Commodity": ["Corn"], "Seasonal Percentile Status": ["CURRENT_MTD"]})
+    seasonal_history = pd.DataFrame({
+        "Asset": ["Corn"], "Date": [pd.Timestamp("2025-11-15")], "Spread %": [-0.02],
+        "Structure": ["Corn_Z_H"], "Source": ["TradingView MCP daily close"],
+        "History Data Quality": ["OK"],
+    })
+    audit = pd.DataFrame({
+        "Diagnostic Type": ["Agriculture Seasonal Structure"], "Asset": ["Corn"],
+        "Data Quality": ["OK"], "Median Seasonal Spread": [-0.02],
+    })
+
+    workbook_bytes = commodity_tables_to_xlsx(primary, diagnostics, seasonal_history, audit)
+    workbook = load_workbook(BytesIO(workbook_bytes), data_only=False)
+
+    assert workbook.sheetnames == ["Confirmation", "Diagnostics", "Seasonal History", "Term Structure Audit"]
+    seasonal = workbook["Seasonal History"]
+    assert [cell.value for cell in seasonal[1]] == seasonal_history.columns.tolist()
+    assert seasonal["A2"].value == "Corn"
+    assert "Missing historical" not in " ".join(str(cell.value) for row in seasonal.iter_rows() for cell in row)

@@ -113,6 +113,10 @@ def classify_sector_price_state(price_states: Sequence[str], sector: str | None 
 def classify_seasonal_curve(percentile: float) -> str:
     if pd.isna(percentile):
         return "N/A"
+    # Percentiles are displayed to two decimals, while upstream calculations may
+    # land microscopically below an exact threshold (for example 59.999999999).
+    # Normalize numerical noise before applying the centralized half-open bands.
+    percentile = round(float(percentile), 8)
     if percentile < 10:
         return "Extreme Loose vs Seasonal"
     if percentile < 25:
