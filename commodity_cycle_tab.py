@@ -33,7 +33,7 @@ FINAL_COLORS = {
     "Low Inflation / Neutral": "#38bdf8", "Reflation / Early Inflation": "#fde047",
     "Inflation Expansion": "#f43f5e", "Late Cycle / Peak Risk": "#c084fc",
     "Disinflation Transition": "#4ade80", "Confirmed Disinflation": "#22d3ee",
-    "Broad Inflation": "#fb923c", "N/A": "#64748b",
+    "Broad Inflation": "#f43f5e", "N/A": "#64748b",
 }
 STATE_BAND_OPACITY = 0.30
 PRIMARY_COMMODITY_COLUMNS = (
@@ -150,8 +150,8 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
             with cards[idx % 4]:
                 st.metric(label, _format_state(value))
 
-    overview, physical, market, capex_tab, diagnostics = st.tabs(
-        ["Overview", "FRED Inventory/Sales Regime", "Market Confirmation", "CAPEX Vulnerability", "Diagnostics / Data"]
+    overview, market, capex_tab, diagnostics = st.tabs(
+        ["Overview", "Market Confirmation", "CAPEX Vulnerability", "Diagnostics / Data"]
     )
     with overview:
         if history.empty:
@@ -162,10 +162,7 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
             view = st.radio("Regime shading", ["Final State", "Final State 2"], index=1, horizontal=True,
                             key="commodity_cycle_final_view_v2")
             _render_final_state_chart(history, st.session_state["commodity_cycle_overview_range"], view)
-    with physical:
-        if history.empty:
-            st.info("No FRED history is currently available.")
-        else:
+            st.markdown("#### FRED Inventory / Sales Regime")
             _render_fred_heatmap(history)
             st.markdown("#### Core stress and breadth diagnostics")
             cols = [c for c in history if c.endswith("Rolling Stress") or c.endswith("Seasonal Stress")]
