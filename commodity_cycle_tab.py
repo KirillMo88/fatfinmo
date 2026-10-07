@@ -38,12 +38,12 @@ FINAL_COLORS = {
 STATE_BAND_OPACITY = 0.30
 PRIMARY_COMMODITY_COLUMNS = (
     "Sector", "Commodity", "Price", "Return 1M", "Return 3M", "Return 6M", "Return 12M", "Price State",
-    "Curve Spread", "Raw Curve State", "MM Net % OI", "4W Change", "13W Change", "5Y Percentile",
-    "Seasonal Percentile 5Y", "CFTC Relative State", "Seasonal Relative State", "Price × Seasonal Curve",
+    "Curve Spread", "Annualized Curve Spread", "Raw Curve State", "Seasonal Percentile 5Y", "Seasonal Relative State",
+    "MM Net % OI", "4W Change", "13W Change", "5Y Percentile", "CFTC Relative State", "Price × Seasonal Curve",
     "Price Date", "Term Structure As Of",
 )
 PERCENT_COLUMNS = {
-    "Return 1M", "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread",
+    "Return 1M", "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "Annualized Curve Spread", "MTD Average Spread",
 }
 DISPLAY_COLUMN_NAMES = {
     "3Y Percentile": "COT 3Y Percentile",
@@ -173,7 +173,7 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         st.caption("The bundled workbook remains the immutable baseline for Energy and Metals. The downloadable workbook below is generated from the live engine and includes reconstructed Agriculture seasonal history when available.")
         if not commodity.empty:
             st.markdown("#### Input provenance")
-            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Performance As Of", "Analytics Return Source", "Performance Status", "Term Structure As Of", "Term Structure Status", "As Of Alignment", "Price Data Quality", "Contract Selection Quality", "CurveDataQuality", "Leg 1", "Leg 2", "Curve Spread", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y", "Seasonal Percentile As Of", "Seasonal Percentile Status", "Seasonal Percentile 5Y HistoryN", "Seasonal Percentile 5Y HistoryStatus", "Seasonal Percentile 10Y", "Seasonal Percentile 10Y HistoryN", "Seasonal Percentile 10Y HistoryStatus", "Seasonal Percentile 10Y Explanation", "Current Curve Vendor", "Seasonal History Vendor", "Vendor Consistency", "Seasonal History Source", "Rollover Method", "Rollover Date", "Days To Expiry", "CFTC As Of", "CFTC Status", "Latest Official CFTC Report Date", "Series Present In Latest Report", "CFTC Contract Market Code", "CFTC Market Name", "CFTC Open Interest", "MM Long", "MM Short", "MM Spreading", "MM Net", "Net Direction", "CFTC Relative State", "History Weeks", "Last Available Date", "Last Available MM Net % OI", "Last Available COT 5Y Percentile", "Reason Current Signal Missing"] if c in commodity]], use_container_width=True)
+            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Performance As Of", "Analytics Return Source", "Performance Status", "Term Structure As Of", "Term Structure Status", "As Of Alignment", "Price Data Quality", "Contract Selection Quality", "CurveDataQuality", "Leg 1", "Leg 2", "Curve Spread", "Annualized Curve Spread", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y", "Seasonal Percentile As Of", "Seasonal Percentile Status", "Seasonal Percentile 5Y HistoryN", "Seasonal Percentile 5Y HistoryStatus", "Seasonal Percentile 10Y", "Seasonal Percentile 10Y HistoryN", "Seasonal Percentile 10Y HistoryStatus", "Seasonal Percentile 10Y Explanation", "Current Curve Vendor", "Seasonal History Vendor", "Vendor Consistency", "Seasonal History Source", "Rollover Method", "Rollover Date", "Days To Expiry", "CFTC As Of", "CFTC Status", "Latest Official CFTC Report Date", "Series Present In Latest Report", "CFTC Contract Market Code", "CFTC Market Name", "CFTC Open Interest", "MM Long", "MM Short", "MM Spreading", "MM Net", "Net Direction", "CFTC Relative State", "History Weeks", "Last Available Date", "Last Available MM Net % OI", "Last Available COT 5Y Percentile", "Reason Current Signal Missing"] if c in commodity]], use_container_width=True)
         diagnostics = data.get("term_diagnostics", pd.DataFrame())
         if not diagnostics.empty:
             seasonal = diagnostics.loc[diagnostics.get("Diagnostic Type", pd.Series(index=diagnostics.index, dtype=object)).eq("Agriculture Seasonal Structure")].copy()

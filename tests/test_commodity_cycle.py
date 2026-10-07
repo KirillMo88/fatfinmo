@@ -6,6 +6,7 @@ from commodity_cycle.data import (
     FRED_SERIES,
     _combined_curve_quality,
     _contract_selection_quality,
+    annualized_curve_spread,
     _official_seasonal_result,
     _official_seasonal_percentiles,
     build_commodity_cycle_history,
@@ -75,6 +76,28 @@ def test_price_returns_use_current_price_and_calendar_week_lags():
     assert np.isclose(returns["Return 3M"], 53 / 40 - 1)
     assert np.isclose(returns["Return 6M"], 53 / 27 - 1)
     assert np.isclose(returns["Return 12M"], 53 / 1 - 1)
+
+
+def test_annualized_curve_spread_uses_actual_futures_expiry_gap():
+    as_of = pd.Timestamp("2026-10-07")
+    spread = 0.0231
+    expiry1 = _contract_expiry("WTI", 2026, 11)
+    expiry2 = _contract_expiry("WTI", 2027, 1)
+    expected = (1 + spread) ** (365 / (expiry2 - expiry1).days) - 1
+
+    result = annualized_curve_spread("WTI", "CLX26.NYM", "CLF27.NYM", spread, as_of)
+
+    assert np.isclose(result, expected)
+
+
+def test_annualized_lme_cash_three_month_spread_uses_three_month_tenor():
+    as_of = pd.Timestamp("2026-10-07")
+    spread = -0.0044
+    days = (as_of + pd.DateOffset(months=3) - as_of).days
+
+    result = annualized_curve_spread("Aluminum", "LME Cash", "LME 3M", spread, as_of)
+
+    assert np.isclose(result, (1 + spread) ** (365 / days) - 1)
 
 
 def test_energy_seasonal_fallback_uses_latest_same_calendar_month_only():
