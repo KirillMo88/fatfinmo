@@ -1,7 +1,12 @@
 import numpy as np
 import pandas as pd
 from datetime import date
-from commodity_cycle.data import FRED_SERIES, build_commodity_cycle_history
+from commodity_cycle.data import (
+    FRED_SERIES,
+    build_commodity_cycle_history,
+    build_market_confirmation,
+    latest_complete_commodity_cycle_row,
+)
 
 from commodity_cycle.model import (
     calculate_capex_current_percentile,
@@ -233,6 +238,45 @@ def test_commodity_cycle_history_keeps_single_spread_column_for_percentiles():
 
     assert list(history.columns).count("Spread") == 1
     assert history["Spread"].tolist() == [-0.02, -0.01]
+
+
+def test_latest_complete_row_skips_newer_partial_fred_month():
+    history = pd.DataFrame({
+        "Core State": ["Mature", "DATA INCOMPLETE"],
+        "Petroleum / Energy": [1.2, np.nan],
+        "PPIACO": [310.0, 312.0],
+    }, index=pd.to_datetime(["2026-07-01", "2026-08-01"]))
+
+    latest = latest_complete_commodity_cycle_row(history)
+
+    assert latest.name == pd.Timestamp("2026-07-01")
+    assert latest["Core State"] == "Mature"
+
+
+def test_sector_confirmation_falls_back_to_valid_5y_curve_percentile():
+    dates = pd.date_range("2025-09-01", periods=13, freq="MS")
+    prices = pd.DataFrame({asset: np.linspace(100.0, 120.0, len(dates)) for asset in (
+        "WTI", "Natural Gas", "RBOB", "Copper", "Aluminum", "Corn", "Wheat", "Soybeans"
+    )}, index=dates)
+    term_current = pd.DataFrame([
+        {"Asset": "WTI", "Structure": "F1/F3", "As Of": dates[-1], "Official Seasonal Pctl 5Y": 20.0,
+         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Strong Loose"},
+        {"Asset": "Natural Gas", "Structure": "F1/F3", "As Of": dates[-1], "Official Seasonal Pctl 5Y": 80.0,
+         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Strong Tightness"},
+        {"Asset": "RBOB", "Structure": "F1/F3", "As Of": dates[-1], "Official Seasonal Pctl 5Y": 0.0,
+         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Extreme Loose"},
+        {"Asset": "Copper", "Structure": "Cash/3M", "As Of": dates[-1], "Official Seasonal Pctl 5Y": 80.0,
+         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Strong Tightness"},
+        {"Asset": "Aluminum", "Structure": "Cash/3M", "As Of": dates[-1], "Official Seasonal Pctl 5Y": 60.0,
+         "Official Seasonal Pctl 10Y": np.nan, "Official Seasonal State": "Tight"},
+    ])
+
+    _, sectors = build_market_confirmation(prices, pd.DataFrame(), term_current, {})
+    states = sectors.set_index("Sector")["Market Confirmation"].to_dict()
+
+    assert states["Energy"] != "N/A"
+    assert states["Metals"] != "N/A"
+    assert states["Agriculture"] == "N/A"
 
 
 def test_agriculture_baseline_pair_names_map_to_exact_contract_pair_keys():
