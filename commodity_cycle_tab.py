@@ -36,13 +36,13 @@ FINAL_COLORS = {
 }
 STATE_BAND_OPACITY = 0.30
 PRIMARY_COMMODITY_COLUMNS = (
-    "Sector", "Commodity", "Price", "Return 3M", "Return 6M", "Return 12M", "Price State",
+    "Sector", "Commodity", "Price", "Return 1M", "Return 3M", "Return 6M", "Return 12M", "Price State",
     "Curve Spread", "Raw Curve State", "MM Net % OI", "4W Change", "13W Change", "5Y Percentile",
     "Seasonal Percentile 5Y", "CFTC Relative State", "Seasonal Relative State", "Price × Seasonal Curve",
     "Price Date", "Term Structure As Of",
 )
 PERCENT_COLUMNS = {
-    "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread",
+    "Return 1M", "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread",
 }
 DISPLAY_COLUMN_NAMES = {
     "3Y Percentile": "COT 3Y Percentile",
@@ -157,7 +157,7 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         st.caption("The workbook remains the immutable historical baseline for Energy and Metals. Agriculture seasonal history is reconstructed from cached individual expired CBOT contracts using DTE-aligned TradingView MCP daily closes.")
         if not commodity.empty:
             st.markdown("#### Input provenance")
-            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Term Structure As Of", "Term Structure Status", "CurveDataQuality", "Leg 1", "Leg 2", "Curve Spread", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y", "5Y HistoryN", "5Y HistoryStartDate", "5Y HistoryEndDate", "5Y HistoryStatus", "Seasonal Percentile 10Y", "10Y HistoryN", "10Y HistoryStartDate", "10Y HistoryEndDate", "10Y HistoryStatus", "Rollover Method", "Rollover Date", "Days To Expiry", "Updated Date", "CFTC Status"] if c in commodity]], use_container_width=True)
+            st.dataframe(commodity[[c for c in ["Commodity", "Price Date", "Price Status", "Term Structure As Of", "Term Structure Status", "CurveDataQuality", "Leg 1", "Leg 2", "Curve Spread", "Raw Curve State", "MTD Average Spread", "MTD Daily Observations", "Current Seasonal Status", "Seasonal Percentile 5Y", "Seasonal Percentile As Of", "Seasonal Percentile Status", "5Y HistoryN", "5Y HistoryStartDate", "5Y HistoryEndDate", "5Y HistoryStatus", "Seasonal Percentile 10Y", "10Y HistoryN", "10Y HistoryStartDate", "10Y HistoryEndDate", "10Y HistoryStatus", "Rollover Method", "Rollover Date", "Days To Expiry", "CFTC As Of", "CFTC Status", "Latest Official CFTC Report Date", "Series Present In Latest Report", "CFTC Contract Market Code", "CFTC Market Name", "CFTC Open Interest", "MM Long", "MM Short", "MM Spreading", "MM Net", "Net Direction", "CFTC Relative State", "History Weeks", "Last Available Date", "Last Available MM Net % OI", "Last Available COT 5Y Percentile", "Reason Current Signal Missing"] if c in commodity]], use_container_width=True)
         diagnostics = data.get("term_diagnostics", pd.DataFrame())
         if not diagnostics.empty:
             seasonal = diagnostics.loc[diagnostics.get("Diagnostic Type", pd.Series(index=diagnostics.index, dtype=object)).eq("Agriculture Seasonal Structure")].copy()
@@ -289,7 +289,7 @@ def _curve_scatter_marker(value: Any) -> dict[str, Any]:
 def _style_commodity_table(frame: pd.DataFrame, *, highlight_primary: bool = False) -> pd.io.formats.style.Styler:
     styled = frame.style.format(_commodity_numeric_formatters(frame), na_rep="N/A")
     if highlight_primary:
-        returns = [column for column in ("Return 3M", "Return 6M", "Return 12M") if column in frame]
+        returns = [column for column in ("Return 1M", "Return 3M", "Return 6M", "Return 12M") if column in frame]
         if returns:
             styled = styled.apply(_return_gradient_styles, subset=returns)
         if "Raw Curve State" in frame:
@@ -302,11 +302,14 @@ def _render_commodity_drilldown(asset: str, prices: pd.DataFrame, term_history: 
     curve = term_history.loc[(term_history["Asset"] == asset) & pd.to_numeric(term_history["Spread %"], errors="coerce").notna()].copy() if not term_history.empty else pd.DataFrame()
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.1,
                         specs=[[{}], [{}], [{"secondary_y": True}]],
-                        subplot_titles=(f"{asset} monthly price (Yahoo Finance continuous future)", "3M price momentum", "Provided term-structure spread and seasonal percentile"))
+                        subplot_titles=(f"{asset} daily price (Yahoo Finance continuous future)", "13-week price momentum", "Provided term-structure spread and seasonal percentile"))
     if len(p):
         fig.add_trace(go.Scatter(x=p.index, y=p.values, name="Price", line=dict(color="#38bdf8")), row=1, col=1)
-        momentum = p.div(p.shift(3)).sub(1) * 100
-        fig.add_trace(go.Scatter(x=momentum.index, y=momentum, name="3M return", line=dict(color="#a78bfa"), connectgaps=False), row=2, col=1)
+        weekly = p.to_frame("Price")
+        weekly["Week"] = weekly.index.to_period("W-FRI")
+        weekly = weekly.groupby("Week", sort=True).tail(1)["Price"]
+        momentum = weekly.div(weekly.shift(13)).sub(1) * 100
+        fig.add_trace(go.Scatter(x=momentum.index, y=momentum, name="13W return", line=dict(color="#a78bfa"), connectgaps=False), row=2, col=1)
         fig.add_hline(y=0, line_dash="dot", line_color="#64748b", row=2, col=1)
     if not curve.empty:
         fig.add_trace(go.Scatter(x=curve["Date"], y=curve["Spread %"] * 100, name="Spread %", line=dict(color="#facc15"), connectgaps=False), row=3, col=1, secondary_y=False)
@@ -316,7 +319,7 @@ def _render_commodity_drilldown(asset: str, prices: pd.DataFrame, term_history: 
         fig.add_hline(y=0, line_dash="dot", line_color="#64748b", row=3, col=1)
     fig.update_layout(template="plotly_dark", height=690, margin=dict(l=35, r=20, t=45, b=25), legend=dict(orientation="h"))
     fig.update_yaxes(title_text="Price", row=1, col=1)
-    fig.update_yaxes(title_text="3M return %", row=2, col=1)
+    fig.update_yaxes(title_text="13W return %", row=2, col=1)
     fig.update_yaxes(title_text="Spread %", row=3, col=1, secondary_y=False)
     fig.update_yaxes(title_text="Seasonal percentile", range=[0, 100], row=3, col=1, secondary_y=True)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})

@@ -16,6 +16,7 @@ from positioning import (
     cftc_asset_config,
     cftc_asset_series,
     cftc_categories_for_report,
+    cftc_contract_status,
     cftc_latest_status,
     export_positioning_xlsx,
     load_positioning_data,
@@ -73,7 +74,10 @@ def render_cftc_cot_tab() -> None:
         cols = st.columns(len(row_assets))
         for col, asset in zip(cols, row_assets):
             with col:
-                render_cftc_asset_card(master, asset, range_choice)
+                cfg = cftc_asset_config(asset)
+                source_key = "CFTC Commodities" if cfg and cfg.report_type == "Disaggregated" else "CFTC Financials"
+                source_error = str(status.get(source_key, {}).get("status", "")).startswith("SOURCE_FAILED")
+                render_cftc_asset_card(master, asset, range_choice, source_error=source_error)
 
 
 def render_source_status(master: pd.DataFrame, status: dict[str, Any]) -> None:
@@ -100,7 +104,7 @@ def render_source_status(master: pd.DataFrame, status: dict[str, Any]) -> None:
             )
 
 
-def render_cftc_asset_card(master: pd.DataFrame, asset: str, range_choice: str) -> None:
+def render_cftc_asset_card(master: pd.DataFrame, asset: str, range_choice: str, *, source_error: bool = False) -> None:
     cfg = cftc_asset_config(asset)
     if cfg is None:
         render_unavailable_card(asset, "No dashboard config")
@@ -120,12 +124,14 @@ def render_cftc_asset_card(master: pd.DataFrame, asset: str, range_choice: str) 
         return
     d = filter_range(series, range_choice)
     latest = series.dropna(subset=["Date"]).tail(1).iloc[0]
-    render_card_metrics(latest)
+    render_card_metrics(latest, cftc_contract_status(master, asset, source_error=source_error))
     fig = build_cftc_chart(d, asset, participant)
     st.plotly_chart(fig, use_container_width=True, config=CFTC_PLOTLY_CONFIG)
 
 
-def render_card_metrics(row: pd.Series) -> None:
+def render_card_metrics(row: pd.Series, contract_status: dict[str, Any] | None = None) -> None:
+    contract_status = contract_status or {"status": "CURRENT", "latest_report_date": None, "present_in_latest_report": True}
+    current = contract_status.get("status") == "CURRENT"
     history = safe_float(row.get("History_Weeks"))
     three_year_status = "READY" if np.isfinite(history) and history >= CFTC_3Y_PERCENTILE_MIN_PERIODS else "N/A (<156W)"
     five_year_status = "READY" if np.isfinite(history) and history >= CFTC_5Y_PERCENTILE_MIN_PERIODS else "N/A (<260W)"
@@ -137,12 +143,14 @@ def render_card_metrics(row: pd.Series) -> None:
         today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
         freshness = "STALE" if (today - date_value.normalize()).days > CFTC_STALE_DAYS else "CURRENT"
     metrics = [
-        ("Net % OI", fmt_signed_pct_points(row.get("NetPctOI"))),
-        ("3Y Percentile", f"{fmt_score(row.get('NetPctOI_3Y_Percentile'))} ({three_year_status})"),
-        ("5Y Percentile", f"{fmt_score(row.get('NetPctOI_5Y_Percentile'))} ({five_year_status})"),
-        ("4W", fmt_signed_pp(row.get("NetPctOI_4W_Change"))),
-        ("13W", fmt_signed_pp(row.get("NetPctOI_13W_Change"))),
-        ("Updated", f"{updated} ({freshness})"),
+        ("Net % OI", fmt_signed_pct_points(row.get("NetPctOI")) if current else "N/A"),
+        ("3Y Percentile", f"{fmt_score(row.get('NetPctOI_3Y_Percentile'))} ({three_year_status})" if current else "N/A"),
+        ("5Y Percentile", f"{fmt_score(row.get('NetPctOI_5Y_Percentile'))} ({five_year_status})" if current else "N/A"),
+        ("4W", fmt_signed_pp(row.get("NetPctOI_4W_Change")) if current else "N/A"),
+        ("13W", fmt_signed_pp(row.get("NetPctOI_13W_Change")) if current else "N/A"),
+        ("CFTC Status", str(contract_status.get("status", "N/A"))),
+        ("Latest official", str(contract_status.get("latest_report_date") or "N/A")),
+        ("Last available", f"{updated} ({freshness})"),
     ]
     text = " | ".join(f"{label}: {value}" for label, value in metrics)
     st.markdown(f"<div style='font-size:0.70rem;color:#cbd5e1;line-height:1.25;margin-bottom:0.35rem;'>{html.escape(text)}</div>", unsafe_allow_html=True)

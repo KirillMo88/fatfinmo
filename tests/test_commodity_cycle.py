@@ -3,9 +3,11 @@ import pandas as pd
 from datetime import date
 from commodity_cycle.data import (
     FRED_SERIES,
+    _official_seasonal_percentiles,
     build_commodity_cycle_history,
     build_market_confirmation,
     latest_complete_commodity_cycle_row,
+    price_returns_from_daily,
 )
 
 from commodity_cycle.model import (
@@ -49,6 +51,47 @@ def test_price_momentum_priority_and_edges():
     assert classify_commodity_price_momentum(0.01, -0.02, -0.03) == "Bearish"
     assert classify_commodity_price_momentum(0.0, 0.02, 0.03) == "Bullish"
     assert classify_commodity_price_momentum(0.01, 0.0, 0.03) == "Neutral"
+
+
+def test_price_returns_use_current_price_and_calendar_week_lags():
+    dates = pd.date_range("2025-10-08", periods=53, freq="W-WED")
+    prices = pd.Series(np.arange(1.0, 54.0), index=dates)
+
+    returns = price_returns_from_daily(prices)
+
+    assert np.isclose(returns["Return 1M"], 53 / 49 - 1)
+    assert np.isclose(returns["Return 3M"], 53 / 40 - 1)
+    assert np.isclose(returns["Return 6M"], 53 / 27 - 1)
+    assert np.isclose(returns["Return 12M"], 53 / 1 - 1)
+
+
+def test_energy_seasonal_fallback_uses_latest_same_calendar_month_only():
+    october_dates = pd.to_datetime([f"{year}-10-01" for year in range(2018, 2024)])
+    history = pd.DataFrame({
+        "Asset": ["WTI"] * 7,
+        "Date": list(october_dates) + [pd.Timestamp("2023-12-01")],
+        "Month": [10] * 6 + [12],
+        "Spread": [0.01, 0.02, 0.03, 0.04, 0.05, 0.03, 99.0],
+        "PairKey": ["WTI_F1/F3"] * 7,
+    })
+    row = pd.Series({
+        "asset": "WTI", "pair_key": "WTI_F1/F3", "As Of": pd.Timestamp("2026-10-06"),
+        "mtd_observation_count": 4, "Seasonal Pctl 5Y": np.nan, "Seasonal Pctl 10Y": np.nan,
+    })
+
+    p5, p10, as_of, status = _official_seasonal_percentiles(row, history, percentile_with_history)
+
+    assert p5 == 50.0
+    assert pd.isna(p10)
+    assert as_of == "2023-10"
+    assert status == "HISTORICAL_FALLBACK_SAME_MONTH"
+
+    current = row.copy()
+    current["mtd_observation_count"] = 5
+    current["Seasonal Pctl 5Y"] = 80.0
+    current["Seasonal Pctl 10Y"] = 60.0
+    p5, p10, as_of, status = _official_seasonal_percentiles(current, history, percentile_with_history)
+    assert (p5, p10, as_of, status) == (80.0, 60.0, "2026-10-06", "CURRENT_MTD")
 
 
 def test_inventory_sales_stress_inverts_ratio_percentile_without_lookahead():
@@ -102,12 +145,12 @@ def test_cftc_relative_state_half_open_boundaries():
 def test_sector_cftc_qualifier_exact_boundaries_and_absolute_direction():
     def qualifier(pctl, net):
         return resolve_cftc_qualifier([pctl, pctl], [net, net])
-    assert qualifier(10, -1) == "Short / Contrarian"
-    assert qualifier(25, -1) == "Not Crowded"
-    assert qualifier(75, 1) == "Crowded"
-    assert qualifier(90, 1) == "Crowded"
-    assert qualifier(90.01, 1) == "Extremely Crowded"
-    assert qualifier(80, -1) == "High Relative Positioning / Still Net Short"
+    assert qualifier(10, -1) == "Net Short / Low Relative Positioning"
+    assert qualifier(25, -1) == "Net Short / Neutral Relative Positioning"
+    assert qualifier(20, 1) == "Net Long / Low Relative Positioning"
+    assert qualifier(75, 1) == "Net Long / High Relative Positioning"
+    assert qualifier(90.01, 1) == "Net Long / Extreme High Relative Positioning"
+    assert qualifier(80, -1) == "Net Short / High Relative Positioning"
 
 
 def test_yahoo_contract_symbols_are_generated_for_rolling_years():

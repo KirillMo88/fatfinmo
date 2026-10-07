@@ -11,7 +11,7 @@ import xlsxwriter
 
 
 PERCENT_COLUMNS = {
-    "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread",
+    "Return 1M", "Return 3M", "Return 6M", "Return 12M", "Curve Spread", "MTD Average Spread",
 }
 
 
@@ -63,7 +63,7 @@ def _write_table_sheet(
     if not highlight or frame.empty:
         return
 
-    for column in ("Return 3M", "Return 6M", "Return 12M"):
+    for column in ("Return 1M", "Return 3M", "Return 6M", "Return 12M"):
         if column not in columns:
             continue
         index = columns.index(column)
