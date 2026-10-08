@@ -6667,13 +6667,13 @@ def main():
         st.caption(st.session_state["nightly_job_notice"])
 
     filtered_df, flow_unavailable = apply_filters(df)
-    market_cycle_risk = None
+    market_cycle_risk: dict[str, Any] = {}
     market_cycle_vix_history = pd.DataFrame()
     try:
         current_cycle = load_market_cycle_snapshot_cached(
             int(st.session_state.get("market_cycle_refresh_nonce", 0))
         )
-        market_cycle_risk = current_cycle.current.get("CurrentMarketRiskState")
+        market_cycle_risk = current_cycle.current
         market_cycle_vix_history = current_cycle.daily
     except Exception:
         pass

@@ -27,9 +27,13 @@ def test_top_analytics_uses_requested_order_and_source_metrics():
     ]
     assert metrics[0][1] == "HIGH RISK"
     assert metrics[1][1] == "60.0"
-    assert "ROC 1M +" in metrics[1][2] and "ROC 3M +" in metrics[1][2]
-    assert metrics[2][1] == "30.00" and "5Y percentile 100%" in metrics[2][2]
-    assert metrics[3][1] == "110.00" and "4W change +" in metrics[3][2]
+    assert metrics[1][2][0].startswith("ROC 1M +")
+    assert metrics[1][2][1].startswith("ROC 3M +")
+    assert metrics[1][2][2].startswith("ROC 6M +")
+    assert metrics[2][1] == "30.00" and metrics[2][2][2] == "5Y percentile 100%"
+    assert metrics[2][2][0].startswith("1W change +")
+    assert metrics[3][1] == "110.00" and metrics[3][2][1].startswith("4W change +")
+    assert metrics[3][2][0].startswith("1W change +")
     assert metrics[4][1] == "TREASURY VOLATILITY"
 
 
@@ -39,4 +43,22 @@ def test_top_analytics_reports_na_when_five_year_history_is_incomplete():
 
     metrics = build_top_analytics(None, pd.DataFrame(), frame, pd.DataFrame(), pd.DataFrame())
 
-    assert "5Y percentile N/A" in metrics[2][2]
+    assert metrics[2][2][2] == "5Y percentile N/A"
+
+
+def test_current_risk_lists_components_with_high_or_higher_status():
+    current = {
+        "CurrentMarketRiskState": "ELEVATED",
+        "CurrentRiskDrawdownRiskState": "HIGH",
+        "CurrentRiskPriceCycleVulnerabilityRiskState": "MODERATE",
+        "CurrentRiskBreadthRiskState": "RED FLAG",
+        "CurrentRiskRSIDivergenceRiskState": "LOW",
+        "CurrentRiskVIXRiskState": "HIGH RISK",
+        "CurrentRiskHighBetaRiskState": "DATA INCOMPLETE",
+        "CurrentRiskHYRiskState": "ELEVATED",
+    }
+
+    metrics = build_top_analytics(current, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+
+    assert metrics[0][1] == "ELEVATED"
+    assert metrics[0][2] == ["Market Cycle", "High+ components: Drawdown Risk, Breadth Risk, VIX Risk"]
