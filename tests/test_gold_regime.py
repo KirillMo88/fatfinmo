@@ -20,6 +20,8 @@ from gold_regime_tab import (
     history_metric_change,
     latest_gold_cycle_summary,
     prepare_gold_liquidity_cycle_comparison,
+    _precious_metals_column_scales,
+    _precious_metals_gradient_style,
     summary_metric_markup,
 )
 
@@ -48,6 +50,18 @@ def test_gold_summary_metric_values_are_aligned_to_the_left_of_labels():
     state_markup = summary_metric_markup("3M State", "STRONGLY_UNFAVORABLE", "")
     assert "STRONGLY_<wbr>UNFAVORABLE" in state_markup
     assert "Score" not in state_markup
+
+
+def test_precious_metals_tables_share_zero_anchored_performance_scale():
+    first = pd.DataFrame({"1M Change": [-0.02, 0.01]})
+    second = pd.DataFrame({"1M Change": [-0.08, 0.04]})
+
+    scales = _precious_metals_column_scales(first, second)
+
+    assert scales["1M Change"] == 0.08
+    assert "rgb(248,113,113)" in _precious_metals_gradient_style(-0.08, scales["1M Change"])
+    assert "rgb(74,222,128)" in _precious_metals_gradient_style(0.08, scales["1M Change"])
+    assert "rgb(161,168,120)" in _precious_metals_gradient_style(0.0, scales["1M Change"])
 
 
 def test_gold_liquidity_cycle_comparison_aligns_monthly_history_and_range():
