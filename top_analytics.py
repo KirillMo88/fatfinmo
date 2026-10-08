@@ -13,47 +13,69 @@ def build_top_analytics(
     vix_history: pd.DataFrame,
     move_history: pd.DataFrame,
     funding_history: pd.DataFrame,
-) -> list[tuple[str, str, str]]:
+) -> list[tuple[str, str, list[str]]]:
     """Build the five metrics displayed above the app's view selector."""
-    risk_status = _format_text(current_risk)
+    if isinstance(current_risk, dict):
+        risk_status = _format_text(current_risk.get("CurrentMarketRiskState"))
+        risk_components = _high_risk_components(current_risk)
+    else:
+        risk_status = _format_text(current_risk)
+        risk_components = []
     liquidity = _dated_numeric_series(liquidity_history, "global_liquidity_score")
     score = _last_value(liquidity)
     roc_1m = _relative_change(liquidity, 28)
     roc_3m = _relative_change(liquidity, 91)
+    roc_6m = _relative_change(liquidity, 183)
 
-    vix_value, vix_change, vix_percentile = _volatility_summary(_dated_numeric_series(vix_history, "VIX"))
-    move_value, move_change, move_percentile = _volatility_summary(_dated_numeric_series(move_history, "MOVE"))
+    vix_value, vix_change_1w, vix_change_4w, vix_percentile = _volatility_summary(_dated_numeric_series(vix_history, "VIX"))
+    move_value, move_change_1w, move_change_4w, move_percentile = _volatility_summary(_dated_numeric_series(move_history, "MOVE"))
     funding = _latest_text(funding_history, "FundingState")
 
     return [
-        ("Current Risk", risk_status, "Market Cycle"),
+        ("Current Risk", risk_status, ["Market Cycle", f"High+ components: {', '.join(risk_components) or 'None'}"]),
         (
             "Global Liquidity Score",
             _format_number(score),
-            f"ROC 1M {_format_percent(roc_1m)} · ROC 3M {_format_percent(roc_3m)}",
+            [
+                f"ROC 1M {_format_percent(roc_1m)}",
+                f"ROC 3M {_format_percent(roc_3m)}",
+                f"ROC 6M {_format_percent(roc_6m)}",
+            ],
         ),
         (
             "VIX",
             vix_value,
-            f"4W change {_format_signed(vix_change)} pts · 5Y percentile {_format_percentile(vix_percentile)}",
+            [
+                f"1W change {_format_signed(vix_change_1w)} pts",
+                f"4W change {_format_signed(vix_change_4w)} pts",
+                f"5Y percentile {_format_percentile(vix_percentile)}",
+            ],
         ),
         (
             "MOVE",
             move_value,
-            f"4W change {_format_signed(move_change)} pts · 5Y percentile {_format_percentile(move_percentile)}",
+            [
+                f"1W change {_format_signed(move_change_1w)} pts",
+                f"4W change {_format_signed(move_change_4w)} pts",
+                f"5Y percentile {_format_percentile(move_percentile)}",
+            ],
         ),
-        ("Funding Stress", funding, "Funding Conditions"),
+        ("Funding Stress", funding, ["Funding Conditions"]),
     ]
 
 
-def render_top_analytics(slots: list[Any], metrics: list[tuple[str, str, str]]) -> None:
-    for slot, (label, value, detail) in zip(slots, metrics):
+def render_top_analytics(slots: list[Any], metrics: list[tuple[str, str, list[str]]]) -> None:
+    for slot, (label, value, detail_lines) in zip(slots, metrics):
         with slot.container():
+            details_html = "".join(
+                f"<div style='font-size:.68rem;color:#cbd5e1'>{html.escape(line)}</div>"
+                for line in detail_lines
+            )
             st_html = (
                 "<div style='padding-top:1.35rem;line-height:1.1;'>"
                 f"<div style='font-size:.68rem;color:#94a3b8;font-weight:700'>{html.escape(label)}</div>"
                 f"<div style='font-size:.9rem;color:#f8fafc;font-weight:800'>{html.escape(value)}</div>"
-                f"<div style='font-size:.68rem;color:#cbd5e1'>{html.escape(detail)}</div>"
+                f"{details_html}"
                 "</div>"
             )
             import streamlit as st
@@ -89,16 +111,35 @@ def _relative_change(series: pd.Series, days: int) -> float | None:
     return current / previous - 1.0
 
 
-def _volatility_summary(series: pd.Series) -> tuple[str, float | None, float | None]:
+def _volatility_summary(series: pd.Series) -> tuple[str, float | None, float | None, float | None]:
     if series.empty:
-        return "N/A", None, None
+        return "N/A", None, None, None
     current = float(series.iloc[-1])
-    change = current - float(series.iloc[-21]) if len(series) >= 21 else None
+    change_1w = current - float(series.iloc[-6]) if len(series) >= 6 else None
+    change_4w = current - float(series.iloc[-21]) if len(series) >= 21 else None
     cutoff = series.index[-1] - pd.DateOffset(years=5)
     history = series.loc[series.index >= cutoff]
     full_window = not history.empty and history.index[0] <= cutoff + pd.Timedelta(days=7)
     percentile = float(history.le(current).mean() * 100.0) if full_window and len(history) >= 1000 else None
-    return f"{current:.2f}", change, percentile
+    return f"{current:.2f}", change_1w, change_4w, percentile
+
+
+def _high_risk_components(current: dict[str, Any]) -> list[str]:
+    component_labels = (
+        ("CurrentRiskDrawdownRiskState", "Drawdown Risk"),
+        ("CurrentRiskPriceCycleVulnerabilityRiskState", "Price-Cycle Vulnerability Risk"),
+        ("CurrentRiskBreadthRiskState", "Breadth Risk"),
+        ("CurrentRiskRSIDivergenceRiskState", "RSI Divergence Risk"),
+        ("CurrentRiskVIXRiskState", "VIX Risk"),
+        ("CurrentRiskHighBetaRiskState", "High Beta Risk"),
+        ("CurrentRiskHYRiskState", "High Yield Risk"),
+    )
+    high_states = {"HIGH", "HIGH RISK", "RED FLAG", "EXTREME", "CRITICAL"}
+    return [
+        label
+        for state_key, label in component_labels
+        if _format_text(current.get(state_key)).upper() in high_states
+    ]
 
 
 def _last_value(series: pd.Series) -> float | None:
