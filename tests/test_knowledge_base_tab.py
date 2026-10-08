@@ -7,6 +7,22 @@ KNOWLEDGE_BASE = ROOT / "knowledge_base" / "michael_howell_debt_liquidity_cycle.
 APP_SOURCE = ROOT / "app.py"
 TAB_SOURCE = ROOT / "knowledge_base_tab.py"
 PRESENTATION_DIR = ROOT / "knowledge_base" / "presentation"
+LUKE_GROMEN_INFOGRAPHICS = (
+    ROOT / "knowledge_base" / "luke_gromen_macro_analysis_framework.png",
+    ROOT / "knowledge_base" / "luke_gromen_gold_model.png",
+    ROOT / "knowledge_base" / "luke_gromen_debt_debasement.png",
+)
+LYN_ALDEN_INFOGRAPHIC = ROOT / "knowledge_base" / "lyn_alden_financial_framework.png"
+BRENT_JOHNSON_INFOGRAPHIC = (
+    ROOT / "knowledge_base" / "brent_johnson_dollar_milkshake_model.png"
+)
+JEFF_SNYDER_INFOGRAPHICS = (
+    ROOT / "knowledge_base" / "jeff_snyder_global_dollar_system.png",
+    ROOT / "knowledge_base" / "jeff_snyder_eurodollar_crisis_2007_2008.png",
+)
+HELICOPTER_VIEW_INFOGRAPHIC = (
+    ROOT / "knowledge_base" / "helicopter_view_global_liquidity.png"
+)
 
 
 class KnowledgeBaseContentTests(unittest.TestCase):
@@ -50,6 +66,58 @@ class KnowledgeBaseContentTests(unittest.TestCase):
         slides = sorted(PRESENTATION_DIR.glob("slide-*.jpg"))
         self.assertEqual(len(slides), 15)
         self.assertIn('HOWELL_PRESENTATION_DIR.glob("slide-*.jpg")', tab)
+
+    def test_howell_content_is_grouped_and_text_starts_collapsed(self):
+        tab = TAB_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn('with st.container(border=True):', tab)
+        self.assertIn('st.subheader("Michael Howell")', tab)
+        self.assertIn(
+            'with st.expander("Подробное текстовое саммари", expanded=False):',
+            tab,
+        )
+        self.assertLess(tab.index("st.image("), tab.index("with st.expander("))
+        self.assertLess(
+            tab.index("for row_start in range(0, len(slide_paths), 2):"),
+            tab.index("with st.expander("),
+        )
+
+    def test_luke_gromen_block_includes_all_infographics(self):
+        tab = TAB_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn('st.subheader("Luke Gromen")', tab)
+        self.assertIn("for infographic_path, caption in LUKE_GROMEN_INFOGRAPHICS:", tab)
+        for infographic_path in LUKE_GROMEN_INFOGRAPHICS:
+            self.assertTrue(infographic_path.is_file(), infographic_path)
+
+    def test_lyn_alden_block_includes_infographic(self):
+        tab = TAB_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn('st.subheader("Lyn Alden")', tab)
+        self.assertIn('str(LYN_ALDEN_INFOGRAPHIC_PATH)', tab)
+        self.assertTrue(LYN_ALDEN_INFOGRAPHIC.is_file())
+
+    def test_brent_johnson_block_includes_infographic(self):
+        tab = TAB_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn('st.subheader("Brent Johnson")', tab)
+        self.assertIn('str(BRENT_JOHNSON_INFOGRAPHIC_PATH)', tab)
+        self.assertTrue(BRENT_JOHNSON_INFOGRAPHIC.is_file())
+
+    def test_jeff_snyder_block_includes_all_infographics(self):
+        tab = TAB_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn('st.subheader("Jeff Snyder")', tab)
+        self.assertIn("for infographic_path, caption in JEFF_SNYDER_INFOGRAPHICS:", tab)
+        for infographic_path in JEFF_SNYDER_INFOGRAPHICS:
+            self.assertTrue(infographic_path.is_file(), infographic_path)
+
+    def test_helicopter_view_block_includes_infographic(self):
+        tab = TAB_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn('st.subheader("Helicopter View")', tab)
+        self.assertIn('str(HELICOPTER_VIEW_INFOGRAPHIC_PATH)', tab)
+        self.assertTrue(HELICOPTER_VIEW_INFOGRAPHIC.is_file())
 
 
 if __name__ == "__main__":
