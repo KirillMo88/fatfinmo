@@ -12,6 +12,14 @@ from plotly.subplots import make_subplots
 
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
 from gold_regime.macro2_view import render_gold_macro2_price_chart, render_gold_structural_macro2, render_macro2_narrative
+from gold_regime.precious_metals import (
+    CHANGE_HORIZONS,
+    PRECIOUS_METALS_ROWS,
+    PRODUCERS_VS_BULLION_ROWS,
+    build_change_table,
+    build_indexed_chart_history,
+    load_precious_metals_ratios as fetch_precious_metals_ratios,
+)
 from global_liquidity import read_global_liquidity
 from global_m2_cycle import build_global_m2_cycle_history
 from market_cycle_tab import (
@@ -116,6 +124,7 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
         key="gold_charts_range",
     )
     render_gold_history_chart(snapshot, selected_range, snapshot.structural_macro2)
+    render_precious_metals_universe()
     if snapshot.structural_macro2 is not None and snapshot.structural_macro2.history is not None and not snapshot.structural_macro2.history.empty:
         render_macro2_narrative(snapshot.structural_macro2.current or {})
     history_dates = (
@@ -138,6 +147,92 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
     render_structural_demand(current, snapshot)
     render_freshness(snapshot)
     render_history_table(filter_gold_analytics_history(snapshot.history))
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def load_precious_metals_universe() -> tuple[pd.DataFrame, dict[str, str]]:
+    return fetch_precious_metals_ratios()
+
+
+def render_precious_metals_universe() -> None:
+    st.markdown("### Precious Metals Universe")
+    try:
+        with st.spinner("Loading precious metals history..."):
+            history, source_status = load_precious_metals_universe()
+    except Exception as exc:
+        st.warning(f"Precious Metals Universe data is unavailable: {exc}")
+        return
+
+    metals_table = build_change_table(history, PRECIOUS_METALS_ROWS)
+    producers_table = build_change_table(history, PRODUCERS_VS_BULLION_ROWS)
+    st.dataframe(
+        _format_precious_metals_table(metals_table),
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.markdown("#### Producers vs Bullion")
+    st.dataframe(
+        _format_precious_metals_table(producers_table),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    chart_history = build_indexed_chart_history(history)
+    fig = go.Figure()
+    if not chart_history.empty:
+        for column in chart_history.columns:
+            if column == "Date":
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=chart_history["Date"],
+                    y=chart_history[column],
+                    mode="lines",
+                    name=column,
+                    connectgaps=True,
+                )
+            )
+    fig.update_layout(
+        title="Precious Metals & Producers — Relative Ratio (10Y start = 100)",
+        height=420,
+        margin={"l": 10, "r": 10, "t": 55, "b": 10},
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": "#cbd5e1"},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+        xaxis={"gridcolor": "#263241"},
+        yaxis={"title": "Indexed ratio", "gridcolor": "#263241"},
+    )
+    if fig.data:
+        st.plotly_chart(fig, use_container_width=True, config=GOLD_PLOTLY_CONFIG)
+    else:
+        st.info("Precious metals ratio history is unavailable.")
+
+    latest = pd.to_datetime(history.index, errors="coerce").max() if not history.empty else pd.NaT
+    latest_text = latest.strftime("%Y-%m-%d") if pd.notna(latest) else "unavailable"
+    st.caption(
+        "Weekly closes through "
+        f"{latest_text}. Yahoo Finance adjusted closes: GLD, GDX, SIL, SLV. "
+        "TradingView: TVC:SILVER, TVC:PALLADIUM, TVC:PLATINUM, OANDA:XAUUSD."
+    )
+    unavailable = [
+        source
+        for source, status in source_status.items()
+        if "unavailable" in status.lower()
+    ]
+    if unavailable:
+        st.caption("Unavailable data: " + ", ".join(unavailable) + ". Affected cells are shown as —.")
+
+
+def _format_precious_metals_table(frame: pd.DataFrame) -> pd.DataFrame:
+    display = frame.copy()
+    for column, _ in CHANGE_HORIZONS:
+        if column not in display.columns:
+            continue
+        display[column] = pd.to_numeric(display[column], errors="coerce").map(
+            lambda value: f"{value:+.1%}" if np.isfinite(value) else "—"
+        )
+    return display
 
 
 def extract_gold_alpha(table_df: pd.DataFrame) -> float | None:
