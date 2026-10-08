@@ -14,7 +14,6 @@ TRADINGVIEW_SYMBOLS = {
     "XAUUSD": "OANDA:XAUUSD",
 }
 PRECIOUS_METALS_ROWS = (
-    ("GDX / GLD", "GDX", "GLD"),
     ("Silver / XAUUSD", "SILVER", "XAUUSD"),
     ("Palladium / XAUUSD", "PALLADIUM", "XAUUSD"),
     ("Platinum / XAUUSD", "PLATINUM", "XAUUSD"),
@@ -91,7 +90,11 @@ def build_change_table(
     return pd.DataFrame(output, columns=["Ratio", *[horizon for horizon, _ in CHANGE_HORIZONS]])
 
 
-def build_indexed_chart_history(history: pd.DataFrame, years: int = 10) -> pd.DataFrame:
+def build_indexed_chart_history(
+    history: pd.DataFrame,
+    selected_range: str = "10Y",
+    range_end: pd.Timestamp | str | None = None,
+) -> pd.DataFrame:
     if history is None or history.empty:
         return pd.DataFrame(columns=["Date"])
     frame = history.copy()
@@ -99,8 +102,12 @@ def build_indexed_chart_history(history: pd.DataFrame, years: int = 10) -> pd.Da
     frame = frame.loc[~frame.index.isna()].sort_index()
     if frame.empty:
         return pd.DataFrame(columns=["Date"])
-    cutoff = frame.index.max() - pd.DateOffset(years=years)
-    frame = frame.loc[frame.index >= cutoff]
+    end = pd.to_datetime(range_end, errors="coerce") if range_end is not None else pd.NaT
+    end = frame.index.max() if pd.isna(end) else pd.Timestamp(end).normalize()
+    frame = frame.loc[frame.index <= end]
+    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    if years is not None:
+        frame = frame.loc[frame.index >= end - pd.DateOffset(years=years)]
     indexed = pd.DataFrame(index=frame.index)
     for column in frame.columns:
         series = pd.to_numeric(frame[column], errors="coerce").dropna()

@@ -124,15 +124,15 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
         key="gold_charts_range",
     )
     render_gold_history_chart(snapshot, selected_range, snapshot.structural_macro2)
-    render_precious_metals_universe()
-    if snapshot.structural_macro2 is not None and snapshot.structural_macro2.history is not None and not snapshot.structural_macro2.history.empty:
-        render_macro2_narrative(snapshot.structural_macro2.current or {})
     history_dates = (
         pd.to_datetime(snapshot.history["date"], errors="coerce")
         if "date" in snapshot.history.columns
         else pd.Series(dtype="datetime64[ns]")
     )
     global_range_end = history_dates.max()
+    render_precious_metals_universe(selected_range, global_range_end)
+    if snapshot.structural_macro2 is not None and snapshot.structural_macro2.history is not None and not snapshot.structural_macro2.history.empty:
+        render_macro2_narrative(snapshot.structural_macro2.current or {})
     render_gold_structural_macro2(
         snapshot.structural_macro2,
         snapshot.aisc_valuation,
@@ -154,7 +154,7 @@ def load_precious_metals_universe() -> tuple[pd.DataFrame, dict[str, str]]:
     return fetch_precious_metals_ratios()
 
 
-def render_precious_metals_universe() -> None:
+def render_precious_metals_universe(selected_range: str, range_end: Any = None) -> None:
     st.markdown("### Precious Metals Universe")
     try:
         with st.spinner("Loading precious metals history..."):
@@ -166,18 +166,18 @@ def render_precious_metals_universe() -> None:
     metals_table = build_change_table(history, PRECIOUS_METALS_ROWS)
     producers_table = build_change_table(history, PRODUCERS_VS_BULLION_ROWS)
     st.dataframe(
-        _format_precious_metals_table(metals_table),
+        _style_precious_metals_table(metals_table),
         hide_index=True,
         use_container_width=True,
     )
     st.markdown("#### Producers vs Bullion")
     st.dataframe(
-        _format_precious_metals_table(producers_table),
+        _style_precious_metals_table(producers_table),
         hide_index=True,
         use_container_width=True,
     )
 
-    chart_history = build_indexed_chart_history(history)
+    chart_history = build_indexed_chart_history(history, selected_range, range_end)
     fig = go.Figure()
     if not chart_history.empty:
         for column in chart_history.columns:
@@ -193,13 +193,13 @@ def render_precious_metals_universe() -> None:
                 )
             )
     fig.update_layout(
-        title="Precious Metals & Producers — Relative Ratio (10Y start = 100)",
+        title=f"Precious Metals & Producers — Relative Ratio ({selected_range} start = 100)",
         height=420,
-        margin={"l": 10, "r": 10, "t": 55, "b": 10},
+        margin={"l": 10, "r": 10, "t": 55, "b": 90},
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font={"color": "#cbd5e1"},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+        legend={"orientation": "h", "yanchor": "top", "y": -0.25, "xanchor": "center", "x": 0.5},
         xaxis={"gridcolor": "#263241"},
         yaxis={"title": "Indexed ratio", "gridcolor": "#263241"},
     )
@@ -224,15 +224,41 @@ def render_precious_metals_universe() -> None:
         st.caption("Unavailable data: " + ", ".join(unavailable) + ". Affected cells are shown as —.")
 
 
-def _format_precious_metals_table(frame: pd.DataFrame) -> pd.DataFrame:
-    display = frame.copy()
-    for column, _ in CHANGE_HORIZONS:
-        if column not in display.columns:
-            continue
-        display[column] = pd.to_numeric(display[column], errors="coerce").map(
-            lambda value: f"{value:+.1%}" if np.isfinite(value) else "—"
-        )
-    return display
+def _style_precious_metals_table(frame: pd.DataFrame) -> Any:
+    horizons = {column for column, _ in CHANGE_HORIZONS}
+    formatters = {column: "{:+.1%}" for column in horizons if column in frame.columns}
+
+    def color_column(column: pd.Series) -> list[str]:
+        if column.name not in horizons:
+            return [""] * len(column)
+        values = pd.to_numeric(column, errors="coerce")
+        valid = values.dropna()
+        if valid.empty:
+            return [""] * len(column)
+        low, high = float(valid.min()), float(valid.max())
+        styles = []
+        for value in values:
+            if pd.isna(value):
+                styles.append("")
+                continue
+            position = 0.5 if high == low else (float(value) - low) / (high - low)
+            color = _precious_metals_gradient_color(position)
+            styles.append(f"background-color: {color}; color: #0f172a; font-weight: 700")
+        return styles
+
+    return frame.style.format(formatters, na_rep="—").apply(color_column)
+
+
+def _precious_metals_gradient_color(position: float) -> str:
+    red = (254, 202, 202)
+    yellow = (254, 240, 138)
+    green = (187, 247, 208)
+    if position <= 0.5:
+        start, end, fraction = red, yellow, position * 2
+    else:
+        start, end, fraction = yellow, green, (position - 0.5) * 2
+    channels = tuple(round(left + (right - left) * fraction) for left, right in zip(start, end))
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
 
 
 def extract_gold_alpha(table_df: pd.DataFrame) -> float | None:
