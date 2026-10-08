@@ -67,13 +67,14 @@ from liquidity_forecast import read_forecast_snapshot
 from liquidity_forecast_tab import render_liquidity_forecast
 from rates_financial_conditions_tab import render_rates_financial_conditions_tab
 from funding_conditions_tab import render_funding_conditions_tab
+from funding_conditions import read_snapshot as read_funding_conditions_snapshot
 from financial_fragility_tab import render_financial_fragility_tab
 from treasury_fiscal_regime_tab import render_treasury_fiscal_regime_tab
 from treasury_funding_policy import read_snapshot as read_treasury_funding_policy_snapshot
 from gold_regime_tab import render_gold_regime_tab
 from knowledge_base_tab import render_knowledge_base_tab
 from btc_cycle_tab import render_btc_cycle_tab
-from commodity_cycle_tab import render_commodity_cycle_tab
+from commodity_cycle_tab import build_top_analytics, render_commodity_cycle_tab
 from market_cycle_tab import load_market_cycle_snapshot_cached, render_market_cycle_tab
 from technical_outlook_simple_v3_tab import render_technical_outlook_simple_v3_tab
 from global_m2_cycle import (
@@ -7126,7 +7127,42 @@ def main():
     elif active_view == "Market Cycle":
         render_market_cycle_tab(get_fred_api_key_for_app())
     elif active_view == "Commodity Cycle":
-        render_commodity_cycle_tab(get_fred_api_key_for_app())
+        market_current_risk = None
+        market_vix_history = pd.DataFrame()
+        try:
+            commodity_market_snapshot = load_market_cycle_snapshot_cached(
+                int(st.session_state.get("market_cycle_refresh_nonce", 0))
+            )
+            market_current_risk = commodity_market_snapshot.current.get("CurrentMarketRiskState")
+            market_vix_history = commodity_market_snapshot.daily
+        except Exception:
+            pass
+
+        commodity_liquidity_history = pd.DataFrame()
+        try:
+            _, commodity_monthly_liquidity, commodity_weekly_liquidity = read_global_liquidity()
+            commodity_liquidity_regime = _build_global_liquidity_regime_frame(
+                _liquidity_prepare_dates(commodity_monthly_liquidity),
+                _liquidity_prepare_dates(commodity_weekly_liquidity),
+            )
+            commodity_liquidity_history = commodity_liquidity_regime[
+                ["date", "global_liquidity_score"]
+            ].rename(columns={"date": "Date"})
+        except Exception:
+            pass
+
+        try:
+            funding_snapshot = read_funding_conditions_snapshot()
+        except Exception:
+            funding_snapshot = type("EmptyFundingSnapshot", (), {"daily": pd.DataFrame()})()
+        commodity_top_analytics = build_top_analytics(
+            market_current_risk,
+            commodity_liquidity_history,
+            market_vix_history,
+            funding_snapshot.daily,
+            funding_snapshot.daily,
+        )
+        render_commodity_cycle_tab(get_fred_api_key_for_app(), commodity_top_analytics)
     elif active_view == "Business Cycle":
         render_business_cycle_tab(get_fred_api_key_for_app())
     elif active_view == "Global Macro":
