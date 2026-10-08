@@ -21,6 +21,7 @@ RESOURCE_ASSETS = (
 )
 YFINANCE_TICKERS = tuple(ticker for ticker, _ in (*COUNTRY_ASSETS[1:], *RESOURCE_ASSETS))
 EQUITY_ASSETS = tuple(ticker for ticker, _ in (*COUNTRY_ASSETS, *RESOURCE_ASSETS))
+RTSI_TV_SYMBOL = "RUS:RTSI"
 
 
 def _clean_price_series(series: pd.Series) -> pd.Series:
@@ -136,18 +137,18 @@ def download_market_prices(calculation_date: pd.Timestamp | str) -> tuple[dict[s
     try:
         from tradingview_mcp import get_ohlcv_data
 
-        bars = get_ohlcv_data("RUS:RTSI", interval="1D", count=1500)
+        bars = get_ohlcv_data(RTSI_TV_SYMBOL, interval="1D", count=1500, force=True)
         if bars is None or bars.empty or not {"date", "close"}.issubset(bars.columns):
-            raise ValueError("empty/invalid OHLCV response for RUS:RTSI")
+            raise ValueError(f"empty/invalid OHLCV response for {RTSI_TV_SYMBOL}")
         dates = pd.to_datetime(bars["date"], errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
         series = pd.Series(pd.to_numeric(bars["close"], errors="coerce").to_numpy(), index=dates)
         series = _clean_price_series(series)
         if series.empty:
-            raise ValueError("no valid closes for RUS:RTSI")
+            raise ValueError(f"no valid closes for {RTSI_TV_SYMBOL}")
         prices["RTSI"] = series
-        status["RTSI"] = f"TradingView MCP RUS:RTSI; last {series.index[-1]:%Y-%m-%d}"
+        status["RTSI"] = f"TradingView MCP {RTSI_TV_SYMBOL}; last {series.index[-1]:%Y-%m-%d}"
     except Exception as exc:
-        status["RTSI"] = f"TradingView MCP unavailable (RUS:RTSI): {exc}"
+        status["RTSI"] = f"TradingView MCP unavailable ({RTSI_TV_SYMBOL}): {exc}"
     return prices, status
 
 
