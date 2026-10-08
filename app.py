@@ -6580,7 +6580,7 @@ def main():
         top_refresh_col,
         top_hard_refresh_col,
     ) = st.columns(
-        [1.8, 1.1, 1.3, 0.9, 0.9, 1.1, 0.2, 1.1, 0.95, 1.35]
+        [1.8, 1.35, 1.35, 1.35, 1.35, 1.35, 0.2, 1.1, 0.95, 1.35]
     )
     with top_left:
         selected_universe_name = st.selectbox("ETF Version", options=list(universe_map.keys()), index=0)
