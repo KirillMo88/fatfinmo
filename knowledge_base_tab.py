@@ -6,6 +6,7 @@ import streamlit as st
 KNOWLEDGE_BASE_DIR = Path(__file__).resolve().parent / "knowledge_base"
 HOWELL_TEXT_PATH = KNOWLEDGE_BASE_DIR / "michael_howell_debt_liquidity_cycle.md"
 HOWELL_INFOGRAPHIC_PATH = KNOWLEDGE_BASE_DIR / "howell_debt_liquidity_cycle.png"
+HOWELL_ASSET_ALLOCATION_PATH = KNOWLEDGE_BASE_DIR / "howell_asset_allocation_cycle.png"
 HOWELL_PRESENTATION_DIR = KNOWLEDGE_BASE_DIR / "presentation"
 LUKE_GROMEN_INFOGRAPHICS = (
     (
@@ -13,12 +14,12 @@ LUKE_GROMEN_INFOGRAPHICS = (
         "Долговая математика и дебасмент доллара",
     ),
     (
-        KNOWLEDGE_BASE_DIR / "luke_gromen_macro_analysis_framework.png",
-        "Luke Gromen — Macro Analysis Framework",
-    ),
-    (
         KNOWLEDGE_BASE_DIR / "luke_gromen_gold_model.png",
         "Золото в модели Luke Gromen",
+    ),
+    (
+        KNOWLEDGE_BASE_DIR / "luke_gromen_macro_analysis_framework.png",
+        "Luke Gromen — Macro Analysis Framework",
     ),
 )
 LYN_ALDEN_INFOGRAPHIC_PATH = KNOWLEDGE_BASE_DIR / "lyn_alden_financial_framework.png"
@@ -60,6 +61,9 @@ def render_knowledge_base_tab() -> None:
         st.subheader("Michael Howell")
         _render_infographics(
             ((HOWELL_INFOGRAPHIC_PATH, "The Howell Model — Debt–Liquidity Cycle"),)
+        )
+        _render_infographics(
+            ((HOWELL_ASSET_ALLOCATION_PATH, "Asset Allocation Cycle"),)
         )
 
         slide_paths = sorted(HOWELL_PRESENTATION_DIR.glob("slide-*.jpg"))
@@ -104,7 +108,8 @@ def render_knowledge_base_tab() -> None:
 
     with st.container(border=True):
         st.subheader("Jeff Snyder")
-        _render_infographics(JEFF_SNYDER_INFOGRAPHICS)
+        for infographic in JEFF_SNYDER_INFOGRAPHICS:
+            _render_infographics((infographic,))
 
     with st.container(border=True):
         st.subheader("Helicopter View")
