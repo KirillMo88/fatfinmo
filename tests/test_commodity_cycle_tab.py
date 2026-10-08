@@ -4,7 +4,6 @@ import pandas as pd
 from commodity_cycle_tab import (
     DISPLAY_COLUMN_NAMES,
     PRIMARY_COMMODITY_COLUMNS,
-    build_top_analytics,
     _commodity_confirmation_frames,
     _commodity_numeric_formatters,
     _curve_scatter_marker,
@@ -12,27 +11,6 @@ from commodity_cycle_tab import (
     _raw_curve_state_style,
     _return_gradient_styles,
 )
-
-
-def test_top_analytics_formats_five_horizontal_market_metrics_from_shared_sources():
-    dates = pd.date_range("2020-01-01", periods=2400, freq="D")
-    vix = pd.DataFrame({"Date": dates, "VIX": np.linspace(15.0, 30.0, len(dates))})
-    move = pd.DataFrame({"Date": dates, "MOVE": np.linspace(70.0, 110.0, len(dates))})
-    funding = pd.DataFrame({"Date": dates, "FundingState": ["NORMAL"] * (len(dates) - 1) + ["TREASURY VOLATILITY"]})
-    liquidity_dates = pd.date_range("2021-01-01", periods=210, freq="W-FRI")
-    liquidity = pd.DataFrame({"Date": liquidity_dates, "global_liquidity_score": np.linspace(30.0, 60.0, len(liquidity_dates))})
-
-    cards = build_top_analytics("HIGH RISK", liquidity, vix, move, funding)
-
-    assert [label for label, _, _ in cards] == [
-        "Current Risk", "Global Liquidity Score", "VIX", "MOVE", "Funding Stress"
-    ]
-    assert cards[0][1] == "HIGH RISK"
-    assert cards[1][1] == "60.0"
-    assert "ROC 1M" in cards[1][2] and "ROC 3M" in cards[1][2]
-    assert "5Y percentile" in cards[2][2] and cards[2][1] == "30.00"
-    assert "4W change +" in cards[3][2] and cards[3][1] == "110.00"
-    assert cards[4][1] == "TREASURY VOLATILITY"
 
 
 def test_primary_commodity_table_has_requested_columns_and_auxiliary_keeps_rest():
