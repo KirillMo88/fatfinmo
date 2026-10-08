@@ -14,6 +14,8 @@ def build_top_analytics(
     move_history: pd.DataFrame,
     funding_history: pd.DataFrame,
     inflation_history: pd.DataFrame | None = None,
+    inflation_state: Any = None,
+    inflation_direction_score: Any = None,
 ) -> list[tuple[str, str, list[str]]]:
     """Build the global metrics displayed above the app's view selector."""
     if isinstance(current_risk, dict):
@@ -32,6 +34,9 @@ def build_top_analytics(
     move_value, move_change_1w, move_change_4w, move_percentile = _volatility_summary(_dated_numeric_series(move_history, "MOVE"))
     funding = _latest_text(funding_history, "FundingState")
     inflation = _inflation_summary(inflation_history)
+    inflation_state_text = _format_text(inflation_state)
+    if inflation_state_text != "N/A":
+        inflation_state_text += f" ({_format_direction_score(inflation_direction_score)})"
 
     return [
         ("Current Risk", risk_status, ["Market Cycle", f"High+ components: {', '.join(risk_components) or 'None'}"]),
@@ -63,7 +68,7 @@ def build_top_analytics(
             ],
         ),
         ("Funding Stress", funding, ["Funding Conditions"]),
-        ("Inflation", inflation[0], inflation[1:]),
+        ("Inflation", inflation_state_text, inflation),
     ]
 
 
@@ -214,6 +219,14 @@ def _format_yield(value: float | None) -> str:
 
 def _format_market_level(value: float | None) -> str:
     return f"{value:.2f}" if value is not None and np.isfinite(value) else "N/A"
+
+
+def _format_direction_score(value: Any) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"{score:+.2f}" if np.isfinite(score) else "N/A"
 
 
 def _format_percentile(value: float | None) -> str:
