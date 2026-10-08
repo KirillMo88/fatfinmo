@@ -74,7 +74,8 @@ from treasury_funding_policy import read_snapshot as read_treasury_funding_polic
 from gold_regime_tab import render_gold_regime_tab
 from knowledge_base_tab import render_knowledge_base_tab
 from btc_cycle_tab import render_btc_cycle_tab
-from commodity_cycle_tab import build_top_analytics, render_commodity_cycle_tab
+from commodity_cycle_tab import render_commodity_cycle_tab
+from top_analytics import build_top_analytics, render_top_analytics
 from market_cycle_tab import load_market_cycle_snapshot_cached, render_market_cycle_tab
 from technical_outlook_simple_v3_tab import render_technical_outlook_simple_v3_tab
 from global_m2_cycle import (
@@ -4485,139 +4486,6 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
         )
 
 
-def render_top_alpha_status(
-    market_slot,
-    fast_transition_slot,
-    macro_transition_slot,
-    overall_status_slot,
-    entry_risk_slot,
-    confidence_slot,
-    market: dict,
-    df: pd.DataFrame,
-    filtered_df: pd.DataFrame,
-) -> None:
-    market_source = df.dropna(subset=["Market_Regime"]) if "Market_Regime" in df.columns else pd.DataFrame()
-    if market:
-        regime = format_market_value(market.get("Market_Regime"))
-        confidence = format_market_value(market.get("Alpha_Confidence"), "score")
-    elif not market_source.empty:
-        regime = str(market_source["Market_Regime"].iloc[0])
-        confidence_value = pd.to_numeric(market_source["Alpha_Confidence"], errors="coerce").dropna()
-        confidence = "n/a" if confidence_value.empty else f"{confidence_value.iloc[0]:.0f}"
-    else:
-        regime = "n/a"
-        confidence = "n/a"
-
-    fast_value = (
-        f"{format_market_value(market.get('Fast_Transition_Risk'), 'score')} / "
-        f"{format_market_value(market.get('Fast_Transition_State'))}"
-        if market
-        else "n/a"
-    )
-    macro_value = (
-        f"{format_market_value(market.get('Macro_Transition_Risk'), 'score')} / "
-        f"{format_market_value(market.get('Macro_Transition_State'))}"
-        if market
-        else "n/a"
-    )
-    overall_value = format_market_value(market.get("Final_Market_State", market.get("Overall_Transition_Status"))) if market else "n/a"
-
-    entry_scores = pd.to_numeric(filtered_df.get("Entry_Risk_Score", pd.Series(dtype="float64")), errors="coerce").dropna()
-    if entry_scores.empty:
-        entry_summary = "n/a"
-        entry_detail = "No scored assets"
-    else:
-        avg_risk = float(entry_scores.mean())
-        high_count = int((entry_scores > 60.0).sum())
-        entry_summary = f"{avg_risk:.1f}"
-        entry_detail = f"{entry_risk_category(avg_risk)} avg | {high_count} high+"
-
-    with market_slot.container():
-        st.markdown(
-            f"""
-<div style="padding-top: 1.35rem; line-height: 1.1;">
-  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Market Regime</div>
-  <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{regime}</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-    with fast_transition_slot.container():
-        st.markdown(
-            f"""
-<div style="padding-top: 1.35rem; line-height: 1.1;">
-  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Fast Transition Risk</div>
-  <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{fast_value}</div>
-  <div style="font-size: 0.68rem; color: #cbd5e1;">VIX 70% + DXY 30%</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-    with macro_transition_slot.container():
-        st.markdown(
-            f"""
-<div style="padding-top: 1.35rem; line-height: 1.1;">
-  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Macro Transition Risk</div>
-  <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{macro_value}</div>
-  <div style="font-size: 0.68rem; color: #cbd5e1;">DXY 40% + US2Y 30% + Global M2 20% + Fed liquidity 10%</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-    with overall_status_slot.container():
-        st.markdown(
-            f"""
-<div style="padding-top: 1.35rem; line-height: 1.1;">
-  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Final Market State</div>
-  <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{overall_value}</div>
-  <div style="font-size: 0.68rem; color: #cbd5e1;">structural + risk layers</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-    with confidence_slot.container():
-        st.markdown(
-            f"""
-<div style="padding-top: 1.35rem; line-height: 1.1;">
-  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Alpha Confidence</div>
-  <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{confidence}</div>
-  <div style="font-size: 0.68rem; color: #cbd5e1;">Market regime confidence</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-    with entry_risk_slot.container():
-        st.markdown(
-            f"""
-<div style="padding-top: 1.35rem; line-height: 1.1;">
-  <div style="font-size: 0.68rem; color: #94a3b8; font-weight: 700;">Entry Risk</div>
-  <div style="font-size: 0.9rem; color: #f8fafc; font-weight: 800;">{entry_summary}</div>
-  <div style="font-size: 0.68rem; color: #cbd5e1;">{entry_detail}</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-
-def entry_risk_category(score: float) -> str:
-    if not np.isfinite(score):
-        return "n/a"
-    if score <= 20.0:
-        return "Low"
-    if score <= 40.0:
-        return "Moderate"
-    if score <= 60.0:
-        return "Elevated"
-    if score <= 80.0:
-        return "High"
-    return "Extreme"
-
-
 def extract_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if px is None or px.empty:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
@@ -6702,33 +6570,30 @@ def main():
 
     (
         top_left,
-        top_market_col,
-        top_fast_col,
-        top_macro_col,
-        top_overall_col,
-        top_entry_col,
-        top_confidence_col,
+        top_current_risk_col,
+        top_liquidity_col,
+        top_vix_col,
+        top_move_col,
+        top_funding_col,
         top_mid,
         top_export_col,
         top_refresh_col,
         top_hard_refresh_col,
     ) = st.columns(
-        [1.85, 1.15, 1.45, 1.65, 1.15, 1.15, 1.15, 0.3, 1.15, 0.95, 1.35]
+        [1.8, 1.1, 1.3, 0.9, 0.9, 1.1, 0.2, 1.1, 0.95, 1.35]
     )
     with top_left:
         selected_universe_name = st.selectbox("ETF Version", options=list(universe_map.keys()), index=0)
-    with top_market_col:
-        market_status_slot = st.empty()
-    with top_fast_col:
-        fast_transition_status_slot = st.empty()
-    with top_macro_col:
-        macro_transition_status_slot = st.empty()
-    with top_overall_col:
-        overall_status_slot = st.empty()
-    with top_entry_col:
-        entry_risk_status_slot = st.empty()
-    with top_confidence_col:
-        alpha_confidence_status_slot = st.empty()
+    top_analytics_slots = []
+    for column in (
+        top_current_risk_col,
+        top_liquidity_col,
+        top_vix_col,
+        top_move_col,
+        top_funding_col,
+    ):
+        with column:
+            top_analytics_slots.append(st.empty())
     with top_export_col:
         table_export_slot = st.empty()
     with top_refresh_col:
@@ -6802,17 +6667,41 @@ def main():
         st.caption(st.session_state["nightly_job_notice"])
 
     filtered_df, flow_unavailable = apply_filters(df)
-    render_top_alpha_status(
-        market_status_slot,
-        fast_transition_status_slot,
-        macro_transition_status_slot,
-        overall_status_slot,
-        entry_risk_status_slot,
-        alpha_confidence_status_slot,
-        market_snapshot,
-        df,
-        filtered_df,
+    market_cycle_risk = None
+    market_cycle_vix_history = pd.DataFrame()
+    try:
+        current_cycle = load_market_cycle_snapshot_cached(
+            int(st.session_state.get("market_cycle_refresh_nonce", 0))
+        )
+        market_cycle_risk = current_cycle.current.get("CurrentMarketRiskState")
+        market_cycle_vix_history = current_cycle.daily
+    except Exception:
+        pass
+
+    global_liquidity_history = pd.DataFrame()
+    try:
+        _, monthly_liquidity, weekly_liquidity = read_global_liquidity()
+        liquidity_regime = _build_global_liquidity_regime_frame(
+            _liquidity_prepare_dates(monthly_liquidity),
+            _liquidity_prepare_dates(weekly_liquidity),
+        )
+        global_liquidity_history = liquidity_regime[["date", "global_liquidity_score"]]
+    except Exception:
+        pass
+
+    try:
+        funding_snapshot = read_funding_conditions_snapshot()
+        funding_history = funding_snapshot.daily
+    except Exception:
+        funding_history = pd.DataFrame()
+    top_analytics = build_top_analytics(
+        market_cycle_risk,
+        global_liquidity_history,
+        market_cycle_vix_history,
+        funding_history,
+        funding_history,
     )
+    render_top_analytics(top_analytics_slots, top_analytics)
     graph_ordered_df = filtered_df.copy()
     table_df = filtered_df.copy().reset_index(drop=True)
     for display_col in DISPLAY_COLUMNS:
@@ -7127,42 +7016,7 @@ def main():
     elif active_view == "Market Cycle":
         render_market_cycle_tab(get_fred_api_key_for_app())
     elif active_view == "Commodity Cycle":
-        market_current_risk = None
-        market_vix_history = pd.DataFrame()
-        try:
-            commodity_market_snapshot = load_market_cycle_snapshot_cached(
-                int(st.session_state.get("market_cycle_refresh_nonce", 0))
-            )
-            market_current_risk = commodity_market_snapshot.current.get("CurrentMarketRiskState")
-            market_vix_history = commodity_market_snapshot.daily
-        except Exception:
-            pass
-
-        commodity_liquidity_history = pd.DataFrame()
-        try:
-            _, commodity_monthly_liquidity, commodity_weekly_liquidity = read_global_liquidity()
-            commodity_liquidity_regime = _build_global_liquidity_regime_frame(
-                _liquidity_prepare_dates(commodity_monthly_liquidity),
-                _liquidity_prepare_dates(commodity_weekly_liquidity),
-            )
-            commodity_liquidity_history = commodity_liquidity_regime[
-                ["date", "global_liquidity_score"]
-            ].rename(columns={"date": "Date"})
-        except Exception:
-            pass
-
-        try:
-            funding_snapshot = read_funding_conditions_snapshot()
-        except Exception:
-            funding_snapshot = type("EmptyFundingSnapshot", (), {"daily": pd.DataFrame()})()
-        commodity_top_analytics = build_top_analytics(
-            market_current_risk,
-            commodity_liquidity_history,
-            market_vix_history,
-            funding_snapshot.daily,
-            funding_snapshot.daily,
-        )
-        render_commodity_cycle_tab(get_fred_api_key_for_app(), commodity_top_analytics)
+        render_commodity_cycle_tab(get_fred_api_key_for_app())
     elif active_view == "Business Cycle":
         render_business_cycle_tab(get_fred_api_key_for_app())
     elif active_view == "Global Macro":
