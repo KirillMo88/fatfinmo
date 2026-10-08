@@ -68,13 +68,13 @@ def render_top_analytics(slots: list[Any], metrics: list[tuple[str, str, list[st
     for slot, (label, value, detail_lines) in zip(slots, metrics):
         with slot.container():
             details_html = "".join(
-                f"<div style='font-size:.68rem;color:#cbd5e1'>{html.escape(line)}</div>"
+                f"<div style='font-size:.78rem;color:#cbd5e1'>{html.escape(line)}</div>"
                 for line in detail_lines
             )
             st_html = (
-                "<div style='padding-top:1.35rem;line-height:1.1;'>"
-                f"<div style='font-size:.68rem;color:#94a3b8;font-weight:700'>{html.escape(label)}</div>"
-                f"<div style='font-size:.9rem;color:#f8fafc;font-weight:800'>{html.escape(value)}</div>"
+                "<div style='padding-top:1.15rem;line-height:1.12;'>"
+                f"<div style='font-size:.78rem;color:#94a3b8;font-weight:700'>{html.escape(label)}</div>"
+                f"<div style='font-size:1.035rem;color:#f8fafc;font-weight:800'>{html.escape(value)}</div>"
                 f"{details_html}"
                 "</div>"
             )

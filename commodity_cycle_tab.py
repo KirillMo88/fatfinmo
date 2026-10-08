@@ -32,6 +32,13 @@ from commodity_cycle.ppi_led_etf import (
 TTL_SECONDS = 21600
 RANGE_OPTIONS = ("1Y", "3Y", "5Y", "10Y", "20Y", "Full")
 MOMENTUM_WEEKS = {"1M": 4, "3M": 13, "6M": 26, "12M": 52}
+INVENTORY_SALES_SERIES = tuple(
+    name for name in FRED_SERIES if name not in {"PPIACO", "CPIAUCSL", "CAPEX", "FPI"}
+)
+INVENTORY_SALES_COLORS = (
+    "#38bdf8", "#fb923c", "#4ade80", "#f472b6",
+    "#a78bfa", "#facc15", "#2dd4bf", "#f87171",
+)
 CORE_COLORS = {
     "Neutral": "#e2e8f0", "Early Broadening": "#fde047", "Confirmed Broadening": "#fb923c",
     "Systemic Broadening": "#f43f5e", "Mature": "#c084fc", "Early Easing": "#4ade80",
@@ -184,6 +191,7 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
                         key="commodity_cycle_final_view_v2")
         _render_final_state_chart(history, selected_range, view)
     if not history.empty:
+        _render_inventory_sales_chart(history, selected_range)
         st.markdown("#### FRED Inventory / Sales Regime")
         _render_fred_heatmap(history)
         with st.expander("Core stress and breadth diagnostics", expanded=False):
@@ -575,6 +583,39 @@ def _render_final_state_chart(history: pd.DataFrame, selected_range: str, view: 
     fig.update_layout(template="plotly_dark", title=f"PPIACO + {view}", height=450,
                       margin=dict(l=35, r=25, t=55, b=105), yaxis_title="PPIACO index",
                       legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="left", x=0, title_text="State"))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def _build_inventory_sales_figure(history: pd.DataFrame, selected_range: str) -> go.Figure:
+    view = _slice_range(history, selected_range)
+    fig = go.Figure()
+    for label, color in zip(INVENTORY_SALES_SERIES, INVENTORY_SALES_COLORS):
+        values = pd.to_numeric(
+            view.get(label, pd.Series(index=view.index, dtype="float64")), errors="coerce"
+        )
+        fig.add_trace(go.Scatter(
+            x=view.index,
+            y=values,
+            name=label,
+            mode="lines",
+            line={"color": color, "width": 2},
+            connectgaps=False,
+            hovertemplate=f"{label}<br>%{{x|%Y-%m}}<br>Inventory / Sales: %{{y:.2f}}<extra></extra>",
+        ))
+    fig.update_layout(
+        template="plotly_dark",
+        title="Inventory / Sales by Category",
+        height=390,
+        margin={"l": 45, "r": 20, "t": 55, "b": 95},
+        xaxis_title="Date",
+        yaxis_title="Inventory / Sales",
+        legend={"orientation": "h", "yanchor": "top", "y": -0.22, "xanchor": "left", "x": 0},
+    )
+    return fig
+
+
+def _render_inventory_sales_chart(history: pd.DataFrame, selected_range: str) -> None:
+    fig = _build_inventory_sales_figure(history, selected_range)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
