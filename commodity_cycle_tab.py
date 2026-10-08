@@ -231,15 +231,6 @@ def _render_ppi_led_etf(table: pd.DataFrame, as_of: Any, statuses: dict[str, str
     shown = table.copy()
     formatters = {f"{month}M": "{:+.1%}" for month in PPI_LED_HORIZONS}
 
-    def semantic_return(value: Any) -> str:
-        if pd.isna(value):
-            return "color: #94a3b8"
-        if float(value) > 0.001:
-            return "background-color: #14532d; color: #f8fafc"
-        if float(value) < -0.001:
-            return "background-color: #7f1d1d; color: #f8fafc"
-        return "background-color: #334155; color: #f8fafc"
-
     separators = {
         "PPIACO", "RTSI — Russia", "GUNR — Global Natural Resources", "Average",
     }
@@ -251,7 +242,7 @@ def _render_ppi_led_etf(table: pd.DataFrame, as_of: Any, statuses: dict[str, str
         return [border + weight for _ in row]
 
     styled = shown.style.format(formatters, na_rep="N/A").apply(
-        lambda column: [semantic_return(value) for value in column], subset=list(formatters), axis=0
+        _return_gradient_styles, subset=list(formatters), axis=0
     ).apply(row_separation, axis=1)
     st.dataframe(styled, use_container_width=True, hide_index=True, height=max(470, 35 * (len(shown) + 1)))
 
@@ -260,7 +251,6 @@ def _render_ppi_led_etf(table: pd.DataFrame, as_of: Any, statuses: dict[str, str
         options=tuple(f"{month}M" for month in PPI_LED_HORIZONS),
         index=4,
         key="ppi_led_etf_relative_period",
-        horizontal=True,
     )
     median_rows = shown.loc[shown["Asset"].eq("Median"), period]
     median = pd.to_numeric(median_rows, errors="coerce").iloc[0] if not median_rows.empty else np.nan
@@ -362,7 +352,7 @@ def _render_market_section(
             _style_commodity_table(primary, highlight_primary=True),
             use_container_width=True,
             hide_index=True,
-            height=max(400, 46 * (len(primary) + 1)),
+            height=34 + 31 * len(primary),
         )
         if not auxiliary.empty:
             with st.expander("Additional commodity diagnostics", expanded=False):
@@ -603,7 +593,12 @@ def _render_fred_heatmap(history: pd.DataFrame) -> None:
         dseason = row.get(f"{label} Seasonal Delta 6M")
         table.append({"Series": label, "Inventory / Sales": _fmt(row.get(label)), "Seasonal Stress": _fmt(seasonal), "Rolling Stress": _fmt(rolling), "Δ Seasonal 6M": _fmt(dseason), "Δ Rolling 6M": _fmt(droll), "Direction": _direction_label(droll)})
     frame = pd.DataFrame(table)
-    st.dataframe(frame, use_container_width=True, hide_index=True, height=max(400, 46 * (len(frame) + 1)))
+    st.dataframe(
+        frame,
+        use_container_width=True,
+        hide_index=True,
+        height=34 + 31 * len(frame),
+    )
 
 
 def _render_capex_intensity_chart(capex: pd.DataFrame, history: pd.DataFrame, selected_range: str) -> None:
