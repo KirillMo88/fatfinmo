@@ -58,7 +58,10 @@ from market_model import (
 from table_export import dataframe_to_excel_xls_bytes
 from ai_dashboard import AI_GROUP_LABELS, AI_UNIVERSE, canonical_ai_group_label, is_ai_group_label
 from ai_dashboard_tab import render_ai_dashboard_tab
-from business_cycle_tab import render_business_cycle_tab
+from business_cycle_tab import (
+    load_business_cycle_snapshot_cached,
+    render_business_cycle_tab,
+)
 from cio_view import render_cio_view_tab
 from cftc_cot_tab import render_cftc_cot_tab
 from global_macro_tab import render_global_macro_tab
@@ -6676,6 +6679,8 @@ def main():
     market_cycle_risk: dict[str, Any] = {}
     market_cycle_vix_history = pd.DataFrame()
     inflation_history = pd.DataFrame()
+    inflation_state = None
+    inflation_direction_score = None
     current_cycle = None
     try:
         current_cycle = load_market_cycle_snapshot_cached(
@@ -6685,6 +6690,17 @@ def main():
         market_cycle_vix_history = current_cycle.daily
         if {"Date", "PPIACO"}.issubset(current_cycle.history.columns):
             inflation_history = current_cycle.history[["Date", "PPIACO"]].copy()
+    except Exception:
+        pass
+
+    try:
+        business_cycle_snapshot = load_business_cycle_snapshot_cached(
+            get_fred_api_key_for_app(),
+            int(st.session_state.get("business_cycle_refresh_nonce", 0)),
+        )
+        business_cycle_current = business_cycle_snapshot.current or {}
+        inflation_state = business_cycle_current.get("InflationState")
+        inflation_direction_score = business_cycle_current.get("InflationDirectionScore")
     except Exception:
         pass
 
@@ -6727,6 +6743,8 @@ def main():
         funding_history,
         funding_history,
         inflation_history,
+        inflation_state,
+        inflation_direction_score,
     )
     render_top_analytics(top_analytics_slots, top_analytics)
     graph_ordered_df = filtered_df.copy()

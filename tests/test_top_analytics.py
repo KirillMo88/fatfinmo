@@ -25,7 +25,9 @@ def test_top_analytics_uses_requested_order_and_source_metrics():
         }
     )
 
-    metrics = build_top_analytics("HIGH RISK", liquidity, vix, move, funding, inflation)
+    metrics = build_top_analytics(
+        "HIGH RISK", liquidity, vix, move, funding, inflation, "RISING", -0.06
+    )
 
     assert [title for title, _, _ in metrics] == [
         "Current Risk",
@@ -45,10 +47,11 @@ def test_top_analytics_uses_requested_order_and_source_metrics():
     assert metrics[3][1] == "110.00" and metrics[3][2][1].startswith("4W change +")
     assert metrics[3][2][0].startswith("1W change +")
     assert metrics[4][1] == "TREASURY VOLATILITY"
-    assert metrics[5][1].startswith("PPIACO 1M +")
-    assert metrics[5][2][0].startswith("US10Y 4.25% · 1M +")
-    assert metrics[5][2][1].startswith("DXY 102.00 · 1M +")
-    assert metrics[5][2][2].startswith("WTI 75.00 · 1M +")
+    assert metrics[5][1] == "RISING (-0.06)"
+    assert metrics[5][2][0].startswith("PPIACO 1M +")
+    assert metrics[5][2][1].startswith("US10Y 4.25% · 1M +")
+    assert metrics[5][2][2].startswith("DXY 102.00 · 1M +")
+    assert metrics[5][2][3].startswith("WTI 75.00 · 1M +")
 
 
 def test_inflation_card_reports_na_for_missing_history():
@@ -63,8 +66,9 @@ def test_inflation_card_reports_na_for_missing_history():
 
     assert metrics[-1] == (
         "Inflation",
-        "PPIACO 1M N/A · 3M N/A · 6M N/A",
+        "N/A",
         [
+            "PPIACO 1M N/A · 3M N/A · 6M N/A",
             "US10Y N/A · 1M N/A · 3M N/A · 6M N/A",
             "DXY N/A · 1M N/A · 3M N/A · 6M N/A",
             "WTI N/A · 1M N/A · 3M N/A · 6M N/A",
