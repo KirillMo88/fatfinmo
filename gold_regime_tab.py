@@ -165,16 +165,23 @@ def render_precious_metals_universe(selected_range: str, range_end: Any = None) 
 
     metals_table = build_change_table(history, PRECIOUS_METALS_ROWS)
     producers_table = build_change_table(history, PRODUCERS_VS_BULLION_ROWS)
+    shared_scales = _precious_metals_column_scales(metals_table, producers_table)
+    column_config = {
+        column: st.column_config.Column(width=200 if column == "Ratio" else 185)
+        for column in metals_table.columns
+    }
     st.dataframe(
-        _style_precious_metals_table(metals_table),
+        _style_precious_metals_table(metals_table, shared_scales),
         hide_index=True,
         use_container_width=True,
+        column_config=column_config,
     )
     st.markdown("#### Producers vs Bullion")
     st.dataframe(
-        _style_precious_metals_table(producers_table),
+        _style_precious_metals_table(producers_table, shared_scales),
         hide_index=True,
         use_container_width=True,
+        column_config=column_config,
     )
 
     chart_history = build_indexed_chart_history(history, selected_range, range_end)
@@ -224,7 +231,19 @@ def render_precious_metals_universe(selected_range: str, range_end: Any = None) 
         st.caption("Unavailable data: " + ", ".join(unavailable) + ". Affected cells are shown as —.")
 
 
-def _style_precious_metals_table(frame: pd.DataFrame) -> Any:
+def _precious_metals_column_scales(*frames: pd.DataFrame) -> dict[str, float]:
+    horizons = {column for column, _ in CHANGE_HORIZONS}
+    scales: dict[str, float] = {}
+    for column in horizons:
+        values = pd.concat(
+            [pd.to_numeric(frame[column], errors="coerce") for frame in frames if column in frame.columns],
+            ignore_index=True,
+        ).dropna()
+        scales[column] = float(values.abs().max()) if not values.empty else 0.0
+    return scales
+
+
+def _style_precious_metals_table(frame: pd.DataFrame, scales: dict[str, float]) -> Any:
     horizons = {column for column, _ in CHANGE_HORIZONS}
     formatters = {column: "{:+.1%}" for column in horizons if column in frame.columns}
 
@@ -232,33 +251,28 @@ def _style_precious_metals_table(frame: pd.DataFrame) -> Any:
         if column.name not in horizons:
             return [""] * len(column)
         values = pd.to_numeric(column, errors="coerce")
-        valid = values.dropna()
-        if valid.empty:
+        scale = scales.get(column.name, 0.0)
+        if not values.notna().any():
             return [""] * len(column)
-        low, high = float(valid.min()), float(valid.max())
         styles = []
         for value in values:
             if pd.isna(value):
                 styles.append("")
                 continue
-            position = 0.5 if high == low else (float(value) - low) / (high - low)
-            color = _precious_metals_gradient_color(position)
-            styles.append(f"background-color: {color}; color: #0f172a; font-weight: 700")
+            styles.append(_precious_metals_gradient_style(float(value), scale))
         return styles
 
     return frame.style.format(formatters, na_rep="—").apply(color_column)
 
 
-def _precious_metals_gradient_color(position: float) -> str:
-    red = (254, 202, 202)
-    yellow = (254, 240, 138)
-    green = (187, 247, 208)
-    if position <= 0.5:
-        start, end, fraction = red, yellow, position * 2
-    else:
-        start, end, fraction = yellow, green, (position - 0.5) * 2
-    channels = tuple(round(left + (right - left) * fraction) for left, right in zip(start, end))
-    return "#" + "".join(f"{channel:02x}" for channel in channels)
+def _precious_metals_gradient_style(value: float, scale: float) -> str:
+    if scale <= 0:
+        return "background-color: #fff3bf; color: #111827; font-weight: 700"
+    position = min(max((value / scale + 1.0) / 2.0, 0.0), 1.0)
+    red, green = (248, 113, 113), (74, 222, 128)
+    channels = tuple(round(left + (right - left) * position) for left, right in zip(red, green))
+    color = "rgb({},{},{})".format(*channels)
+    return f"background-color: {color}; color: #111827; font-weight: 700"
 
 
 def extract_gold_alpha(table_df: pd.DataFrame) -> float | None:
