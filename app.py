@@ -76,7 +76,11 @@ from knowledge_base_tab import render_knowledge_base_tab
 from btc_cycle_tab import render_btc_cycle_tab
 from commodity_cycle_tab import render_commodity_cycle_tab
 from top_analytics import build_top_analytics, render_top_analytics
-from market_cycle_tab import load_market_cycle_snapshot_cached, render_market_cycle_tab
+from market_cycle_tab import (
+    load_market_cycle_snapshot_cached,
+    load_spy_macro_outlook_cached,
+    render_market_cycle_tab,
+)
 from technical_outlook_simple_v3_tab import render_technical_outlook_simple_v3_tab
 from global_m2_cycle import (
     build_global_m2_cycle_fig,
@@ -6575,12 +6579,13 @@ def main():
         top_vix_col,
         top_move_col,
         top_funding_col,
+        top_inflation_col,
         top_mid,
         top_export_col,
         top_refresh_col,
         top_hard_refresh_col,
     ) = st.columns(
-        [1.8, 1.35, 1.35, 1.35, 1.35, 1.35, 0.2, 1.1, 0.95, 1.35]
+        [1.8, 1.35, 1.35, 1.35, 1.35, 1.35, 1.9, 0.2, 1.1, 0.95, 1.35]
     )
     with top_left:
         selected_universe_name = st.selectbox("ETF Version", options=list(universe_map.keys()), index=0)
@@ -6591,6 +6596,7 @@ def main():
         top_vix_col,
         top_move_col,
         top_funding_col,
+        top_inflation_col,
     ):
         with column:
             top_analytics_slots.append(st.empty())
@@ -6669,14 +6675,34 @@ def main():
     filtered_df, flow_unavailable = apply_filters(df)
     market_cycle_risk: dict[str, Any] = {}
     market_cycle_vix_history = pd.DataFrame()
+    inflation_history = pd.DataFrame()
+    current_cycle = None
     try:
         current_cycle = load_market_cycle_snapshot_cached(
             int(st.session_state.get("market_cycle_refresh_nonce", 0))
         )
         market_cycle_risk = current_cycle.current
         market_cycle_vix_history = current_cycle.daily
+        if {"Date", "PPIACO"}.issubset(current_cycle.history.columns):
+            inflation_history = current_cycle.history[["Date", "PPIACO"]].copy()
     except Exception:
         pass
+
+    if current_cycle is not None:
+        try:
+            macro_outlook = load_spy_macro_outlook_cached(
+                current_cycle.history[["Date", "SPX_Close"]],
+                get_fred_api_key_for_app(),
+                int(st.session_state.get("market_cycle_refresh_nonce", 0)),
+            )
+            macro_inflation = macro_outlook.history[["Date", "US10Y", "DXY", "WTI"]].copy()
+            inflation_history = (
+                macro_inflation
+                if inflation_history.empty
+                else pd.merge(inflation_history, macro_inflation, on="Date", how="outer")
+            ).sort_values("Date")
+        except Exception:
+            pass
 
     global_liquidity_history = pd.DataFrame()
     try:
@@ -6700,6 +6726,7 @@ def main():
         market_cycle_vix_history,
         funding_history,
         funding_history,
+        inflation_history,
     )
     render_top_analytics(top_analytics_slots, top_analytics)
     graph_ordered_df = filtered_df.copy()
