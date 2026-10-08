@@ -87,7 +87,8 @@ def render_knowledge_base_tab() -> None:
 
     with st.container(border=True):
         st.subheader("Luke Gromen")
-        _render_infographics(LUKE_GROMEN_INFOGRAPHICS)
+        for infographic in LUKE_GROMEN_INFOGRAPHICS:
+            _render_infographics((infographic,))
 
     with st.container(border=True):
         st.subheader("Lyn Alden")

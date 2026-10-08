@@ -97,7 +97,8 @@ class KnowledgeBaseContentTests(unittest.TestCase):
         tab = TAB_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('st.subheader("Luke Gromen")', tab)
-        self.assertIn("_render_infographics(LUKE_GROMEN_INFOGRAPHICS)", tab)
+        self.assertIn("for infographic in LUKE_GROMEN_INFOGRAPHICS:", tab)
+        self.assertIn("_render_infographics((infographic,))", tab)
         self.assertEqual(
             LUKE_GROMEN_INFOGRAPHICS[0].name,
             "luke_gromen_debt_debasement.png",
@@ -143,7 +144,7 @@ class KnowledgeBaseContentTests(unittest.TestCase):
         tab = TAB_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("((HOWELL_INFOGRAPHIC_PATH,", tab)
-        self.assertIn("_render_infographics(LUKE_GROMEN_INFOGRAPHICS)", tab)
+        self.assertIn("for infographic in LUKE_GROMEN_INFOGRAPHICS:", tab)
         self.assertIn("LYN_ALDEN_INFOGRAPHIC_PATH,", tab)
         self.assertIn("((BRENT_JOHNSON_INFOGRAPHIC_PATH,", tab)
         self.assertIn("_render_infographics((infographic,))", tab)
