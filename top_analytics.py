@@ -13,8 +13,9 @@ def build_top_analytics(
     vix_history: pd.DataFrame,
     move_history: pd.DataFrame,
     funding_history: pd.DataFrame,
+    inflation_history: pd.DataFrame | None = None,
 ) -> list[tuple[str, str, list[str]]]:
-    """Build the five metrics displayed above the app's view selector."""
+    """Build the global metrics displayed above the app's view selector."""
     if isinstance(current_risk, dict):
         risk_status = _format_text(current_risk.get("CurrentMarketRiskState"))
         risk_components = _high_risk_components(current_risk)
@@ -30,6 +31,7 @@ def build_top_analytics(
     vix_value, vix_change_1w, vix_change_4w, vix_percentile = _volatility_summary(_dated_numeric_series(vix_history, "VIX"))
     move_value, move_change_1w, move_change_4w, move_percentile = _volatility_summary(_dated_numeric_series(move_history, "MOVE"))
     funding = _latest_text(funding_history, "FundingState")
+    inflation = _inflation_summary(inflation_history)
 
     return [
         ("Current Risk", risk_status, ["Market Cycle", f"High+ components: {', '.join(risk_components) or 'None'}"]),
@@ -61,6 +63,7 @@ def build_top_analytics(
             ],
         ),
         ("Funding Stress", funding, ["Funding Conditions"]),
+        ("Inflation", inflation[0], inflation[1:]),
     ]
 
 
@@ -109,6 +112,38 @@ def _relative_change(series: pd.Series, days: int) -> float | None:
     if not np.isfinite(previous) or not np.isfinite(current) or previous == 0:
         return None
     return current / previous - 1.0
+
+
+def _absolute_change(series: pd.Series, days: int) -> float | None:
+    if len(series) < 2:
+        return None
+    current = float(series.iloc[-1])
+    historical = series.loc[series.index <= series.index[-1] - pd.Timedelta(days=days)]
+    if historical.empty:
+        return None
+    previous = float(historical.iloc[-1])
+    if not np.isfinite(previous) or not np.isfinite(current):
+        return None
+    return current - previous
+
+
+def _inflation_summary(frame: pd.DataFrame | None) -> list[str]:
+    ppiaco = _dated_numeric_series(frame, "PPIACO")
+    us10y = _dated_numeric_series(frame, "US10Y")
+    dxy = _dated_numeric_series(frame, "DXY")
+    wti = _dated_numeric_series(frame, "WTI")
+
+    ppi_changes = [_relative_change(ppiaco, days) for days in (28, 91, 183)]
+    us10y_changes = [_absolute_change(us10y, days) for days in (28, 91, 183)]
+    dxy_changes = [_relative_change(dxy, days) for days in (28, 91, 183)]
+    wti_changes = [_relative_change(wti, days) for days in (28, 91, 183)]
+
+    return [
+        f"PPIACO 1M {_format_percent(ppi_changes[0])} · 3M {_format_percent(ppi_changes[1])} · 6M {_format_percent(ppi_changes[2])}",
+        f"US10Y {_format_yield(_last_value(us10y))} · 1M {_format_bps(us10y_changes[0])} · 3M {_format_bps(us10y_changes[1])} · 6M {_format_bps(us10y_changes[2])}",
+        f"DXY {_format_market_level(_last_value(dxy))} · 1M {_format_percent(dxy_changes[0])} · 3M {_format_percent(dxy_changes[1])} · 6M {_format_percent(dxy_changes[2])}",
+        f"WTI {_format_market_level(_last_value(wti))} · 1M {_format_percent(wti_changes[0])} · 3M {_format_percent(wti_changes[1])} · 6M {_format_percent(wti_changes[2])}",
+    ]
 
 
 def _volatility_summary(series: pd.Series) -> tuple[str, float | None, float | None, float | None]:
@@ -167,6 +202,18 @@ def _format_percent(value: float | None) -> str:
 
 def _format_signed(value: float | None) -> str:
     return f"{value:+.2f}" if value is not None and np.isfinite(value) else "N/A"
+
+
+def _format_bps(value: float | None) -> str:
+    return f"{value * 100:+.0f} bp" if value is not None and np.isfinite(value) else "N/A"
+
+
+def _format_yield(value: float | None) -> str:
+    return f"{value:.2f}%" if value is not None and np.isfinite(value) else "N/A"
+
+
+def _format_market_level(value: float | None) -> str:
+    return f"{value:.2f}" if value is not None and np.isfinite(value) else "N/A"
 
 
 def _format_percentile(value: float | None) -> str:

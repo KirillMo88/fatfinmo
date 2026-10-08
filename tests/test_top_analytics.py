@@ -15,8 +15,17 @@ def test_top_analytics_uses_requested_order_and_source_metrics():
     liquidity = pd.DataFrame(
         {"date": liquidity_dates, "global_liquidity_score": np.linspace(30.0, 60.0, len(liquidity_dates))}
     )
+    inflation = pd.DataFrame(
+        {
+            "Date": dates,
+            "PPIACO": np.linspace(200.0, 260.0, len(dates)),
+            "US10Y": np.linspace(3.0, 4.25, len(dates)),
+            "DXY": np.linspace(90.0, 102.0, len(dates)),
+            "WTI": np.linspace(55.0, 75.0, len(dates)),
+        }
+    )
 
-    metrics = build_top_analytics("HIGH RISK", liquidity, vix, move, funding)
+    metrics = build_top_analytics("HIGH RISK", liquidity, vix, move, funding, inflation)
 
     assert [title for title, _, _ in metrics] == [
         "Current Risk",
@@ -24,6 +33,7 @@ def test_top_analytics_uses_requested_order_and_source_metrics():
         "VIX",
         "MOVE",
         "Funding Stress",
+        "Inflation",
     ]
     assert metrics[0][1] == "HIGH RISK"
     assert metrics[1][1] == "60.0"
@@ -35,6 +45,31 @@ def test_top_analytics_uses_requested_order_and_source_metrics():
     assert metrics[3][1] == "110.00" and metrics[3][2][1].startswith("4W change +")
     assert metrics[3][2][0].startswith("1W change +")
     assert metrics[4][1] == "TREASURY VOLATILITY"
+    assert metrics[5][1].startswith("PPIACO 1M +")
+    assert metrics[5][2][0].startswith("US10Y 4.25% · 1M +")
+    assert metrics[5][2][1].startswith("DXY 102.00 · 1M +")
+    assert metrics[5][2][2].startswith("WTI 75.00 · 1M +")
+
+
+def test_inflation_card_reports_na_for_missing_history():
+    metrics = build_top_analytics(
+        None,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+    )
+
+    assert metrics[-1] == (
+        "Inflation",
+        "PPIACO 1M N/A · 3M N/A · 6M N/A",
+        [
+            "US10Y N/A · 1M N/A · 3M N/A · 6M N/A",
+            "DXY N/A · 1M N/A · 3M N/A · 6M N/A",
+            "WTI N/A · 1M N/A · 3M N/A · 6M N/A",
+        ],
+    )
 
 
 def test_top_analytics_reports_na_when_five_year_history_is_incomplete():
