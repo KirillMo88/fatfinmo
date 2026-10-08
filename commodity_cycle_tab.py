@@ -113,7 +113,105 @@ def load_commodity_cycle_snapshot(api_key: str | None, refresh_nonce: int = 0) -
     }
 
 
-def render_commodity_cycle_tab(api_key: str | None) -> None:
+def build_top_analytics(
+    current_risk: Any,
+    liquidity_history: pd.DataFrame,
+    vix_history: pd.DataFrame,
+    move_history: pd.DataFrame,
+    funding_history: pd.DataFrame,
+) -> list[tuple[str, str, str]]:
+    """Format the five shared market analytics shown above Commodity Cycle."""
+    risk_status = str(current_risk or "N/A").strip() or "N/A"
+
+    liquidity = _dated_numeric_series(liquidity_history, "global_liquidity_score")
+    score = _last_value(liquidity)
+    roc_1m = _relative_change_by_days(liquidity, 28)
+    roc_3m = _relative_change_by_days(liquidity, 91)
+
+    vix = _dated_numeric_series(vix_history, "VIX")
+    move = _dated_numeric_series(move_history, "MOVE")
+    vix_value, vix_change, vix_percentile = _volatility_summary(vix)
+    move_value, move_change, move_percentile = _volatility_summary(move)
+
+    funding = _latest_text(funding_history, "FundingState")
+    return [
+        ("Current Risk", risk_status, "Market Cycle"),
+        (
+            "Global Liquidity Score",
+            _fmt_number(score),
+            f"ROC 1M {_fmt_percent(roc_1m)} · ROC 3M {_fmt_percent(roc_3m)}",
+        ),
+        ("VIX", vix_value, f"4W change {_fmt_signed_number(vix_change, ' pts')} · 5Y percentile {_fmt_percentile(vix_percentile)}"),
+        ("MOVE", move_value, f"4W change {_fmt_signed_number(move_change, ' pts')} · 5Y percentile {_fmt_percentile(move_percentile)}"),
+        ("Funding Stress", funding, "Funding Conditions"),
+    ]
+
+
+def _dated_numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if frame is None or frame.empty or column not in frame.columns:
+        return pd.Series(dtype="float64")
+    values = frame[[column] + (["Date"] if "Date" in frame.columns else [])].copy()
+    if "Date" in values.columns:
+        dates = pd.to_datetime(values.pop("Date"), errors="coerce")
+    else:
+        dates = pd.to_datetime(values.index, errors="coerce")
+    series = pd.Series(pd.to_numeric(values[column], errors="coerce").to_numpy(), index=dates)
+    return series[~series.index.isna()].sort_index().dropna().loc[lambda item: ~item.index.duplicated(keep="last")]
+
+
+def _last_value(series: pd.Series) -> float | None:
+    return float(series.iloc[-1]) if not series.empty and np.isfinite(series.iloc[-1]) else None
+
+
+def _relative_change_by_days(series: pd.Series, days: int) -> float | None:
+    if len(series) < 2:
+        return None
+    current = float(series.iloc[-1])
+    history = series.loc[series.index <= series.index[-1] - pd.Timedelta(days=days)]
+    if history.empty:
+        return None
+    previous = float(history.iloc[-1])
+    if not np.isfinite(previous) or not np.isfinite(current) or previous == 0:
+        return None
+    return current / previous - 1.0
+
+
+def _volatility_summary(series: pd.Series) -> tuple[str, float | None, float | None]:
+    if series.empty:
+        return "N/A", None, None
+    current = float(series.iloc[-1])
+    change = current - float(series.iloc[-21]) if len(series) >= 21 else None
+    cutoff = series.index[-1] - pd.DateOffset(years=5)
+    history = series.loc[series.index >= cutoff]
+    has_full_window = not history.empty and history.index[0] <= cutoff + pd.Timedelta(days=7)
+    percentile = float(history.le(current).mean() * 100.0) if has_full_window and len(history) >= 1000 else None
+    return f"{current:.2f}", change, percentile
+
+
+def _latest_text(frame: pd.DataFrame, column: str) -> str:
+    if frame is None or frame.empty or column not in frame.columns:
+        return "N/A"
+    values = frame[column].dropna()
+    return str(values.iloc[-1]).replace("_", " ") if not values.empty else "N/A"
+
+
+def _fmt_number(value: float | None) -> str:
+    return f"{value:.1f}" if value is not None and np.isfinite(value) else "N/A"
+
+
+def _fmt_percent(value: float | None) -> str:
+    return f"{value:+.1%}" if value is not None and np.isfinite(value) else "N/A"
+
+
+def _fmt_signed_number(value: float | None, suffix: str = "") -> str:
+    return f"{value:+.2f}{suffix}" if value is not None and np.isfinite(value) else "N/A"
+
+
+def _fmt_percentile(value: float | None) -> str:
+    return f"{value:.0f}%" if value is not None and np.isfinite(value) else "N/A"
+
+
+def render_commodity_cycle_tab(api_key: str | None, top_analytics: list[tuple[str, str, str]] | None = None) -> None:
     st.subheader("Commodity Cycle")
     left, middle, right = st.columns([1.15, 1.0, 7.85])
     with left:
@@ -133,7 +231,6 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
     history = data["history"]
     current = latest_complete_commodity_cycle_row(history)
     capex = data["capex"]
-    capex_current = capex.dropna(subset=["CAPEX Intensity"]).iloc[-1] if not capex.empty else pd.Series(dtype=object)
     commodity = data["commodity"]
     sectors = data["sector"]
 
@@ -156,22 +253,13 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         unsafe_allow_html=True,
     )
 
-    summary = [
-        ("Final State 2", current.get("Final State 2", "N/A")),
-        ("Core State", current.get("Core State", "N/A")),
-        ("PPI Confirmation", current.get("PPI Confirmation", "N/A")),
-        (
-            "CAPEX Full-History Percentile",
-            f"{_fmt(capex_current.get('CAPEX Current Percentile'), '%')} ({_fmt(capex_current.get('CAPEX 24M Change'), '%')})",
-        ),
-    ]
+    summary = top_analytics or build_top_analytics(None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
     with st.container(key="commodity-cycle-summary"):
-        cards = st.columns(4)
-        for idx, (label, value) in enumerate(summary):
-            with cards[idx % 4]:
+        cards = st.columns(5)
+        for idx, (label, value, detail) in enumerate(summary):
+            with cards[idx]:
                 st.metric(label, _format_state(value))
-                if label == "PPI Confirmation":
-                    st.caption(_ppi_sector_tightening_easing(current))
+                st.caption(detail)
 
     _range_picker("commodity_cycle_overview_range")
     selected_range = st.session_state["commodity_cycle_overview_range"]
