@@ -20,7 +20,14 @@ from commodity_cycle.data import (
     load_tradingview_performance_prices,
     load_commodity_term_structure,
 )
+from commodity_cycle.model import CORE_SERIES, CONFIRMATION_SERIES
 from commodity_cycle.export import commodity_tables_to_xlsx
+from commodity_cycle.ppi_led_etf import (
+    HORIZONS as PPI_LED_HORIZONS,
+    build_performance_table as build_ppi_led_performance_table,
+    download_market_prices as download_ppi_led_market_prices,
+    relative_median_frame,
+)
 
 TTL_SECONDS = 21600
 RANGE_OPTIONS = ("1Y", "3Y", "5Y", "10Y", "20Y", "Full")
@@ -65,6 +72,19 @@ def load_commodity_cycle_snapshot(api_key: str | None, refresh_nonce: int = 0) -
     term_history, term_current, term_diagnostics = load_commodity_term_structure()
     cftc, cftc_status = load_cftc_snapshot()
     history, capex, term_history_rt = build_commodity_cycle_history(fred, prices, term_history)
+    ppiaco = fred.get("PPIACO", pd.Series(dtype=float)) if isinstance(fred, pd.DataFrame) else pd.Series(dtype=float)
+    ppi_led_table = pd.DataFrame()
+    ppi_led_as_of = None
+    ppi_led_status: dict[str, str] = {}
+    try:
+        ppi_series = pd.to_numeric(ppiaco, errors="coerce").dropna()
+        if not ppi_series.empty:
+            ppi_led_prices, ppi_led_status = download_ppi_led_market_prices(pd.Timestamp(ppi_series.index.max()))
+            ppi_led_table, ppi_led_as_of = build_ppi_led_performance_table(ppi_series, ppi_led_prices)
+        else:
+            ppi_led_status = {"PPIACO": "FRED PPIACO unavailable; common calculation date is not available"}
+    except Exception as exc:
+        ppi_led_status = {"Module": f"PPI-led ETF data unavailable: {exc}"}
     commodity, sector = build_market_confirmation(
         prices, term_history_rt, term_current, cftc, performance_prices=performance_prices,
         performance_sources=performance_source,
@@ -87,6 +107,8 @@ def load_commodity_cycle_snapshot(api_key: str | None, refresh_nonce: int = 0) -
         "performance_source": performance_source,
         "term_history": term_history_rt, "term_current": term_current, "term_diagnostics": term_diagnostics, "cftc": cftc,
         "cftc_status": cftc_status, "history": history, "capex": capex,
+        "ppi_led_table": ppi_led_table, "ppi_led_as_of": ppi_led_as_of,
+        "ppi_led_status": ppi_led_status,
         "commodity": commodity, "sector": sector,
     }
 
@@ -148,6 +170,8 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         for idx, (label, value) in enumerate(summary):
             with cards[idx % 4]:
                 st.metric(label, _format_state(value))
+                if label == "PPI Confirmation":
+                    st.caption(_ppi_sector_tightening_easing(current))
 
     _range_picker("commodity_cycle_overview_range")
     selected_range = st.session_state["commodity_cycle_overview_range"]
@@ -159,8 +183,6 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         view = st.radio("Regime shading", ["Final State", "Final State 2"], index=1, horizontal=True,
                         key="commodity_cycle_final_view_v2")
         _render_final_state_chart(history, selected_range, view)
-    if not capex.empty:
-        _render_capex_intensity_chart(capex, history, selected_range)
     if not history.empty:
         st.markdown("#### FRED Inventory / Sales Regime")
         _render_fred_heatmap(history)
@@ -173,9 +195,13 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         sectors,
         data["performance_prices"],
         selected_range,
+        capex,
+        history,
         data["term_history"],
         data.get("term_diagnostics", pd.DataFrame()),
     )
+
+    _render_ppi_led_etf(data.get("ppi_led_table", pd.DataFrame()), data.get("ppi_led_as_of"), data.get("ppi_led_status", {}))
 
     with st.expander("Diagnostics / Data", expanded=False):
         if not capex.empty:
@@ -188,11 +214,112 @@ def render_commodity_cycle_tab(api_key: str | None) -> None:
         _render_diagnostics_section(data, commodity)
 
 
+def _render_ppi_led_etf(table: pd.DataFrame, as_of: Any, statuses: dict[str, str]) -> None:
+    st.markdown("#### PPI led ETF")
+    if table.empty or as_of is None:
+        st.info("PPI-led ETF performance is unavailable because the PPIACO calculation date or price data could not be loaded.")
+        failed = [f"{asset}: {status}" for asset, status in statuses.items() if "unavailable" in status.lower() or "missing" in status.lower()]
+        if failed:
+            st.caption(" · ".join(failed))
+        return
+
+    st.caption(
+        f"As of: {pd.Timestamp(as_of):%d %b %Y} · PPIACO: FRED · RTSI: TradingView MCP · "
+        "ECH, ENOR, EWC, EWA, EZA, EPU, EWZ, GUNR, GNR, PICK, MXI, IXC, VEGI, WOOD, COPX, URNM: "
+        "yfinance adjusted closes"
+    )
+    shown = table.copy()
+    formatters = {f"{month}M": "{:+.1%}" for month in PPI_LED_HORIZONS}
+
+    def semantic_return(value: Any) -> str:
+        if pd.isna(value):
+            return "color: #94a3b8"
+        if float(value) > 0.001:
+            return "background-color: #14532d; color: #f8fafc"
+        if float(value) < -0.001:
+            return "background-color: #7f1d1d; color: #f8fafc"
+        return "background-color: #334155; color: #f8fafc"
+
+    separators = {
+        "PPIACO", "RTSI — Russia", "GUNR — Global Natural Resources", "Average",
+    }
+
+    def row_separation(row: pd.Series) -> list[str]:
+        label = str(row.get("Asset", ""))
+        border = "border-top: 2px solid #64748b;" if label in separators else ""
+        weight = "font-weight: 700;" if label in {"Average", "Median"} else ""
+        return [border + weight for _ in row]
+
+    styled = shown.style.format(formatters, na_rep="N/A").apply(
+        lambda column: [semantic_return(value) for value in column], subset=list(formatters), axis=0
+    ).apply(row_separation, axis=1)
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=max(470, 35 * (len(shown) + 1)))
+
+    period = st.selectbox(
+        "Relative performance period",
+        options=tuple(f"{month}M" for month in PPI_LED_HORIZONS),
+        index=4,
+        key="ppi_led_etf_relative_period",
+        horizontal=True,
+    )
+    median_rows = shown.loc[shown["Asset"].eq("Median"), period]
+    median = pd.to_numeric(median_rows, errors="coerce").iloc[0] if not median_rows.empty else np.nan
+    median_label = "N/A" if pd.isna(median) else f"{median:+.1%}"
+    st.caption(f"Median {period} Return: {median_label} · bars show asset return minus equity-universe median, in percentage points")
+    chart_data = relative_median_frame(shown, period)
+    if chart_data.empty:
+        st.info(f"No assets have enough history to calculate relative performance for {period}.")
+        return
+    chart_data["Relative pp"] = chart_data["Relative"] * 100
+    chart_data["Label"] = chart_data["Relative pp"].map(lambda value: f"{value:+.1f} pp")
+    chart_data["Color"] = chart_data["Relative"].map(
+        lambda value: "#22c55e" if value > 0.001 else "#ef4444" if value < -0.001 else "#94a3b8"
+    )
+    custom = np.column_stack([
+        chart_data["Asset Return"], chart_data["Median Return"],
+        chart_data["Relative pp"], chart_data["Rank"],
+    ])
+    fig = go.Figure(go.Bar(
+        x=chart_data["Relative pp"], y=chart_data["Ticker"], orientation="h",
+        marker_color=chart_data["Color"], text=chart_data["Label"], textposition="outside",
+        customdata=custom,
+        hovertemplate=(
+            "Asset: %{y}<br>Period: " + period + "<br>Asset return: %{customdata[0]:+.1%}"
+            "<br>Universe median: %{customdata[1]:+.1%}<br>Relative to median: %{customdata[2]:+.1f} pp"
+            "<br>Rank: %{customdata[3]:.0f} / " + str(len(chart_data)) + "<extra></extra>"
+        ),
+    ))
+    fig.add_vline(x=0, line_color="#e2e8f0", line_width=1.5)
+    fig.update_layout(
+        template="plotly_dark", title="Relative to Median Performance", height=max(470, 30 * len(chart_data) + 130),
+        xaxis_title="Return vs Median, percentage points", yaxis_title="Ticker",
+        yaxis=dict(autorange="reversed"), margin=dict(l=35, r=80, t=55, b=40),
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    failures = [f"{asset}: {status}" for asset, status in statuses.items() if "unavailable" in status.lower() or "missing" in status.lower()]
+    if failures:
+        st.caption("Unavailable sources (shown as N/A): " + " · ".join(failures))
+
+
+def _ppi_sector_tightening_easing(current: pd.Series) -> str:
+    """Summarize current seasonal stress breadth across the three core and five confirmation sectors."""
+    columns = [f"{sector} Seasonal Delta 6M" for sector in (*CORE_SERIES, *CONFIRMATION_SERIES)]
+    values = pd.to_numeric(current.reindex(columns), errors="coerce")
+    if values.isna().any():
+        return "Sectors Tightening: N/A · Sectors Easing: N/A"
+    tightening = int(values.gt(5).sum())
+    easing = int(values.lt(-5).sum())
+    return f"Sectors Tightening: {tightening}/8 · Sectors Easing: {easing}/8"
+
+
 def _render_market_section(
     commodity: pd.DataFrame,
     sectors: pd.DataFrame,
     performance_prices: pd.DataFrame,
     selected_range: str,
+    capex: pd.DataFrame,
+    history: pd.DataFrame,
     term_history: pd.DataFrame,
     term_diagnostics: pd.DataFrame,
 ) -> None:
@@ -204,11 +331,14 @@ def _render_market_section(
             cols = st.columns(len(sectors))
             for col, (_, row) in zip(cols, sectors.iterrows()):
                 with col:
-                    st.markdown(f"**{row['Sector']}**")
+                    st.markdown(
+                        f"<div style='font-size:2rem;font-weight:700;line-height:1.15'>{row['Sector']}</div>",
+                        unsafe_allow_html=True,
+                    )
                     avg_cftc = row.get("CFTC Average 5Y Percentile", np.nan)
                     avg_cftc_text = "N/A" if pd.isna(avg_cftc) else f"{float(avg_cftc):.1f}"
                     st.markdown(
-                        "<div style='font-size:1.5rem;line-height:1.4;margin-top:0.25rem'>"
+                        "<div style='font-size:1.05rem;line-height:1.4;margin-top:0.25rem'>"
                         f"<div>Price: {row['Price State']} · Bullish {row['Bullish Count']} / Bearish {row['Bearish Count']}</div>"
                         f"<div>Curve tight breadth: {_fmt(row['Curve Tight Breadth'], '%')}</div>"
                         f"<div>Avg CFTC: {avg_cftc_text}</div>"
@@ -228,7 +358,12 @@ def _render_market_section(
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="commodity_cycle_tables_download",
         )
-        st.dataframe(_style_commodity_table(primary, highlight_primary=True), use_container_width=True, hide_index=True)
+        st.dataframe(
+            _style_commodity_table(primary, highlight_primary=True),
+            use_container_width=True,
+            hide_index=True,
+            height=max(400, 46 * (len(primary) + 1)),
+        )
         if not auxiliary.empty:
             with st.expander("Additional commodity diagnostics", expanded=False):
                 st.dataframe(_style_commodity_table(auxiliary), use_container_width=True, hide_index=True)
@@ -270,6 +405,8 @@ def _render_market_section(
                     momentum_period,
                     selected_range,
                 )
+    if not capex.empty:
+        _render_capex_intensity_chart(capex, history, selected_range)
 
 
 def _commodity_confirmation_frames(commodity: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -465,7 +602,8 @@ def _render_fred_heatmap(history: pd.DataFrame) -> None:
         droll = row.get(f"{label} Rolling Delta 6M")
         dseason = row.get(f"{label} Seasonal Delta 6M")
         table.append({"Series": label, "Inventory / Sales": _fmt(row.get(label)), "Seasonal Stress": _fmt(seasonal), "Rolling Stress": _fmt(rolling), "Δ Seasonal 6M": _fmt(dseason), "Δ Rolling 6M": _fmt(droll), "Direction": _direction_label(droll)})
-    st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
+    frame = pd.DataFrame(table)
+    st.dataframe(frame, use_container_width=True, hide_index=True, height=max(400, 46 * (len(frame) + 1)))
 
 
 def _render_capex_intensity_chart(capex: pd.DataFrame, history: pd.DataFrame, selected_range: str) -> None:
