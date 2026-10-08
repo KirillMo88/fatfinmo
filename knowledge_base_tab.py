@@ -9,16 +9,16 @@ HOWELL_INFOGRAPHIC_PATH = KNOWLEDGE_BASE_DIR / "howell_debt_liquidity_cycle.png"
 HOWELL_PRESENTATION_DIR = KNOWLEDGE_BASE_DIR / "presentation"
 LUKE_GROMEN_INFOGRAPHICS = (
     (
+        KNOWLEDGE_BASE_DIR / "luke_gromen_debt_debasement.png",
+        "Долговая математика и дебасмент доллара",
+    ),
+    (
         KNOWLEDGE_BASE_DIR / "luke_gromen_macro_analysis_framework.png",
         "Luke Gromen — Macro Analysis Framework",
     ),
     (
         KNOWLEDGE_BASE_DIR / "luke_gromen_gold_model.png",
         "Золото в модели Luke Gromen",
-    ),
-    (
-        KNOWLEDGE_BASE_DIR / "luke_gromen_debt_debasement.png",
-        "Долговая математика и дебасмент доллара",
     ),
 )
 LYN_ALDEN_INFOGRAPHIC_PATH = KNOWLEDGE_BASE_DIR / "lyn_alden_financial_framework.png"
@@ -40,18 +40,27 @@ HELICOPTER_VIEW_INFOGRAPHIC_PATH = (
 )
 
 
+def _render_infographics(infographics: tuple[tuple[Path, str], ...]) -> None:
+    """Render infographics two per row at the same width as Howell's image."""
+    for row_start in range(0, len(infographics), 2):
+        columns = st.columns(2)
+        row_infographics = infographics[row_start : row_start + 2]
+        for column, (infographic_path, caption) in zip(columns, row_infographics):
+            with column:
+                st.image(
+                    str(infographic_path),
+                    caption=caption,
+                    use_container_width=True,
+                )
+
+
 def render_knowledge_base_tab() -> None:
     """Render Michael Howell materials as one knowledge-base block."""
     with st.container(border=True):
         st.subheader("Michael Howell")
-
-        infographic_column, _ = st.columns(2)
-        with infographic_column:
-            st.image(
-                str(HOWELL_INFOGRAPHIC_PATH),
-                caption="The Howell Model — Debt–Liquidity Cycle",
-                use_container_width=True,
-            )
+        _render_infographics(
+            ((HOWELL_INFOGRAPHIC_PATH, "The Howell Model — Debt–Liquidity Cycle"),)
+        )
 
         slide_paths = sorted(HOWELL_PRESENTATION_DIR.glob("slide-*.jpg"))
         if slide_paths:
@@ -74,42 +83,31 @@ def render_knowledge_base_tab() -> None:
 
     with st.container(border=True):
         st.subheader("Luke Gromen")
-        for infographic_path, caption in LUKE_GROMEN_INFOGRAPHICS:
-            st.image(
-                str(infographic_path),
-                caption=caption,
-                use_container_width=True,
-            )
+        _render_infographics(LUKE_GROMEN_INFOGRAPHICS)
 
     with st.container(border=True):
         st.subheader("Lyn Alden")
-        st.image(
-            str(LYN_ALDEN_INFOGRAPHIC_PATH),
-            caption="Модель Lyn Alden — финансовый инфографический маршрут",
-            use_container_width=True,
+        _render_infographics(
+            (
+                (
+                    LYN_ALDEN_INFOGRAPHIC_PATH,
+                    "Модель Lyn Alden — финансовый инфографический маршрут",
+                ),
+            )
         )
 
     with st.container(border=True):
         st.subheader("Brent Johnson")
-        st.image(
-            str(BRENT_JOHNSON_INFOGRAPHIC_PATH),
-            caption="Brent Johnson — Dollar Milkshake Model",
-            use_container_width=True,
+        _render_infographics(
+            ((BRENT_JOHNSON_INFOGRAPHIC_PATH, "Brent Johnson — Dollar Milkshake Model"),)
         )
 
     with st.container(border=True):
         st.subheader("Jeff Snyder")
-        for infographic_path, caption in JEFF_SNYDER_INFOGRAPHICS:
-            st.image(
-                str(infographic_path),
-                caption=caption,
-                use_container_width=True,
-            )
+        _render_infographics(JEFF_SNYDER_INFOGRAPHICS)
 
     with st.container(border=True):
         st.subheader("Helicopter View")
-        st.image(
-            str(HELICOPTER_VIEW_INFOGRAPHIC_PATH),
-            caption="Единый механизм глобальной ликвидности",
-            use_container_width=True,
+        _render_infographics(
+            ((HELICOPTER_VIEW_INFOGRAPHIC_PATH, "Единый механизм глобальной ликвидности"),)
         )

@@ -8,9 +8,9 @@ APP_SOURCE = ROOT / "app.py"
 TAB_SOURCE = ROOT / "knowledge_base_tab.py"
 PRESENTATION_DIR = ROOT / "knowledge_base" / "presentation"
 LUKE_GROMEN_INFOGRAPHICS = (
+    ROOT / "knowledge_base" / "luke_gromen_debt_debasement.png",
     ROOT / "knowledge_base" / "luke_gromen_macro_analysis_framework.png",
     ROOT / "knowledge_base" / "luke_gromen_gold_model.png",
-    ROOT / "knowledge_base" / "luke_gromen_debt_debasement.png",
 )
 LYN_ALDEN_INFOGRAPHIC = ROOT / "knowledge_base" / "lyn_alden_financial_framework.png"
 BRENT_JOHNSON_INFOGRAPHIC = (
@@ -59,7 +59,8 @@ class KnowledgeBaseContentTests(unittest.TestCase):
 
     def test_infographic_is_half_width_and_all_presentation_slides_render_without_a_selector(self):
         tab = TAB_SOURCE.read_text(encoding="utf-8")
-        self.assertIn("infographic_column, _ = st.columns(2)", tab)
+        self.assertIn("def _render_infographics", tab)
+        self.assertIn("columns = st.columns(2)", tab)
         self.assertIn("for row_start in range(0, len(slide_paths), 2):", tab)
         self.assertNotIn("st.selectbox", tab)
 
@@ -86,7 +87,11 @@ class KnowledgeBaseContentTests(unittest.TestCase):
         tab = TAB_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('st.subheader("Luke Gromen")', tab)
-        self.assertIn("for infographic_path, caption in LUKE_GROMEN_INFOGRAPHICS:", tab)
+        self.assertIn("_render_infographics(LUKE_GROMEN_INFOGRAPHICS)", tab)
+        self.assertEqual(
+            LUKE_GROMEN_INFOGRAPHICS[0].name,
+            "luke_gromen_debt_debasement.png",
+        )
         for infographic_path in LUKE_GROMEN_INFOGRAPHICS:
             self.assertTrue(infographic_path.is_file(), infographic_path)
 
@@ -94,21 +99,21 @@ class KnowledgeBaseContentTests(unittest.TestCase):
         tab = TAB_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('st.subheader("Lyn Alden")', tab)
-        self.assertIn('str(LYN_ALDEN_INFOGRAPHIC_PATH)', tab)
+        self.assertIn("LYN_ALDEN_INFOGRAPHIC_PATH,", tab)
         self.assertTrue(LYN_ALDEN_INFOGRAPHIC.is_file())
 
     def test_brent_johnson_block_includes_infographic(self):
         tab = TAB_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('st.subheader("Brent Johnson")', tab)
-        self.assertIn('str(BRENT_JOHNSON_INFOGRAPHIC_PATH)', tab)
+        self.assertIn("BRENT_JOHNSON_INFOGRAPHIC_PATH,", tab)
         self.assertTrue(BRENT_JOHNSON_INFOGRAPHIC.is_file())
 
     def test_jeff_snyder_block_includes_all_infographics(self):
         tab = TAB_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('st.subheader("Jeff Snyder")', tab)
-        self.assertIn("for infographic_path, caption in JEFF_SNYDER_INFOGRAPHICS:", tab)
+        self.assertIn("_render_infographics(JEFF_SNYDER_INFOGRAPHICS)", tab)
         for infographic_path in JEFF_SNYDER_INFOGRAPHICS:
             self.assertTrue(infographic_path.is_file(), infographic_path)
 
@@ -116,8 +121,18 @@ class KnowledgeBaseContentTests(unittest.TestCase):
         tab = TAB_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('st.subheader("Helicopter View")', tab)
-        self.assertIn('str(HELICOPTER_VIEW_INFOGRAPHIC_PATH)', tab)
+        self.assertIn("HELICOPTER_VIEW_INFOGRAPHIC_PATH,", tab)
         self.assertTrue(HELICOPTER_VIEW_INFOGRAPHIC.is_file())
+
+    def test_all_infographic_blocks_use_the_shared_half_width_renderer(self):
+        tab = TAB_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("((HOWELL_INFOGRAPHIC_PATH,", tab)
+        self.assertIn("_render_infographics(LUKE_GROMEN_INFOGRAPHICS)", tab)
+        self.assertIn("LYN_ALDEN_INFOGRAPHIC_PATH,", tab)
+        self.assertIn("((BRENT_JOHNSON_INFOGRAPHIC_PATH,", tab)
+        self.assertIn("_render_infographics(JEFF_SNYDER_INFOGRAPHICS)", tab)
+        self.assertIn("((HELICOPTER_VIEW_INFOGRAPHIC_PATH,", tab)
 
 
 if __name__ == "__main__":
