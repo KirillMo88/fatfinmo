@@ -155,10 +155,10 @@ def download_market_prices(calculation_date: pd.Timestamp | str) -> tuple[dict[s
 def relative_median_frame(table: pd.DataFrame, horizon: str) -> pd.DataFrame:
     """Return sorted equity-only relative returns and ranks for the chosen horizon."""
     if table.empty or horizon not in table:
-        return pd.DataFrame(columns=["Ticker", "Asset Return", "Median Return", "Relative", "Rank"])
+        return pd.DataFrame(columns=["Asset", "Ticker", "Asset Return", "Median Return", "Relative", "Rank"])
     median_rows = table.loc[table["Asset"].eq("Median"), horizon]
     if median_rows.empty or pd.isna(median_rows.iloc[0]):
-        return pd.DataFrame(columns=["Ticker", "Asset Return", "Median Return", "Relative", "Rank"])
+        return pd.DataFrame(columns=["Asset", "Ticker", "Asset Return", "Median Return", "Relative", "Rank"])
     median = float(median_rows.iloc[0])
     equities = table.loc[table["Asset"].str.split(" — ").str[0].isin(EQUITY_ASSETS), ["Asset", horizon]].copy()
     equities[horizon] = pd.to_numeric(equities[horizon], errors="coerce")
@@ -168,4 +168,4 @@ def relative_median_frame(table: pd.DataFrame, horizon: str) -> pd.DataFrame:
     equities["Median Return"] = median
     equities["Relative"] = equities["Asset Return"] - median
     equities["Rank"] = np.arange(1, len(equities) + 1)
-    return equities[["Ticker", "Asset Return", "Median Return", "Relative", "Rank"]]
+    return equities[["Asset", "Ticker", "Asset Return", "Median Return", "Relative", "Rank"]]

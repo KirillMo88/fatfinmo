@@ -270,7 +270,7 @@ def _render_ppi_led_etf(table: pd.DataFrame, as_of: Any, statuses: dict[str, str
         chart_data["Relative pp"], chart_data["Rank"],
     ])
     fig = go.Figure(go.Bar(
-        x=chart_data["Relative pp"], y=chart_data["Ticker"], orientation="h",
+        x=chart_data["Relative pp"], y=chart_data["Asset"], orientation="h",
         marker_color=chart_data["Color"], text=chart_data["Label"], textposition="outside",
         customdata=custom,
         hovertemplate=(
@@ -282,8 +282,8 @@ def _render_ppi_led_etf(table: pd.DataFrame, as_of: Any, statuses: dict[str, str
     fig.add_vline(x=0, line_color="#e2e8f0", line_width=1.5)
     fig.update_layout(
         template="plotly_dark", title="Relative to Median Performance", height=max(470, 30 * len(chart_data) + 130),
-        xaxis_title="Return vs Median, percentage points", yaxis_title="Ticker",
-        yaxis=dict(autorange="reversed"), margin=dict(l=35, r=80, t=55, b=40),
+        xaxis_title="Return vs Median, percentage points", yaxis_title="Asset",
+        yaxis=dict(autorange="reversed", automargin=True), margin=dict(l=250, r=95, t=55, b=40),
         showlegend=False,
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
@@ -352,7 +352,7 @@ def _render_market_section(
             _style_commodity_table(primary, highlight_primary=True),
             use_container_width=True,
             hide_index=True,
-            height=34 + 31 * len(primary),
+            height=35 * (len(primary) + 1),
         )
         if not auxiliary.empty:
             with st.expander("Additional commodity diagnostics", expanded=False):
@@ -597,7 +597,7 @@ def _render_fred_heatmap(history: pd.DataFrame) -> None:
         frame,
         use_container_width=True,
         hide_index=True,
-        height=34 + 31 * len(frame),
+        height=35 * (len(frame) + 1),
     )
 
 

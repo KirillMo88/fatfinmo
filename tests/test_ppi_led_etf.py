@@ -51,6 +51,7 @@ def test_relative_performance_is_equity_return_minus_equity_median_sorted_and_ra
     relative = relative_median_frame(table, "12M")
 
     assert len(relative) == len(EQUITY_ASSETS)
+    assert relative.loc[relative["Ticker"].eq("URNM"), "Asset"].iloc[0] == "URNM — Uranium Miners"
     assert relative.iloc[0]["Rank"] == 1
     assert relative.iloc[-1]["Rank"] == len(EQUITY_ASSETS)
     assert relative["Relative"].is_monotonic_decreasing
