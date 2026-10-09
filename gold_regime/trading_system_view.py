@@ -103,7 +103,7 @@ def render_gold_silver_trading_system(
         gold_weekly = _gold_weekly_from_snapshot(snapshot)
     chart_history = _build_chart_history(history, monthly_gs, monthly_model)
     figure = _build_figure(chart_history, events, backtest, gold_weekly, selected_range, mode, show_signals, show_positions)
-    st.plotly_chart(figure, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
+    st.plotly_chart(figure, use_container_width=True, config={"displayModeBar": False, "scrollZoom": False})
     _render_performance(backtest, mode)
     with st.expander("Annual Performance", expanded=False):
         if backtest["annual"].empty:
