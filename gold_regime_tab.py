@@ -12,6 +12,8 @@ from plotly.subplots import make_subplots
 
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
 from gold_regime.macro2_view import render_gold_macro2_price_chart, render_gold_structural_macro2, render_macro2_narrative
+from gold_regime.trading_system_data import load_trading_system_data
+from gold_regime.trading_system_view import render_gold_silver_trading_system
 from gold_regime.precious_metals import (
     CHANGE_HORIZONS,
     PRECIOUS_METALS_ROWS,
@@ -131,6 +133,9 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
     )
     global_range_end = history_dates.max()
     render_precious_metals_universe(selected_range, global_range_end)
+    with st.spinner("Loading Gold / Silver Trading System..."):
+        market_data = load_gold_silver_trading_data()
+    render_gold_silver_trading_system(snapshot, selected_range, market_data)
     if snapshot.structural_macro2 is not None and snapshot.structural_macro2.history is not None and not snapshot.structural_macro2.history.empty:
         render_macro2_narrative(snapshot.structural_macro2.current or {})
     render_gold_structural_macro2(
@@ -147,6 +152,11 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
     render_structural_demand(current, snapshot)
     render_freshness(snapshot)
     render_history_table(filter_gold_analytics_history(snapshot.history))
+
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def load_gold_silver_trading_data() -> dict[str, Any]:
+    return load_trading_system_data()
 
 
 @st.cache_data(show_spinner=False, ttl=21600)
