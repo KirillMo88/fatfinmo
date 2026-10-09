@@ -40,7 +40,8 @@ def load_trading_system_data() -> dict[str, Any]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     for asset, symbol in TV_SYMBOLS.items():
         output["daily"][asset] = _tradingview_bars(symbol, "1D", output["status"])
-        output["monthly"][asset] = _tradingview_bars(symbol, "1M", output["status"])
+        # TradingView MCP interprets 1M as one minute; 1mo is a monthly bar.
+        output["monthly"][asset] = _tradingview_bars(symbol, "1mo", output["status"])
     gold_weekly = _tradingview_bars("TVC:GOLD", "1W", output["status"])
     output["gold_weekly"] = gold_weekly["close"].dropna().rename("gold_price") if "close" in gold_weekly else pd.Series(dtype=float, name="gold_price")
 
