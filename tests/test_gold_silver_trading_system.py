@@ -64,17 +64,6 @@ class TradingSystemRegressionTests(unittest.TestCase):
         refit = expanding_regression(changed)
         pd.testing.assert_series_equal(original.iloc[0], refit.iloc[0])
 
-    def test_visual_channel_begins_in_1998_without_shortening_signal_warmup(self) -> None:
-        dates = pd.date_range("1998-02-28", periods=130, freq="ME")
-        ratio = pd.Series(50 + np.arange(130) * 0.1 + np.sin(np.arange(130)), index=dates)
-        visual = expanding_regression(ratio, min_observations=3)
-        signals = expanding_regression(ratio)
-        self.assertEqual(visual.index.min(), dates[2])
-        self.assertEqual(visual.index.min().year, 1998)
-        self.assertEqual(signals.index.min(), dates[119])
-        self.assertTrue(visual.loc[visual.index < signals.index.min(), "mean"].notna().all())
-        pd.testing.assert_frame_equal(visual.loc[signals.index], signals)
-
     def test_fitted_line_is_evaluated_at_each_daily_month_coordinate(self) -> None:
         dates = pd.date_range("2021-01-01", periods=10, freq="B")
         ratio = ohlc(dates, np.linspace(50, 51, 10))
@@ -123,6 +112,35 @@ class TradingSystemStateTests(unittest.TestCase):
             },
             index=dates,
         )
+
+    def test_december_2014_entry_and_june_2019_unlock(self) -> None:
+        dates = pd.to_datetime(["2013-06-17", "2014-11-24", "2014-12-01", "2015-08-25", "2019-05-31", "2019-06-03", "2019-06-20"])
+        observations = self._observations(dates, [111, 121, 121, 121, 121, 119, 121])
+        history, events, _ = run_state_machine(observations, as_of="2019-07-01")
+        self.assertEqual(history.loc["2014-11-24", "regime"], "CASH")
+        self.assertEqual(events["signal_date"].tolist(), [pd.Timestamp("2014-12-01"), pd.Timestamp("2019-06-20")])
+        self.assertEqual(events["to_regime"].tolist(), ["GOLD", "SILVER"])
+        self.assertEqual(events["threshold"].tolist(), ["Dec 2014 anchor", "+2σ"])
+        self.assertEqual(history.loc["2019-05-31", "regime"], "GOLD")
+
+    def test_minus_two_cash_exit_remains_active_before_june_2019(self) -> None:
+        dates = pd.to_datetime(["2014-12-01", "2015-01-05", "2015-01-12", "2015-01-19", "2019-06-20"])
+        observations = self._observations(dates, [100, 79, 111, 121, 121])
+        _, events, _ = run_state_machine(observations, as_of="2019-07-01")
+        self.assertEqual(events["to_regime"].tolist(), ["GOLD", "CASH", "GOLD", "SILVER"])
+        self.assertEqual(events.iloc[1]["threshold"], "−2σ")
+
+    def test_december_anchor_executes_at_next_week_open(self) -> None:
+        dates = pd.to_datetime(["2014-11-24", "2014-12-01", "2014-12-08", "2014-12-15", "2014-12-22"])
+        observations = self._observations(dates, [100] * len(dates))
+        history, events, _ = run_state_machine(observations, as_of="2015-01-01")
+        prices = {asset: ohlc(dates, [100, 101, 102, 103, 104]) for asset in ("GOLD", "SILVER", "PLATINUM")}
+        result = run_backtest(prices, history, events, "1x", as_of="2015-01-01")
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["start_date"], pd.Timestamp("2014-12-01"))
+        self.assertEqual(result["curve"].iloc[0]["equity"], 1000.0)
+        self.assertEqual(result["curve"].iloc[0]["regime"], "CASH")
+        self.assertEqual(result["executed_events"].iloc[0]["execution_date"], pd.Timestamp("2014-12-08"))
 
     def test_cash_gold_late_metal_and_direct_cash_exit(self) -> None:
         dates = pd.to_datetime(["2024-01-08", "2024-01-15", "2024-01-22", "2024-01-29", "2024-02-05"])

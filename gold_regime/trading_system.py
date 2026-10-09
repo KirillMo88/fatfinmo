@@ -10,6 +10,8 @@ import pandas as pd
 MODEL_START = pd.Period("1998-01", freq="M")
 MIN_REGRESSION_MONTHS = 120
 INITIAL_CAPITAL_USD = 1_000.0
+GOLD_ENTRY_ANCHOR = pd.Timestamp("2014-12-01")
+LATE_METALS_UNLOCK = pd.Timestamp("2019-06-01")
 MODE_INSTRUMENTS = {
     "1x": {"GOLD": "GOLD", "SILVER": "SILVER", "PLATINUM": "PLATINUM", "CASH": "CASH"},
     "3x": {"GOLD": "3GOL.L", "SILVER": "3SIL.L", "PLATINUM": "3SIL.L", "CASH": "CASH"},
@@ -205,8 +207,10 @@ def build_daily_observations(
 def run_state_machine(
     observations: pd.DataFrame,
     as_of: pd.Timestamp | str | None = None,
+    cash_to_gold_anchor: pd.Timestamp | str | None = GOLD_ENTRY_ANCHOR,
+    late_metals_unlock: pd.Timestamp | str = LATE_METALS_UNLOCK,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Process observed daily closes in order, confirming each signal at its week close."""
+    """Process closes in order with the December 2014 historical starting state."""
     history_columns = ["gold_silver_ratio", "mean", "sigma", "upper_1", "upper_2", "lower_1", "lower_2", "zscore", "sp_deviation_pct", "model_ready", "regime"]
     event_columns = ["signal_date", "confirmed_date", "from_regime", "to_regime", "threshold", "ratio", "zscore", "sp_deviation_pct", "sequence_ambiguous", "selection_note"]
     week_columns = ["week", "week_start", "week_confirmed_date", "ratio_high_observed", "ratio_low_observed", "ratio_close", "regime"]
@@ -225,6 +229,9 @@ def run_state_machine(
     if data.empty:
         return pd.DataFrame(columns=history_columns), pd.DataFrame(columns=event_columns), pd.DataFrame(columns=week_columns)
 
+    anchor_date = pd.Timestamp(cash_to_gold_anchor).normalize() if cash_to_gold_anchor is not None else None
+    unlock_date = pd.Timestamp(late_metals_unlock).normalize()
+    anchor_applied = anchor_date is None
     regime: str | None = None
     history_rows: list[dict[str, Any]] = []
     history_dates: list[pd.Timestamp] = []
@@ -233,6 +240,7 @@ def run_state_machine(
     for week, group in data.groupby("week", sort=True):
         confirmed_date = pd.Timestamp(group.index[-1])
         for signal_date, row in group.iterrows():
+            signal_date = pd.Timestamp(signal_date)
             ready = bool(row.get("model_ready", False)) and _finite(row.get("upper_1")) and _finite(row.get("lower_2"))
             if not ready:
                 history_dates.append(pd.Timestamp(signal_date))
@@ -240,18 +248,32 @@ def run_state_machine(
                 continue
             if regime is None or regime == "NOT_READY":
                 regime = "CASH"
+            if anchor_date is not None and signal_date < anchor_date:
+                history_dates.append(signal_date)
+                history_rows.append(_history_row(row, "CASH"))
+                continue
             ratio = float(row["gold_silver_ratio"])
             zscore = _safe_float(row.get("zscore"))
             lower_2, lower_1 = float(row["lower_2"]), float(row["lower_1"])
             upper_1, upper_2 = float(row["upper_1"]), float(row["upper_2"])
             transitions: list[tuple[str, str, str, bool, str]] = []
 
-            if regime == "CASH" and ratio >= upper_1:
+            anchored_entry = False
+            if not anchor_applied:
+                anchor_applied = True
+                if signal_date.to_period("M") == anchor_date.to_period("M"):
+                    transitions.append(("CASH", "GOLD", "Dec 2014 anchor", False, "Historical Cash → Gold entry; executed at the next weekly Open."))
+                    regime = "GOLD"
+                    anchored_entry = True
+
+            if anchored_entry:
+                pass
+            elif regime == "CASH" and ratio >= upper_1:
                 transitions.append(("CASH", "GOLD", "+1σ", False, ""))
                 regime = "GOLD"
                 # A daily close may jump across both upper levels. Apply the
                 # ordered state transitions once, flagging the unresolved path.
-                if ratio >= upper_2:
+                if signal_date >= unlock_date and ratio >= upper_2:
                     selected, note = _select_late_metal(row.get("sp_deviation_pct"))
                     transitions.append(("GOLD", selected, "+2σ", True, note))
                     regime = selected
@@ -259,7 +281,7 @@ def run_state_machine(
                 if ratio <= lower_2:
                     transitions.append(("GOLD", "CASH", "−2σ", False, ""))
                     regime = "CASH"
-                elif ratio >= upper_2:
+                elif signal_date >= unlock_date and ratio >= upper_2:
                     selected, note = _select_late_metal(row.get("sp_deviation_pct"))
                     transitions.append(("GOLD", selected, "+2σ", False, note))
                     regime = selected
