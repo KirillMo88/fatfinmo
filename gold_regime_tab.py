@@ -13,7 +13,7 @@ from plotly.subplots import make_subplots
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
 from gold_regime.macro2_view import render_gold_macro2_price_chart, render_gold_structural_macro2, render_macro2_narrative
 from gold_regime.trading_system_data import load_trading_system_data
-from gold_regime.trading_system_view import render_gold_silver_trading_system
+from gold_regime.trading_system_view import current_model_regime, render_gold_silver_trading_system
 from gold_regime.precious_metals import (
     CHANGE_HORIZONS,
     PRECIOUS_METALS_ROWS,
@@ -117,7 +117,10 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
         st.warning("Gold Regime data is unavailable.")
         return
 
-    render_summary(current, snapshot)
+    with st.spinner("Loading Gold / Silver Trading System..."):
+        market_data = load_gold_silver_trading_data()
+    model_current_regime = current_model_regime(market_data)
+    render_summary(current, snapshot, model_current_regime)
     selected_range = st.radio(
         "Time range",
         ["1Y", "3Y", "5Y", "10Y", "MAX"],
@@ -133,8 +136,6 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
     )
     global_range_end = history_dates.max()
     render_precious_metals_universe(selected_range, global_range_end)
-    with st.spinner("Loading Gold / Silver Trading System..."):
-        market_data = load_gold_silver_trading_data()
     render_gold_silver_trading_system(snapshot, selected_range, market_data)
     if snapshot.structural_macro2 is not None and snapshot.structural_macro2.history is not None and not snapshot.structural_macro2.history.empty:
         render_macro2_narrative(snapshot.structural_macro2.current or {})
@@ -295,7 +296,7 @@ def extract_gold_alpha(table_df: pd.DataFrame) -> float | None:
     return float(value) if np.isfinite(value) else None
 
 
-def render_summary(current: dict[str, Any], snapshot: Any) -> None:
+def render_summary(current: dict[str, Any], snapshot: Any, model_current_regime: str = "NOT_READY") -> None:
     as_of = pd.to_datetime(current.get("date"), errors="coerce")
     history = getattr(snapshot, "history", pd.DataFrame())
     cycles = getattr(snapshot, "gold_cycle_history", pd.DataFrame())
@@ -310,6 +311,7 @@ def render_summary(current: dict[str, Any], snapshot: Any) -> None:
                 ("Cycle Risk Regime", fmt_text(cycle.get("CombinedCycleRiskRegime")), ""),
                 ("Short Cycle State", fmt_text(cycle.get("PrimaryCycleState")), ""),
                 ("Long Cycle State", fmt_text(cycle.get("LongCycleState")), ""),
+                ("Model Current Regime", fmt_text(model_current_regime), ""),
             ],
         ),
         (
