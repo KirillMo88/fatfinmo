@@ -64,6 +64,17 @@ class TradingSystemRegressionTests(unittest.TestCase):
         refit = expanding_regression(changed)
         pd.testing.assert_series_equal(original.iloc[0], refit.iloc[0])
 
+    def test_visual_channel_begins_in_1998_without_shortening_signal_warmup(self) -> None:
+        dates = pd.date_range("1998-02-28", periods=130, freq="ME")
+        ratio = pd.Series(50 + np.arange(130) * 0.1 + np.sin(np.arange(130)), index=dates)
+        visual = expanding_regression(ratio, min_observations=3)
+        signals = expanding_regression(ratio)
+        self.assertEqual(visual.index.min(), dates[2])
+        self.assertEqual(visual.index.min().year, 1998)
+        self.assertEqual(signals.index.min(), dates[119])
+        self.assertTrue(visual.loc[visual.index < signals.index.min(), "mean"].notna().all())
+        pd.testing.assert_frame_equal(visual.loc[signals.index], signals)
+
     def test_fitted_line_is_evaluated_at_each_daily_month_coordinate(self) -> None:
         dates = pd.date_range("2021-01-01", periods=10, freq="B")
         ratio = ohlc(dates, np.linspace(50, 51, 10))
