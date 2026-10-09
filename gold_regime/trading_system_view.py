@@ -34,6 +34,7 @@ def render_gold_silver_trading_system(
 ) -> None:
     st.subheader("Gold / Silver Trading System")
     st.caption("Expanding Regression 1998–Current | Weekly Signals")
+    st.caption("Historical assumption: CASH until December 2014, then GOLD; GOLD → Silver/Platinum is allowed again from June 2019 at +2σ. The −2σ exit to CASH remains active.")
 
     mode = st.segmented_control("Investment mode", MODE_OPTIONS, default="1x", key="gs_trading_mode")
     mode = mode or "1x"
@@ -46,7 +47,7 @@ def render_gold_silver_trading_system(
     silver_daily = daily.get("SILVER", pd.DataFrame())
     platinum_daily = daily.get("PLATINUM", pd.DataFrame())
 
-    history, events, monthly_gs, monthly_model, chart_model = _cached_signal_history(
+    history, events, monthly_gs, monthly_model = _cached_signal_history(
         gold_daily,
         silver_daily,
         platinum_daily,
@@ -100,14 +101,9 @@ def render_gold_silver_trading_system(
     gold_weekly = market_data.get("gold_weekly", pd.Series(dtype=float))
     if gold_weekly is None or gold_weekly.empty:
         gold_weekly = _gold_weekly_from_snapshot(snapshot)
-    chart_history = _build_chart_history(history, monthly_gs, chart_model)
+    chart_history = _build_chart_history(history, monthly_gs, monthly_model)
     figure = _build_figure(chart_history, events, backtest, gold_weekly, selected_range, mode, show_signals, show_positions)
     st.plotly_chart(figure, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
-    if not monthly_model.empty:
-        st.caption(
-            f"The channel before {monthly_model.index.min():%Y-%m} is visualization only. "
-            "Trading signals and backtest returns require 120 completed monthly observations."
-        )
     _render_performance(backtest, mode)
     with st.expander("Annual Performance", expanded=False):
         if backtest["annual"].empty:
@@ -186,31 +182,28 @@ def _cached_signal_history(
     silver_monthly: pd.DataFrame,
     platinum_monthly: pd.DataFrame,
     current_week_key: str,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.DataFrame]:
     as_of = pd.Timestamp(current_week_key)
     monthly_gs = monthly_ratio_series(gold_monthly, silver_monthly, as_of=as_of, name="gold_silver_ratio")
     model = expanding_regression(monthly_gs)
-    # The chart can display an expanding channel from the first calculable
-    # 1998 month; production signals continue to use the 120-month model.
-    chart_model = expanding_regression(monthly_gs, min_observations=3)
     monthly_sp = silver_platinum_deviation(silver_monthly, platinum_monthly, as_of=as_of)
     observations = build_daily_observations(gold_daily, silver_daily, platinum_daily, model, monthly_sp)
     history, events, _ = run_state_machine(observations, as_of=as_of)
-    return history, events, monthly_gs, model, chart_model
+    return history, events, monthly_gs, model
 
 
 def _build_chart_history(
     daily_history: pd.DataFrame,
     monthly_ratio: pd.Series,
-    chart_model: pd.DataFrame,
+    monthly_model: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Show the visual-only early channel without changing trade signals."""
+    """Show monthly historical context before daily synchronized bars begin."""
     if daily_history is None or daily_history.empty or monthly_ratio is None or monthly_ratio.empty:
         return daily_history.copy() if daily_history is not None else pd.DataFrame()
     monthly = pd.DataFrame({"gold_silver_ratio": pd.to_numeric(monthly_ratio, errors="coerce")})
-    if chart_model is not None and not chart_model.empty:
+    if monthly_model is not None and not monthly_model.empty:
         model_columns = ["mean", "sigma", "upper_1", "upper_2", "lower_1", "lower_2"]
-        monthly = monthly.join(chart_model[model_columns], how="left")
+        monthly = monthly.join(monthly_model[model_columns], how="left")
     else:
         monthly["mean"] = np.nan
         monthly["sigma"] = np.nan
@@ -221,19 +214,6 @@ def _build_chart_history(
     monthly.index = pd.to_datetime(monthly.index)
     daily = daily_history.copy()
     daily.index = pd.to_datetime(daily.index)
-    early = daily["mean"].isna()
-    if early.any() and chart_model is not None and not chart_model.empty:
-        fit = chart_model[["intercept", "slope", "sigma"]].reset_index().rename(columns={"date": "fit_date"})
-        dates = pd.DataFrame({"date": daily.index[early]})
-        aligned = pd.merge_asof(dates.sort_values("date"), fit.sort_values("fit_date"), left_on="date", right_on="fit_date", direction="backward").set_index("date")
-        month_index = np.asarray([period.ordinal - pd.Period("1998-01", freq="M").ordinal for period in aligned.index.to_period("M")], dtype=float)
-        mean = aligned["intercept"] + aligned["slope"] * month_index
-        sigma = aligned["sigma"]
-        daily.loc[early, "mean"] = mean.to_numpy()
-        daily.loc[early, "sigma"] = sigma.to_numpy()
-        for column, multiple in (("upper_1", 1), ("upper_2", 2), ("lower_1", -1), ("lower_2", -2)):
-            daily.loc[early, column] = (mean + multiple * sigma).to_numpy()
-        daily.loc[early, "zscore"] = ((daily.loc[early, "gold_silver_ratio"] - mean) / sigma.replace(0, np.nan)).to_numpy()
     monthly = monthly.loc[monthly.index < daily.index.min()]
     return pd.concat([monthly, daily], axis=0).sort_index()
 
