@@ -27,6 +27,28 @@ REGIME_COLORS = {
 MODE_OPTIONS = ("1x", "3x")
 
 
+def current_model_regime(market_data: dict[str, Any]) -> str:
+    """Return the latest completed-week regime from the strategy state machine."""
+    daily = market_data.get("daily", {})
+    monthly = market_data.get("monthly", {})
+    gold_daily = daily.get("GOLD", pd.DataFrame())
+    silver_daily = daily.get("SILVER", pd.DataFrame())
+    if gold_daily is None or gold_daily.empty or silver_daily is None or silver_daily.empty:
+        return "DATA_INCOMPLETE"
+    history, _, _, _ = _cached_signal_history(
+        gold_daily,
+        silver_daily,
+        daily.get("PLATINUM", pd.DataFrame()),
+        monthly.get("GOLD", pd.DataFrame()),
+        monthly.get("SILVER", pd.DataFrame()),
+        monthly.get("PLATINUM", pd.DataFrame()),
+        _current_week_key(),
+    )
+    if history is None or history.empty:
+        return "NOT_READY"
+    return str(history.iloc[-1].get("regime", "NOT_READY"))
+
+
 def render_gold_silver_trading_system(
     snapshot: Any,
     selected_range: str,
