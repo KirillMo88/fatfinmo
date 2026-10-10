@@ -1670,7 +1670,14 @@ def weekly_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
     d = frame.copy()
     d.index = pd.to_datetime(d.index, errors="coerce")
     d = d[~d.index.isna()].sort_index()
-    return d.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna(subset=["Close"])
+    weekly = d.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna(subset=["Close"])
+    complete = weekly[["Open", "High", "Low", "Close"]].notna().all(axis=1)
+    if complete.any():
+        # Upstream adjusted OHLC can occasionally return a weekly high/low
+        # that does not contain its own open or close. Keep the bar coherent.
+        weekly.loc[complete, "High"] = weekly.loc[complete, ["Open", "High", "Close"]].max(axis=1)
+        weekly.loc[complete, "Low"] = weekly.loc[complete, ["Open", "Low", "Close"]].min(axis=1)
+    return weekly
 
 
 def prepare_date_frame(frame: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
