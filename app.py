@@ -2133,6 +2133,7 @@ def render_global_liquidity_dashboard_tab() -> None:
 
     st.markdown("### Global M2")
     _render_global_m2_level_growth(chart_frame, regime, global_m2_cycle)
+    _render_global_m2_market_52w_chart(chart_frame, regime)
     if global_m2_cycle.empty:
         st.info("No monthly Global M2 history is available for the cycle layer.")
     else:
@@ -2598,6 +2599,119 @@ def _render_global_m2_level_growth(
         yaxis2={"title": f"{growth_choice}, %", "overlaying": "y", "side": "right", "showgrid": False},
     )
     st.plotly_chart(_style_liquidity_plotly(fig, 360, "Global M2 - Level and Growth"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+@st.cache_data(show_spinner=False, ttl=SLOW_REFRESH_SECONDS)
+def _load_liquidity_cycle_weekly_close(source: str, symbol: str) -> pd.DataFrame:
+    """Load the canonical weekly closes used for the liquidity/market comparison."""
+    if source == "Yahoo":
+        daily = download_completed_ohlcv(symbol, period="max")
+        if daily is None or daily.empty or "Close" not in daily.columns:
+            return pd.DataFrame(columns=["date", "close"])
+        close = pd.to_numeric(daily["Close"], errors="coerce").dropna().resample("W-FRI").last().dropna()
+        return pd.DataFrame({"date": close.index, "close": close.to_numpy()})
+
+    from tradingview_mcp import get_ohlcv_data
+
+    bars = get_ohlcv_data(symbol, interval="1W", count=5000)
+    if bars is None or bars.empty or not {"date", "close"}.issubset(bars.columns):
+        return pd.DataFrame(columns=["date", "close"])
+    dates = pd.to_datetime(bars["date"], errors="coerce", utc=True).dt.tz_localize(None)
+    close = pd.Series(pd.to_numeric(bars["close"], errors="coerce").to_numpy(), index=dates)
+    close = close[~close.index.isna()].sort_index().dropna().resample("W-FRI").last().dropna()
+    return pd.DataFrame({"date": close.index, "close": close.to_numpy()})
+
+
+def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataFrame) -> None:
+    """Compare the long-run M2 growth gap with trailing one-year asset returns."""
+    st.markdown("### Global M2 Trend Gap vs 52W Asset Returns")
+    if frame.empty or full_frame.empty:
+        st.info("No data for Global M2 Trend Gap vs 52W Asset Returns.")
+        return
+
+    visible_dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
+    if visible_dates.empty:
+        st.info("No data for Global M2 Trend Gap vs 52W Asset Returns.")
+        return
+    start_date, end_date = visible_dates.min(), visible_dates.max()
+
+    m2 = full_frame[["date", "global_m2_usd_bn"]].copy()
+    m2["date"] = pd.to_datetime(m2["date"], errors="coerce")
+    m2["global_m2_usd_bn"] = pd.to_numeric(m2["global_m2_usd_bn"], errors="coerce")
+    m2 = m2.dropna(subset=["date", "global_m2_usd_bn"]).sort_values("date").drop_duplicates("date", keep="last")
+    m2_weekly = m2.set_index("date")["global_m2_usd_bn"].resample("W-FRI").last().ffill()
+    m2_change_52w = m2_weekly.pct_change(52, fill_method=None)
+    m2_gap = (m2_change_52w - m2_change_52w.rolling(200, min_periods=200).mean()) * 100.0
+    m2_gap = m2_gap.loc[(m2_gap.index >= start_date) & (m2_gap.index <= end_date)].dropna()
+
+    fig = go.Figure()
+    if not m2_gap.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=m2_gap.index,
+                y=m2_gap,
+                mode="lines",
+                name="Global M2: 52W Change − 200W SMA",
+                line={"color": "#f59e0b", "width": 2.4},
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>M2 trend gap: %{y:.2f} pp<extra></extra>",
+            )
+        )
+
+    assets = [
+        ("SPX", "Yahoo", "^GSPC", "#38bdf8"),
+        ("NDX", "Yahoo", "^NDX", "#a78bfa"),
+        ("BTCUSD", "TradingView", "BTCUSD", "#f97316"),
+        ("GOLD (XAUUSD)", "TradingView", "XAUUSD", "#facc15"),
+    ]
+    unavailable = []
+    for name, source, symbol, color in assets:
+        try:
+            close_frame = _load_liquidity_cycle_weekly_close(source, symbol)
+            if close_frame.empty:
+                unavailable.append(name)
+                continue
+            close = pd.Series(
+                pd.to_numeric(close_frame["close"], errors="coerce").to_numpy(),
+                index=pd.to_datetime(close_frame["date"], errors="coerce"),
+            ).dropna().sort_index()
+            change = (close.pct_change(52, fill_method=None) * 100.0).dropna()
+            change = change.loc[(change.index >= start_date) & (change.index <= end_date)]
+            if change.empty:
+                unavailable.append(name)
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=change.index,
+                    y=change,
+                    mode="lines",
+                    name=f"{name} 52W Change",
+                    yaxis="y2",
+                    line={"color": color, "width": 1.8},
+                    hovertemplate="Date: %{x|%Y-%m-%d}<br>52W change: %{y:.2f}%<extra></extra>",
+                )
+            )
+        except Exception:
+            unavailable.append(name)
+
+    if not fig.data:
+        st.info("No overlapping M2 and market observations for this time range.")
+        return
+    fig.add_shape(type="line", xref="paper", x0=0, x1=1, yref="y", y0=0, y1=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+    fig.update_layout(
+        xaxis={"title": ""},
+        yaxis={"title": "M2 trend gap, percentage points"},
+        yaxis2={"title": "Asset 52W change, %", "overlaying": "y", "side": "right", "showgrid": False},
+        legend={"orientation": "h", "yanchor": "top", "y": -0.18, "x": 0},
+        margin={"l": 56, "r": 58, "t": 18, "b": 75},
+    )
+    st.plotly_chart(
+        _style_liquidity_plotly(fig, 390, "Global M2 Trend Gap vs 52W Asset Returns"),
+        use_container_width=True,
+        config=LIQUIDITY_PLOTLY_CONFIG,
+    )
+    st.caption("M2 primary axis: current 52W change minus its 200-week SMA. Secondary axis: 52-week price changes.")
+    if unavailable:
+        st.caption("Data unavailable for: " + ", ".join(unavailable))
 
 
 def _liquidity_phase_bands(full_frame: pd.DataFrame, visible_frame: pd.DataFrame) -> pd.DataFrame:
