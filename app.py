@@ -78,6 +78,7 @@ from financial_fragility_tab import render_financial_fragility_tab
 from treasury_fiscal_regime_tab import render_treasury_fiscal_regime_tab
 from treasury_funding_policy import read_snapshot as read_treasury_funding_policy_snapshot
 from gold_regime_tab import render_gold_regime_tab
+from portfolio_tab import render_portfolio_tab
 from knowledge_base_tab import render_knowledge_base_tab
 from btc_cycle_tab import render_btc_cycle_tab
 from commodity_cycle_tab import render_commodity_cycle_tab
@@ -7096,6 +7097,7 @@ def main():
         st.warning("Fund flow data unavailable")
 
     view_options = [
+        "Portfolio",
         "Table",
         "Charts",
         "Graphs",
@@ -7133,7 +7135,9 @@ def main():
         label_visibility="collapsed",
         key="active_main_view",
     )
-    if active_view == "Table":
+    if active_view == "Portfolio":
+        render_portfolio_tab()
+    elif active_view == "Table":
         gb = GridOptionsBuilder.from_dataframe(table_display_df)
         gb.configure_default_column(
             sortable=True,
