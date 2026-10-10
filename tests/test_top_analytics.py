@@ -53,7 +53,7 @@ def test_top_analytics_uses_requested_order_and_source_metrics():
     assert metrics[1][2][1].startswith("ROC 3M +")
     assert metrics[1][2][2].startswith("ROC 6M +")
     assert metrics[1][2][3] == "Liquidity Forecast Signal: POSITIVE"
-    assert metrics[1][2][4] == "Near-Term Treasury Refinancing: 54.0 / 100"
+    assert metrics[1][2][4] == "3M6M Treasury Refinancing: 54.0 / 100"
     assert metrics[1][2][5] == "Current Cycle Maturity: 72%"
     assert metrics[2][1] == "30.00" and metrics[2][2][2] == "5Y percentile 100%"
     assert metrics[2][2][0].startswith("1W change +")
@@ -89,7 +89,7 @@ def test_inflation_card_reports_na_for_missing_history():
     )
     assert metrics[1][2][-3:] == [
         "Liquidity Forecast Signal: N/A",
-        "Near-Term Treasury Refinancing: N/A",
+        "3M6M Treasury Refinancing: N/A",
         "Current Cycle Maturity: N/A",
     ]
 

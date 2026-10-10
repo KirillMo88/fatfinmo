@@ -51,7 +51,7 @@ def build_top_analytics(
                 f"ROC 3M {_format_percent(roc_3m)}",
                 f"ROC 6M {_format_percent(roc_6m)}",
                 f"Liquidity Forecast Signal: {_format_text(liquidity_forecast_signal)}",
-                f"Near-Term Treasury Refinancing: {_format_score(near_term_treasury_refinancing)}",
+                f"3M6M Treasury Refinancing: {_format_score(near_term_treasury_refinancing)}",
                 f"Current Cycle Maturity: {_format_maturity(current_cycle_maturity)}",
             ],
         ),
