@@ -52,7 +52,7 @@ def test_gold_positioning_displays_selected_metal():
     assert gold_positioning("SILVER")["position_pct"] == 100
 
 
-def test_btc_entry_holds_75_until_phase_changes_then_applies_phase_rule():
+def test_btc_position_is_reduced_in_defensive_phases_and_zero_only_in_gold():
     history = pd.DataFrame({
         "Date": pd.date_range("2026-01-02", periods=10, freq="W-FRI"),
         "position": [None, "Gold", "BTC", "BTC", "BTC", "BTC", "BTC", "BTC", "BTC", "Gold"],
@@ -70,18 +70,18 @@ def test_btc_entry_holds_75_until_phase_changes_then_applies_phase_rule():
         ],
     })
     result = build_btc_positioning_history(history)
-    assert result["position_pct"].tolist() == [0, 0, 75, 75, 100, 100, 0, 0, 100, 0]
+    assert result["position_pct"].tolist() == [0, 0, 75, 75, 100, 100, 75, 75, 100, 0]
     assert result.loc[2, "trigger"] == "BTC / GOLD: GOLD → BTC"
     assert result.loc[3, "trigger"] == ""
     assert result.loc[4, "trigger"] == "HALVING PHASE: ACCUMULATION_PRE_HALVING"
 
 
-def test_btc_entry_in_allowed_phase_still_starts_at_75():
+def test_btc_entry_in_allowed_phase_starts_at_100():
     history = pd.DataFrame({
         "Date": pd.date_range("2026-01-02", periods=3, freq="W-FRI"),
         "position": ["Gold", "BTC", "BTC"],
         "halving_phase": ["LATE_EXPANSION", "LATE_EXPANSION", "CYCLE_TOP_RISK"],
     })
     result = build_btc_positioning_history(history)
-    assert result["position_pct"].tolist() == [0, 75, 100]
+    assert result["position_pct"].tolist() == [0, 100, 100]
 
