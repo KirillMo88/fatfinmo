@@ -184,16 +184,16 @@ ETF_UNIVERSE_CRYPTO = {
     "Crypto": {
         "BTC": ["BTC-USD"],
         "L1": [
-            "ETH-USD", "SOL-USD", "SUI-USD", "APT-USD", "NEAR-USD", "TRX-USD", "ADA-USD",
+            "ETH-USD", "SOL-USD", "SUI20947-USD", "APT21794-USD", "NEAR-USD", "TRX-USD", "ADA-USD",
             "AVAX-USD", "TON-USD", "HBAR-USD", "VET-USD", "INJ-USD", "TIA-USD", "DOT-USD",
         ],
         "CEX": ["BNB-USD", "BGB-USD", "OKB-USD", "CRO-USD"],
-        "PAYMENT": ["XRP-USDT", "XLM-USDT", "LTC-USD", "BCH-USD", "XMR-USD", "DASH-USD", "CELO-USD"],
+        "PAYMENT": ["XRP-USD", "XLM-USD", "LTC-USD", "BCH-USD", "XMR-USD", "DASH-USD", "CELO-USD"],
         "Oracles": ["LINK-USD", "PYTH-USD", "BAND-USD"],
-        "DEFI": ["AAVE-USD", "JUP-USD", "HYPE32196-USD", "UNI-USD", "RAY-USD"],
-        "L2": ["MATIC-USD", "ARB-USD", "OP-USD", "ZK-USD"],
-        "MEMES": ["DOGE-USD", "SHIB-USD", "TRUMP-USD"],
-        "SHARED COMPUTE": ["TAO-USD", "RENDER-USD", "FET-USD"],
+        "DEFI": ["AAVE-USD", "JUP-USD", "HYPE32196-USD", "UNI7083-USD", "RAY-USD"],
+        "L2": ["POL28321-USD", "ARB-USD", "OP-USD", "ZK24091-USD"],
+        "MEMES": ["DOGE-USD", "SHIB-USD", "TRUMP35336-USD"],
+        "SHARED COMPUTE": ["TAO22974-USD", "RENDER-USD", "FET-USD"],
     }
 }
 
