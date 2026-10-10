@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from time_ranges import TIME_RANGE_YEARS
 
 from .macro2 import HORIZONS
 from .aisc_view import render_gold_aisc_valuation
@@ -192,7 +193,7 @@ def filter_macro2_history_range(history: pd.DataFrame, selected_range: str) -> p
     if data.empty:
         return data
     latest = dates.max()
-    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    years = TIME_RANGE_YEARS.get(selected_range)
     range_start = latest - pd.DateOffset(years=years) if years else pd.Timestamp("2016-01-01")
     cutoff = max(pd.Timestamp("2016-01-01"), pd.Timestamp(range_start))
     return data.loc[dates >= cutoff].copy()

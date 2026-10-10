@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from time_ranges import TIME_RANGE_YEARS
 
 from .trading_system import (
     build_daily_observations,
@@ -290,7 +291,7 @@ def _build_figure(
     curve = backtest["curve"]
     close_curve = curve.loc[curve["phase"].eq("Close")].copy()
     start, end = pd.Timestamp(backtest["start_date"]), pd.Timestamp(backtest["end_date"])
-    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    years = TIME_RANGE_YEARS.get(selected_range)
     range_start = end - pd.DateOffset(years=years) if years else (history.index.min() if not history.empty else start)
     active = history.loc[(history.index >= range_start) & (history.index <= end)].copy()
     for column, label, color in (

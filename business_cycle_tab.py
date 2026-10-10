@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS
 from plotly.subplots import make_subplots
 
 from business_cycle import (
@@ -116,8 +117,8 @@ def render_business_cycle_tab(api_key: str | None) -> None:
     st.markdown("### Primary Macro View")
     chart_range = st.radio(
         "Business Cycle chart range",
-        options=["3Y", "5Y", "10Y", "MAX"],
-        index=1,
+        options=STANDARD_TIME_RANGE_OPTIONS,
+        index=STANDARD_TIME_RANGE_OPTIONS.index("5Y"),
         horizontal=True,
         key="business_cycle_chart_range",
     )
@@ -259,8 +260,8 @@ def render_macro_surprises_section(snapshot: MacroSurprisesSnapshot) -> None:
 
     macro_range = st.radio(
         "Macro Surprise range",
-        options=["3Y", "5Y", "10Y", "MAX"],
-        index=1,
+        options=STANDARD_TIME_RANGE_OPTIONS,
+        index=STANDARD_TIME_RANGE_OPTIONS.index("5Y"),
         horizontal=True,
         key="business_cycle_macro_surprise_range",
     )
@@ -999,7 +1000,7 @@ def filter_history_range(history: pd.DataFrame, chart_range: str) -> pd.DataFram
     d = history.dropna(subset=["date"]).copy()
     if chart_range == "MAX" or d.empty:
         return d
-    years = {"3Y": 3, "5Y": 5, "10Y": 10}.get(chart_range, 5)
+    years = TIME_RANGE_YEARS.get(chart_range, 5)
     cutoff = pd.to_datetime(d["date"]).max() - pd.DateOffset(years=years)
     return d[d["date"].ge(cutoff)].copy()
 

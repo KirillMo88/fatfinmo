@@ -8,6 +8,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS
+
 
 BTC_CYCLE_HORIZONS = {"3M": 3, "6M": 6, "9M": 9, "12M": 12}
 BTC_ACTUAL_HALVINGS = pd.DatetimeIndex(
@@ -20,7 +22,7 @@ BTC_LIQUIDITY_TROUGH_ANCHORS = pd.DatetimeIndex(
 BTC_LIQUIDITY_CYCLE_MONTHS = 52.7
 BTC_SECONDARY_PERCENTILE_WINDOW = 156
 BTC_SECONDARY_PERCENTILE_MINIMUM = 104
-BTC_RANGE_OPTIONS = ("1Y", "3Y", "5Y", "10Y", "MAX", "Next Cycle")
+BTC_RANGE_OPTIONS = STANDARD_TIME_RANGE_OPTIONS + ("Next Cycle",)
 BTC_MODULAR_CYCLE_START = pd.Timestamp("2026-09-27")
 BTC_MODULAR_HISTORICAL_MODULES = (
     (pd.Timestamp("2018-11-02"), pd.Timestamp("2022-11-25")),

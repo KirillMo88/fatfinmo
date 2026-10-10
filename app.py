@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 from streamlit.errors import StreamlitSecretNotFoundError
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS
 
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
@@ -2112,7 +2113,7 @@ def render_global_liquidity_dashboard_tab() -> None:
 
     range_choice = st.radio(
         "Time range",
-        ["1Y", "3Y", "5Y", "10Y", "MAX"],
+        STANDARD_TIME_RANGE_OPTIONS,
         index=2,
         horizontal=True,
         key="global_liquidity_regime_range",
@@ -2474,7 +2475,7 @@ def _liquidity_final_label(row: pd.Series) -> str:
 def _liquidity_filter_range(frame: pd.DataFrame, range_key: str) -> pd.DataFrame:
     if frame.empty or range_key == "MAX":
         return frame
-    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(range_key)
+    years = TIME_RANGE_YEARS.get(range_key)
     if years is None or "date" not in frame.columns:
         return frame
     max_date = pd.to_datetime(frame["date"], errors="coerce").max()
@@ -3559,7 +3560,7 @@ def _btc_interpretation_text(s: dict[str, Any]) -> str:
 def _filter_date_range(frame: pd.DataFrame, range_key: str) -> pd.DataFrame:
     if frame.empty or "date" not in frame.columns or range_key == "MAX":
         return frame
-    years = {"3Y": 3, "5Y": 5, "10Y": 10}.get(range_key)
+    years = TIME_RANGE_YEARS.get(range_key)
     if years is None:
         return frame
     max_date = pd.to_datetime(frame["date"], errors="coerce").max()

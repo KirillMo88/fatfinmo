@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS
 
 from positioning import (
     CFTC_3Y_PERCENTILE_MIN_PERIODS,
@@ -24,7 +25,7 @@ from positioning import (
 
 
 CFTC_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
-CFTC_RANGE_OPTIONS = ("3Y", "5Y", "10Y", "MAX")
+CFTC_RANGE_OPTIONS = STANDARD_TIME_RANGE_OPTIONS
 
 
 @st.cache_data(show_spinner=True, ttl=21600)
@@ -48,7 +49,13 @@ def render_cftc_cot_tab() -> None:
     if status.get("CFTC Refresh", {}).get("status") == "ALREADY_RUNNING":
         st.info("Positioning data refresh is already running; showing the last saved data.")
     render_source_status(master, status)
-    range_choice = st.radio("Time range", CFTC_RANGE_OPTIONS, index=1, horizontal=True, key="cftc_cot_range")
+    range_choice = st.radio(
+        "Time range",
+        CFTC_RANGE_OPTIONS,
+        index=CFTC_RANGE_OPTIONS.index("5Y"),
+        horizontal=True,
+        key="cftc_cot_range",
+    )
     if master.empty:
         st.warning("CFTC positioning data is unavailable.")
         return
@@ -226,7 +233,7 @@ def filter_range(frame: pd.DataFrame, range_choice: str) -> pd.DataFrame:
     d = d.dropna(subset=["Date"]).sort_values("Date")
     if d.empty or range_choice == "MAX":
         return d
-    years = {"3Y": 3, "5Y": 5, "10Y": 10}.get(range_choice, 5)
+    years = TIME_RANGE_YEARS.get(range_choice, 5)
     cutoff = d["Date"].max() - pd.DateOffset(years=years)
     return d.loc[d["Date"] >= cutoff].copy()
 

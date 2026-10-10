@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS, normalize_time_range_choice
 from plotly.subplots import make_subplots
 
 from commodity_cycle.data import (
@@ -30,7 +31,7 @@ from commodity_cycle.ppi_led_etf import (
 )
 
 TTL_SECONDS = 21600
-RANGE_OPTIONS = ("1Y", "3Y", "5Y", "10Y", "20Y", "Full")
+RANGE_OPTIONS = STANDARD_TIME_RANGE_OPTIONS
 MOMENTUM_WEEKS = {"1M": 4, "3M": 13, "6M": 26, "12M": 52}
 INVENTORY_SALES_SERIES = tuple(
     name for name in FRED_SERIES if name not in {"PPIACO", "CPIAUCSL", "CAPEX", "FPI"}
@@ -763,15 +764,14 @@ def _add_state_legend(fig: go.Figure, frame: pd.DataFrame, column: str, colors: 
 
 
 def _range_picker(key: str) -> None:
-    if key not in st.session_state:
-        st.session_state[key] = "10Y"
+    st.session_state[key] = normalize_time_range_choice(st.session_state.get(key), "10Y")
     st.radio("History range", RANGE_OPTIONS, horizontal=True, key=key)
 
 
 def _slice_range(frame: pd.DataFrame, option: str) -> pd.DataFrame:
-    if frame.empty or option == "Full":
+    if frame.empty or option == "MAX":
         return frame
-    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10, "20Y": 20}.get(option)
+    years = TIME_RANGE_YEARS.get(option)
     if years is None:
         return frame
     last = pd.to_datetime(frame.index.max())

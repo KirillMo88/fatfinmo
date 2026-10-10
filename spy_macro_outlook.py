@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS
 
 from finance_core import download_completed_ohlcv
 from global_liquidity import read_global_liquidity
@@ -20,8 +21,8 @@ from hy_oas import combine_hy_oas_sources, weekly_archive_available_frame
 
 SPY_MACRO_HORIZONS = ("3M", "6M", "9M", "12M")
 SPY_MACRO_WEEKS = {"3M": 13, "6M": 26, "9M": 39, "12M": 52}
-SPY_MACRO_RANGE_OPTIONS = ["1Y", "5Y", "10Y", "20Y", "2015 -> Latest", "FULL"]
-SPY_MACRO_RANGE_YEARS = {"1Y": 1, "5Y": 5, "10Y": 10, "20Y": 20, "2015 -> Latest": None, "FULL": None}
+SPY_MACRO_RANGE_OPTIONS = STANDARD_TIME_RANGE_OPTIONS
+SPY_MACRO_RANGE_YEARS = TIME_RANGE_YEARS
 PERCENTILE_WINDOW_WEEKS = 156
 PERCENTILE_MIN_PERIODS = 52
 DATA_DIR = Path(__file__).with_name("data")

@@ -8,6 +8,7 @@ from io import StringIO
 from urllib.request import Request, urlopen
 
 import pandas as pd
+from time_ranges import TIME_RANGE_YEARS
 
 
 @dataclass(frozen=True)
@@ -272,7 +273,7 @@ def multiples_range_bounds(
     end = max(dates.max() for dates in available_dates)
     if selection == "MAX":
         return None, end
-    years = {"10Y": 10, "20Y": 20}.get(selection)
+    years = TIME_RANGE_YEARS.get(selection)
     if years is None:
         raise ValueError(f"Unsupported multiples range: {selection}")
     return end - pd.DateOffset(years=years), end

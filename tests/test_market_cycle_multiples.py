@@ -74,10 +74,16 @@ def test_multiples_range_is_shared_and_max_has_no_forced_start() -> None:
         ),
     }
 
+    start_1y, _ = multiples_range_bounds(metrics, "1Y")
+    start_3y, _ = multiples_range_bounds(metrics, "3Y")
+    start_5y, _ = multiples_range_bounds(metrics, "5Y")
     start_10y, end = multiples_range_bounds(metrics, "10Y")
     start_20y, _ = multiples_range_bounds(metrics, "20Y")
     start_max, max_end = multiples_range_bounds(metrics, "MAX")
 
+    assert start_1y == pd.Timestamp("2025-06-01")
+    assert start_3y == pd.Timestamp("2023-06-01")
+    assert start_5y == pd.Timestamp("2021-06-01")
     assert start_10y == pd.Timestamp("2016-06-01")
     assert start_20y == pd.Timestamp("2006-06-01")
     assert end == max_end == pd.Timestamp("2026-06-01")
