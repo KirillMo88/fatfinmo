@@ -20,6 +20,7 @@ from typing import Any
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 from streamlit.errors import StreamlitSecretNotFoundError
 from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS
+from relative_performance import relative_price_series
 
 from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD
@@ -184,16 +185,16 @@ ETF_UNIVERSE_CRYPTO = {
     "Crypto": {
         "BTC": ["BTC-USD"],
         "L1": [
-            "ETH-USD", "SOL-USD", "SUI-USD", "APT-USD", "NEAR-USD", "TRX-USD", "ADA-USD",
+            "ETH-USD", "SOL-USD", "SUI20947-USD", "APT21794-USD", "NEAR-USD", "TRX-USD", "ADA-USD",
             "AVAX-USD", "TON-USD", "HBAR-USD", "VET-USD", "INJ-USD", "TIA-USD", "DOT-USD",
         ],
         "CEX": ["BNB-USD", "BGB-USD", "OKB-USD", "CRO-USD"],
-        "PAYMENT": ["XRP-USDT", "XLM-USDT", "LTC-USD", "BCH-USD", "XMR-USD", "DASH-USD", "CELO-USD"],
+        "PAYMENT": ["XRP-USD", "XLM-USD", "LTC-USD", "BCH-USD", "XMR-USD", "DASH-USD", "CELO-USD"],
         "Oracles": ["LINK-USD", "PYTH-USD", "BAND-USD"],
-        "DEFI": ["AAVE-USD", "JUP-USD", "HYPE32196-USD", "UNI-USD", "RAY-USD"],
-        "L2": ["MATIC-USD", "ARB-USD", "OP-USD", "ZK-USD"],
-        "MEMES": ["DOGE-USD", "SHIB-USD", "TRUMP-USD"],
-        "SHARED COMPUTE": ["TAO-USD", "RENDER-USD", "FET-USD"],
+        "DEFI": ["AAVE-USD", "JUP-USD", "HYPE32196-USD", "UNI7083-USD", "RAY-USD"],
+        "L2": ["POL28321-USD", "ARB-USD", "OP-USD", "ZK24091-USD"],
+        "MEMES": ["DOGE-USD", "SHIB-USD", "TRUMP35336-USD"],
+        "SHARED COMPUTE": ["TAO22974-USD", "RENDER-USD", "FET-USD"],
     }
 }
 
@@ -201,7 +202,9 @@ ETF_UNIVERSE_MAP = {
     "Full list": ETF_UNIVERSE_FULL,
     "Short List": ETF_UNIVERSE_SHORT,
     "Crypto list": ETF_UNIVERSE_CRYPTO,
+    "Crypto_BTC": ETF_UNIVERSE_CRYPTO,
 }
+RELATIVE_PERFORMANCE_BENCHMARKS = {"Crypto_BTC": "BTC-USD"}
 UNIVERSE_STORAGE_PATH = Path(__file__).with_name("custom_universe_lists.json")
 AUTO_REFRESH_SECONDS = 600
 SLOW_REFRESH_SECONDS = 21600
@@ -434,6 +437,10 @@ DIVERGENCE_PROFILE_DEFAULTS = {
 
 def clone_universe_map(universe_map: dict) -> dict:
     return deepcopy(universe_map)
+
+
+def performance_benchmark_for_universe(universe_name: str) -> str | None:
+    return RELATIVE_PERFORMANCE_BENCHMARKS.get(str(universe_name))
 
 
 def _clean_universe_block(block: dict) -> dict:
@@ -1187,7 +1194,11 @@ def overlay_performance_from_refs(row: pd.Series, current_price: float) -> dict[
     return out
 
 
-def get_metrics(ticker: str, divergence_cfg: dict):
+def get_metrics(
+    ticker: str,
+    divergence_cfg: dict,
+    performance_benchmark_close: pd.Series | None = None,
+):
     ohlcv = download_metrics_ohlcv(ticker)
     if ohlcv.empty:
         return None
@@ -1208,18 +1219,23 @@ def get_metrics(ticker: str, divergence_cfg: dict):
         today = close.index[-1]
         cur_px = float(close.iloc[-1])
 
-        # Performance (calendar-day approximations)
-        perf_1d = safe_perf(close, today, 1)
-        perf_1w = safe_perf(close, today, 7)
-        perf_1m = safe_perf(close, today, 30)
-        perf_3m = safe_perf(close, today, 90)
-        perf_6m = safe_perf(close, today, 182)
-        perf_12m = safe_perf(close, today, 365)
+        # Performance (calendar-day approximations). A benchmark series changes
+        # only performance into asset/benchmark terms; price and technicals stay in USD.
+        performance_close = close
+        if performance_benchmark_close is not None:
+            performance_close = relative_price_series(close, performance_benchmark_close)
+        performance_today = performance_close.index[-1] if not performance_close.empty else today
+        perf_1d = safe_perf(performance_close, performance_today, 1)
+        perf_1w = safe_perf(performance_close, performance_today, 7)
+        perf_1m = safe_perf(performance_close, performance_today, 30)
+        perf_3m = safe_perf(performance_close, performance_today, 90)
+        perf_6m = safe_perf(performance_close, performance_today, 182)
+        perf_12m = safe_perf(performance_close, performance_today, 365)
         perf_12m_percentile, avg_forward_return_6m = historical_momentum_52w_metrics(close)
-        perf_3y = safe_perf(close, today, 365 * 3)
-        perf_5y = safe_perf(close, today, 365 * 5)
-        perf_10y = safe_perf(close, today, 365 * 10)
-        perf_refs = performance_reference_prices(close, today)
+        perf_3y = safe_perf(performance_close, performance_today, 365 * 3)
+        perf_5y = safe_perf(performance_close, performance_today, 365 * 5)
+        perf_10y = safe_perf(performance_close, performance_today, 365 * 10)
+        perf_refs = performance_reference_prices(performance_close, performance_today)
 
         # 52W high distance
         last_52w = close.loc[today - pd.DateOffset(days=int(365 * 1.1)):]
@@ -1366,7 +1382,12 @@ def get_ai_group_performance_metrics(group_label: str, refresh_bucket: int = 0) 
     return [float(pd.to_numeric(frame[col], errors="coerce").mean(skipna=True)) for col in FAST_PERFORMANCE_COLUMNS]
 
 
-def compute_performance_table(slow_df: pd.DataFrame, overlay_key: str, refresh_nonce: int = 0) -> tuple[pd.DataFrame, str, dict[str, Any]]:
+def compute_performance_table(
+    slow_df: pd.DataFrame,
+    overlay_key: str,
+    refresh_nonce: int = 0,
+    performance_benchmark_ticker: str | None = None,
+) -> tuple[pd.DataFrame, str, dict[str, Any]]:
     previous_overlay, previous_meta = read_snapshot_frame("market_performance_latest", overlay_key)
     previous_by_key: dict[tuple[str, str, str], pd.Series] = {}
     if not previous_overlay.empty:
@@ -1380,6 +1401,19 @@ def compute_performance_table(slow_df: pd.DataFrame, overlay_key: str, refresh_n
 
     columns = ["Group", "Subgroup", "Ticker", *FAST_PERFORMANCE_COLUMNS]
     rows = []
+    benchmark_current_price = np.nan
+    if performance_benchmark_ticker:
+        benchmark_current_price = lightweight_current_price(
+            performance_benchmark_ticker,
+            refresh_bucket=refresh_bucket,
+        )
+        if not np.isfinite(benchmark_current_price):
+            ticker_values = slow_df.get("Ticker", pd.Series(index=slow_df.index, dtype="object"))
+            benchmark_rows = slow_df.loc[ticker_values == performance_benchmark_ticker]
+            if not benchmark_rows.empty:
+                benchmark_current_price = pd.to_numeric(
+                    pd.Series([benchmark_rows.iloc[0].get("CurrentPrice")]), errors="coerce"
+                ).iloc[0]
     for _, row in slow_df.iterrows():
         group = str(row.get("Group", ""))
         subgroup = str(row.get("Subgroup", ""))
@@ -1392,7 +1426,17 @@ def compute_performance_table(slow_df: pd.DataFrame, overlay_key: str, refresh_n
             if not is_ai_group_label(ticker) and previous is not None:
                 fallback_price = previous.get("CurrentPrice", fallback_price)
             current_price = pd.to_numeric(pd.Series([fallback_price]), errors="coerce").iloc[0]
-        values = overlay_performance_from_refs(row, current_price)
+        performance_current_price = current_price
+        if performance_benchmark_ticker:
+            performance_current_price = (
+                current_price / benchmark_current_price
+                if np.isfinite(current_price)
+                and np.isfinite(benchmark_current_price)
+                and benchmark_current_price != 0.0
+                else np.nan
+            )
+        values = overlay_performance_from_refs(row, performance_current_price)
+        values["CurrentPrice"] = current_price
         if previous is not None:
             for col in FAST_PERFORMANCE_COLUMNS:
                 if not np.isfinite(pd.to_numeric(pd.Series([values.get(col)]), errors="coerce").iloc[0]):
@@ -1420,6 +1464,7 @@ def compute_slow_metrics_table(
     divergence_cfg: dict,
     divergence_signature: str,
     refresh_nonce: int = 0,
+    performance_benchmark_ticker: str | None = None,
 ) -> tuple[pd.DataFrame, str]:
     _ = universe_signature
     _ = divergence_signature
@@ -1441,10 +1486,18 @@ def compute_slow_metrics_table(
         "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
     ]
     rows = []
+    performance_benchmark_close = None
+    if performance_benchmark_ticker:
+        performance_benchmark_close = pd.Series(dtype="float64")
+        benchmark_ohlcv = download_metrics_ohlcv(performance_benchmark_ticker)
+        if not benchmark_ohlcv.empty and "Close" in benchmark_ohlcv.columns:
+            performance_benchmark_close = pd.to_numeric(
+                benchmark_ohlcv["Close"], errors="coerce"
+            ).dropna()
     for group, subgroups in universe.items():
         for subgroup, tickers in subgroups.items():
             for ticker in tickers:
-                res = get_metrics(ticker, divergence_cfg)
+                res = get_metrics(ticker, divergence_cfg, performance_benchmark_close)
                 if res is None:
                     rows.append([group, subgroup, ticker] + [np.nan] * (len(columns) - 3))
                 else:
@@ -1477,6 +1530,7 @@ def compute_metrics_table(
     divergence_signature: str,
     performance_refresh_nonce: int = 0,
     slow_refresh_nonce: int = 0,
+    performance_benchmark_ticker: str | None = None,
 ) -> tuple[pd.DataFrame, str, dict[str, Any]]:
     snapshot_key = snapshot_hash(universe_signature, divergence_signature)
     slow_df, slow_meta = read_snapshot_frame("screener_snapshot_latest", snapshot_key)
@@ -1492,6 +1546,7 @@ def compute_metrics_table(
                 divergence_cfg,
                 divergence_signature,
                 slow_refresh_nonce,
+                performance_benchmark_ticker,
             )
             if not slow_df.empty:
                 data_as_of = None
@@ -1524,6 +1579,7 @@ def compute_metrics_table(
         slow_df,
         snapshot_key,
         performance_refresh_nonce,
+        performance_benchmark_ticker,
     )
     status_payload = {
         "analytics": slow_meta,
@@ -6849,6 +6905,7 @@ def main():
 
     with st.spinner("Computing ETF metrics..."):
         selected_universe = universe_map[selected_universe_name]
+        performance_benchmark_ticker = performance_benchmark_for_universe(selected_universe_name)
         market_signature = f"market-model:{selected_universe_name}:{str(selected_universe)}:{divergence_signature}"
         performance_refresh_key = int(time.time() // AUTO_REFRESH_SECONDS) + (
             int(st.session_state["performance_refresh_nonce"]) * 10_000_000
@@ -6860,6 +6917,7 @@ def main():
             divergence_signature,
             performance_refresh_key,
             st.session_state["slow_refresh_nonce"],
+            performance_benchmark_ticker,
         )
         market_snapshot = load_market_model_snapshot(market_signature)
     refresh_text = "n/a"
@@ -7027,6 +7085,11 @@ def main():
             use_container_width=True,
         )
 
+    if performance_benchmark_ticker:
+        st.caption(
+            f"Performance is measured versus {performance_benchmark_ticker} "
+            "(asset/BTC); Current Price remains in USD."
+        )
     st.caption(f"Rows: {len(filtered_df)}/{len(df)}")
 
     if flow_unavailable:

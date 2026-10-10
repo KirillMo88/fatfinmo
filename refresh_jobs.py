@@ -118,6 +118,7 @@ def run_nightly_analytics() -> None:
                     divergence_cfg,
                     divergence_signature,
                     refresh_nonce,
+                    app.performance_benchmark_for_universe(universe_name),
                 )
                 meta = app.snapshot_metadata("CURRENT", len(frame), data_as_of=f"{frame['Ticker'].nunique()} tickers")
                 meta["RefreshNonce"] = int(refresh_nonce)
