@@ -2686,9 +2686,9 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
 
     assets = {
         "SPX": ("Yahoo", "^GSPC", "#38bdf8"),
-        "NDX": ("Yahoo", "^NDX", "#a78bfa"),
-        "GOLD": ("TradingView", "XAUUSD", "#facc15"),
-        "BTC": ("TradingView", "BTCUSD", "#f97316"),
+        "NDX": ("Yahoo", "^NDX", "#38bdf8"),
+        "GOLD": ("TradingView", "XAUUSD", "#38bdf8"),
+        "BTC": ("TradingView", "BTCUSD", "#38bdf8"),
     }
     source, symbol, asset_color = assets[selected_asset]
     try:
