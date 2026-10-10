@@ -2623,17 +2623,27 @@ def _load_liquidity_cycle_weekly_close(source: str, symbol: str) -> pd.DataFrame
 
 
 def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataFrame) -> None:
-    """Compare the long-run M2 growth gap with trailing one-year asset returns."""
-    st.markdown("### Global M2 Trend Gap vs 52W Asset Returns")
+    """Compare the long-run M2 growth gap with asset prices or trailing returns."""
     if frame.empty or full_frame.empty:
-        st.info("No data for Global M2 Trend Gap vs 52W Asset Returns.")
+        st.info("No data for Global M2 Trend Gap vs Asset Prices / 52W Returns.")
         return
 
     visible_dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
     if visible_dates.empty:
-        st.info("No data for Global M2 Trend Gap vs 52W Asset Returns.")
+        st.info("No data for Global M2 Trend Gap vs Asset Prices / 52W Returns.")
         return
     start_date, end_date = visible_dates.min(), visible_dates.max()
+    st.markdown("### Global M2 Trend Gap vs Asset Prices / 52W Returns")
+    asset_view = st.radio(
+        "Asset display",
+        ["52W Change", "Log Prices"],
+        index=0,
+        horizontal=True,
+        key="global_m2_market_asset_view",
+    )
+    log_price_view = asset_view == "Log Prices"
+    asset_title = "Log Asset Prices" if log_price_view else "52W Asset Returns"
+    chart_title = f"Global M2 Trend Gap vs {asset_title}"
 
     m2 = full_frame[["date", "global_m2_usd_bn"]].copy()
     m2["date"] = pd.to_datetime(m2["date"], errors="coerce")
@@ -2661,7 +2671,7 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
         ("SPX", "Yahoo", "^GSPC", "#38bdf8"),
         ("NDX", "Yahoo", "^NDX", "#a78bfa"),
         ("BTCUSD", "TradingView", "BTCUSD", "#f97316"),
-        ("GOLD (XAUUSD)", "TradingView", "XAUUSD", "#facc15"),
+        ("GOLD", "TradingView", "XAUUSD", "#facc15"),
     ]
     unavailable = []
     for name, source, symbol, color in assets:
@@ -2674,20 +2684,29 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
                 pd.to_numeric(close_frame["close"], errors="coerce").to_numpy(),
                 index=pd.to_datetime(close_frame["date"], errors="coerce"),
             ).dropna().sort_index()
-            change = (close.pct_change(52, fill_method=None) * 100.0).dropna()
-            change = change.loc[(change.index >= start_date) & (change.index <= end_date)]
-            if change.empty:
+            if log_price_view:
+                plotted = close.loc[close.gt(0)]
+            else:
+                plotted = (close.pct_change(52, fill_method=None) * 100.0).dropna()
+            plotted = plotted.loc[(plotted.index >= start_date) & (plotted.index <= end_date)]
+            if plotted.empty:
                 unavailable.append(name)
                 continue
+            trace_name = f"Log {name}" if log_price_view else f"{name} 52W Change"
+            hovertemplate = (
+                "Date: %{x|%Y-%m-%d}<br>Price (log scale): %{y:.2f}<extra></extra>"
+                if log_price_view
+                else "Date: %{x|%Y-%m-%d}<br>52W change: %{y:.2f}%<extra></extra>"
+            )
             fig.add_trace(
                 go.Scatter(
-                    x=change.index,
-                    y=change,
+                    x=plotted.index,
+                    y=plotted,
                     mode="lines",
-                    name=f"{name} 52W Change",
+                    name=trace_name,
                     yaxis="y2",
                     line={"color": color, "width": 1.8},
-                    hovertemplate="Date: %{x|%Y-%m-%d}<br>52W change: %{y:.2f}%<extra></extra>",
+                    hovertemplate=hovertemplate,
                 )
             )
         except Exception:
@@ -2700,16 +2719,23 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
     fig.update_layout(
         xaxis={"title": ""},
         yaxis={"title": "M2 trend gap, percentage points"},
-        yaxis2={"title": "Asset 52W change, %", "overlaying": "y", "side": "right", "showgrid": False},
+        yaxis2={
+            "title": "Asset price (log scale)" if log_price_view else "Asset 52W change, %",
+            "type": "log" if log_price_view else "linear",
+            "overlaying": "y",
+            "side": "right",
+            "showgrid": False,
+        },
         legend={"orientation": "h", "yanchor": "top", "y": -0.18, "x": 0},
         margin={"l": 56, "r": 58, "t": 18, "b": 75},
     )
     st.plotly_chart(
-        _style_liquidity_plotly(fig, 390, "Global M2 Trend Gap vs 52W Asset Returns"),
+        _style_liquidity_plotly(fig, 390, chart_title),
         use_container_width=True,
         config=LIQUIDITY_PLOTLY_CONFIG,
     )
-    st.caption("M2 primary axis: current 52W change minus its 200-week SMA. Secondary axis: 52-week price changes.")
+    secondary_description = "logarithmic asset prices" if log_price_view else "52-week price changes"
+    st.caption(f"M2 primary axis: current 52W change minus its 200-week SMA. Secondary axis: {secondary_description}.")
     if unavailable:
         st.caption("Data unavailable for: " + ", ".join(unavailable))
 
