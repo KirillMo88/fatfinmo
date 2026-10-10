@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from time_ranges import TIME_RANGE_YEARS
 
 from .aisc import AISC_ZONE_THRESHOLDS, aisc_valuation_state, median_gold_aisc_ratio
 from .models import GoldAISCValuationSnapshot
@@ -37,7 +38,7 @@ def aisc_range_window(
 ) -> tuple[pd.Timestamp, pd.Timestamp] | None:
     if frame.empty or selected_range == "MAX":
         return None
-    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    years = TIME_RANGE_YEARS.get(selected_range)
     if years is None:
         return None
     dates = pd.to_datetime(frame["date"], errors="coerce")

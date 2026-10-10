@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS
 
 from gold_regime import build_gold_regime_snapshot, gold_regime_config
 from gold_regime.macro2_view import render_gold_macro2_price_chart, render_gold_structural_macro2, render_macro2_narrative
@@ -123,8 +124,8 @@ def render_gold_regime_tab(table_df: pd.DataFrame, fred_api_key: str | None = No
     render_summary(current, snapshot, model_current_regime)
     selected_range = st.radio(
         "Time range",
-        ["1Y", "3Y", "5Y", "10Y", "MAX"],
-        index=2,
+        STANDARD_TIME_RANGE_OPTIONS,
+        index=STANDARD_TIME_RANGE_OPTIONS.index("5Y"),
         horizontal=True,
         key="gold_charts_range",
     )
@@ -680,7 +681,7 @@ def build_gold_liquidity_cycle_comparison_fig(comparison: pd.DataFrame, selected
         return style_gold_plotly(go.Figure(), 310, "Global M2 Liquidity Cycle vs Short Gold Cycle")
 
     end_date = frame["Date"].max()
-    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    years = TIME_RANGE_YEARS.get(selected_range)
     start_date = end_date - pd.DateOffset(years=years) if years else frame["Date"].min()
     visible = frame.loc[frame["Date"].between(start_date, end_date)].copy()
 
@@ -732,7 +733,7 @@ def build_gold_multi_layer_cycle_fig(history: pd.DataFrame, selected_range: str)
     risk_frame = add_combined_cycle_risk_regime(risk_frame)
 
     end_date = frame["Date"].max()
-    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    years = TIME_RANGE_YEARS.get(selected_range)
     start_date = end_date - pd.DateOffset(years=years) if years else frame["Date"].min()
     visible = frame.loc[frame["Date"].between(start_date, end_date)].copy()
     if visible.empty:
@@ -1151,7 +1152,7 @@ def filter_gold_history_range(history: pd.DataFrame, selected_range: str) -> pd.
     d = prepare_weekly_gold_chart_data(history)
     if d.empty or selected_range == "MAX":
         return d
-    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    years = TIME_RANGE_YEARS.get(selected_range)
     if not years:
         return d
     end_date = d["date"].max()

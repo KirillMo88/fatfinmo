@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS, normalize_time_range_choice
 
 from financial_fragility import MODEL_VERSION, FinancialFragilitySnapshot, _number, build_financial_fragility_snapshot
 from global_dashboard_tab import _load_snapshots
@@ -123,7 +124,7 @@ def _filter(history: pd.DataFrame, selected: str) -> pd.DataFrame:
     if history.empty:
         return history
     end = pd.to_datetime(history["Date"]).max()
-    years = {"1Y": 1, "5Y": 5, "10Y": 10}.get(selected)
+    years = TIME_RANGE_YEARS.get(selected)
     if years is None:
         return history
     return history.loc[pd.to_datetime(history["Date"]).ge(end - pd.DateOffset(years=years))].copy()
@@ -304,7 +305,17 @@ def render_financial_fragility_tab(api_key: str | None, liquidity_regime: pd.Dat
     st.markdown(f"<div class='ff-card ff-wide' style='border-top-color:{_state_color(current.get('GeneralRegime'))}'><div class='ff-title'>GENERAL REGIME</div><div class='ff-score' style='text-align:left;margin-top:5px'><span>{html.escape(str(current.get('GeneralRegime', 'UNAVAILABLE')))}</span></div><div class='ff-details'><div class='ff-row'><span>Risk Drivers</span><strong>{html.escape(str(current.get('PrimaryDrivers', 'UNAVAILABLE')))}</strong></div><div class='ff-row'><span>Stabilizers</span><strong>{html.escape(str(current.get('PrimaryStabilizers', 'UNAVAILABLE')))}</strong></div><div class='ff-row'><span>Data Coverage</span><strong>{_fmt(current.get('DataCoverage'), 1)}%</strong></div></div></div>", unsafe_allow_html=True)
 
     st.markdown("### SPX LOG AND REGIME STATES")
-    range_choice = st.radio("Financial Fragility history range", ["1Y", "5Y", "10Y", "FULL"], index=1, horizontal=True, key="financial_fragility_range")
+    if "financial_fragility_range" in st.session_state:
+        st.session_state["financial_fragility_range"] = normalize_time_range_choice(
+            st.session_state["financial_fragility_range"], "5Y"
+        )
+    range_choice = st.radio(
+        "Financial Fragility history range",
+        STANDARD_TIME_RANGE_OPTIONS,
+        index=STANDARD_TIME_RANGE_OPTIONS.index("5Y"),
+        horizontal=True,
+        key="financial_fragility_range",
+    )
     st.plotly_chart(build_historical_figure(_filter(snapshot.history, range_choice)), use_container_width=True, config=PLOT_CONFIG)
     st.markdown("### DATA QUALITY")
     st.dataframe(snapshot.data_quality, use_container_width=True, hide_index=True)

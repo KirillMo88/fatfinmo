@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS
 from plotly.subplots import make_subplots
 
 from funding_conditions import FundingSnapshot, STATES, read_snapshot, refresh_snapshot
@@ -192,9 +193,9 @@ def render_funding_conditions_tab(api_key: str | None) -> None:
         f"Reserve vulnerability watch: **{'Yes' if latest['ReserveVulnerabilityWatch'] else 'No'}**  |  "
         f"Primary driver: **{latest['PrimaryDriver']}**"
     )
-    selected_range = st.radio("Time range", ["1Y", "3Y", "5Y", "MAX"], index=2,
+    selected_range = st.radio("Time range", STANDARD_TIME_RANGE_OPTIONS, index=STANDARD_TIME_RANGE_OPTIONS.index("5Y"),
                               horizontal=True, key="funding_conditions_time_range")
-    years = {"1Y": 1, "3Y": 3, "5Y": 5}.get(selected_range)
+    years = TIME_RANGE_YEARS.get(selected_range)
     start = daily["Date"].max() - pd.DateOffset(years=years) if years else daily["Date"].min()
     weekly_view = weekly.loc[weekly["Date"].ge(start)]
     daily_view = daily.loc[daily["Date"].ge(start)]

@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS
 from plotly.subplots import make_subplots
 
 from treasury_fiscal_regime import (
@@ -680,9 +681,9 @@ def render_treasury_fiscal_regime_tab(api_key: str | None) -> None:
         if pd.notna(latest["FiscalObservationDate"]) and pd.notna(latest["FinancingObservationDate"])
         else "One or more lower-frequency sources are unavailable."
     )
-    selected = st.radio("Time range", ["1Y", "3Y", "5Y", "10Y", "MAX"], index=2,
+    selected = st.radio("Time range", STANDARD_TIME_RANGE_OPTIONS, index=STANDARD_TIME_RANGE_OPTIONS.index("5Y"),
                         horizontal=True, key="treasury_fiscal_range")
-    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected)
+    years = TIME_RANGE_YEARS.get(selected)
     start = weekly["Date"].max() - pd.DateOffset(years=years) if years else weekly["Date"].min()
     view = weekly.loc[weekly["Date"].ge(start)]
     fiscal_view = fiscal.loc[fiscal["Date"].ge(start)] if not fiscal.empty else fiscal

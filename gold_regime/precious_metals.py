@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from time_ranges import TIME_RANGE_YEARS
 
 
 YFINANCE_TICKERS = ("GLD", "GDX", "SIL", "SLV")
@@ -105,7 +106,7 @@ def build_indexed_chart_history(
     end = pd.to_datetime(range_end, errors="coerce") if range_end is not None else pd.NaT
     end = frame.index.max() if pd.isna(end) else pd.Timestamp(end).normalize()
     frame = frame.loc[frame.index <= end]
-    years = {"1Y": 1, "3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    years = TIME_RANGE_YEARS.get(selected_range)
     if years is not None:
         frame = frame.loc[frame.index >= end - pd.DateOffset(years=years)]
     indexed = pd.DataFrame(index=frame.index)

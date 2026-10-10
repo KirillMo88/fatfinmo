@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS
 from plotly.subplots import make_subplots
 
 from rates_financial_conditions import REGIMES, RatesSnapshot, read_snapshot, refresh_snapshot, validation_episodes
@@ -233,8 +234,14 @@ def render_rates_financial_conditions_tab(api_key: str | None) -> None:
         if explanation:
             st.markdown(f"**Curve 26W interpretation:** {explanation}")
 
-    selected_range = st.radio("Time range", ["3Y", "5Y", "10Y", "MAX"], index=2, horizontal=True, key="rates_fc_time_range")
-    years = {"3Y": 3, "5Y": 5, "10Y": 10}.get(selected_range)
+    selected_range = st.radio(
+        "Time range",
+        STANDARD_TIME_RANGE_OPTIONS,
+        index=STANDARD_TIME_RANGE_OPTIONS.index("10Y"),
+        horizontal=True,
+        key="rates_fc_time_range",
+    )
+    years = TIME_RANGE_YEARS.get(selected_range)
     view = history.loc[history["Date"] >= history["Date"].max() - pd.DateOffset(years=years)] if years else history
     st.markdown("### Rates Pressure vs Financial Conditions Direction")
     st.plotly_chart(build_transmission_chart(view), use_container_width=True, config=CHART_CONFIG)

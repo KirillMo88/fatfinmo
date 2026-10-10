@@ -84,7 +84,7 @@ def test_btc_next_cycle_range_runs_until_next_accumulation_pre_halving_phase():
     latest = history.loc[~history["Projected"], "Date"].max()
     start, end, include_forecast = btc_cycle_time_range(history, "Next Cycle")
 
-    assert BTC_RANGE_OPTIONS == ("1Y", "3Y", "5Y", "10Y", "MAX", "Next Cycle")
+    assert BTC_RANGE_OPTIONS == ("1Y", "3Y", "5Y", "10Y", "20Y", "MAX", "Next Cycle")
     assert start == latest - pd.DateOffset(months=12)
     assert end == next_accumulation_pre_halving_start(latest)
     assert halving_cycle_position(end)["phase"] == "ACCUMULATION_PRE_HALVING"

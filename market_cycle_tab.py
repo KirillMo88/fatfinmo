@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from time_ranges import STANDARD_TIME_RANGE_OPTIONS, TIME_RANGE_YEARS, normalize_time_range_choice
 from plotly.subplots import make_subplots
 from ta.momentum import RSIIndicator
 
@@ -36,6 +37,7 @@ from spx_seasonality import (
 from spy_macro_outlook import (
     SPY_MACRO_HORIZONS,
     SPY_MACRO_RANGE_OPTIONS,
+    SPY_MACRO_RANGE_YEARS,
     SPYMacroOutlook,
     build_model_details,
     build_spy_macro_outlook,
@@ -54,8 +56,8 @@ SPY_MACRO_CACHE_SCHEMA = "spy-macro-outlook-v1"
 MARKET_CYCLE_PERSISTENT_CACHE_DIR = Path(
     os.getenv("MARKET_CYCLE_CACHE_DIR", Path(__file__).resolve().parent / "persistent" / "snapshots")
 )
-MARKET_CYCLE_RANGE_OPTIONS = ["1Y", "5Y", "10Y", "20Y", "FULL"]
-MARKET_CYCLE_RANGE_YEARS = {"1Y": 1, "5Y": 5, "10Y": 10, "20Y": 20}
+MARKET_CYCLE_RANGE_OPTIONS = STANDARD_TIME_RANGE_OPTIONS
+MARKET_CYCLE_RANGE_YEARS = TIME_RANGE_YEARS
 
 PHASE_COLORS = {
     "EARLY STRUCTURAL EXPANSION": "#38bdf8",
@@ -249,7 +251,13 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
     render_outlook_table(snapshot.outlook)
 
     normalize_range_state("market_cycle_range")
-    market_cycle_range = st.radio("Market Cycle range", MARKET_CYCLE_RANGE_OPTIONS, index=3, horizontal=True, key="market_cycle_range")
+    market_cycle_range = st.radio(
+        "Market Cycle range",
+        MARKET_CYCLE_RANGE_OPTIONS,
+        index=MARKET_CYCLE_RANGE_OPTIONS.index("20Y"),
+        horizontal=True,
+        key="market_cycle_range",
+    )
     range_start, range_end = range_domain(history, market_cycle_range)
     display_history = filter_range_domain(history, range_start, range_end)
 
@@ -393,8 +401,8 @@ def render_market_cycle_multiples(refresh_nonce: int = 0) -> None:
     st.markdown("### Multiples")
     selection = st.radio(
         "Multiples time range",
-        ["10Y", "20Y", "MAX"],
-        index=0,
+        STANDARD_TIME_RANGE_OPTIONS,
+        index=STANDARD_TIME_RANGE_OPTIONS.index("10Y"),
         horizontal=True,
         key="market_cycle_multiples_range",
     )
@@ -3214,8 +3222,7 @@ def range_years(selection: str) -> int | None:
 
 
 def normalize_range_state(key: str) -> None:
-    if st.session_state.get(key) not in MARKET_CYCLE_RANGE_OPTIONS:
-        st.session_state[key] = "20Y"
+    st.session_state[key] = normalize_time_range_choice(st.session_state.get(key), "20Y")
 
 
 def monthly_context_frame(history: pd.DataFrame) -> pd.DataFrame:
@@ -3315,9 +3322,7 @@ def _spy_macro_value(value: Any, suffix: str = "") -> str:
 def _spy_macro_range_domain(history: pd.DataFrame, selection: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     dates = pd.to_datetime(history["Date"], errors="coerce").dropna()
     end = dates.max()
-    if selection == "2015 -> Latest":
-        return max(dates.min(), pd.Timestamp("2015-01-01")), end
-    years = {"1Y": 1, "5Y": 5, "10Y": 10, "20Y": 20}.get(selection)
+    years = SPY_MACRO_RANGE_YEARS.get(selection)
     return (dates.min() if years is None else end - pd.DateOffset(years=years)), end
 
 
@@ -3325,6 +3330,13 @@ def _spy_macro_filtered_history(history: pd.DataFrame, selection: str) -> pd.Dat
     start, end = _spy_macro_range_domain(history, selection)
     dates = pd.to_datetime(history["Date"], errors="coerce")
     return history.loc[dates.between(start, end)].copy()
+
+
+def _normalize_spy_macro_range_state() -> None:
+    if "spy_macro_range" in st.session_state:
+        st.session_state["spy_macro_range"] = normalize_time_range_choice(
+            st.session_state["spy_macro_range"], "20Y"
+        )
 
 
 def _spy_macro_narrative(current: dict[str, Any]) -> str:
@@ -3405,7 +3417,14 @@ def render_spy_macro_outlook_legacy(outlook: SPYMacroOutlook, market_cycle_histo
     st.markdown("#### SPY Macro Outlook Narrative")
     st.markdown(f"<div style='color:#cbd5e1;line-height:1.45;'>{html.escape(_spy_macro_narrative(current))}</div>", unsafe_allow_html=True)
 
-    range_selection = st.radio("SPY Macro history range", SPY_MACRO_RANGE_OPTIONS, index=4, horizontal=True, key="spy_macro_range")
+    _normalize_spy_macro_range_state()
+    range_selection = st.radio(
+        "SPY Macro history range",
+        SPY_MACRO_RANGE_OPTIONS,
+        index=SPY_MACRO_RANGE_OPTIONS.index("20Y"),
+        horizontal=True,
+        key="spy_macro_range",
+    )
     historical = _spy_macro_filtered_history(outlook.history, range_selection)
     show_windows = st.checkbox("Show drawdown windows", value=False, key="spy_macro_drawdown_windows")
     st.plotly_chart(build_spy_macro_history_fig(historical, horizon, show_windows), use_container_width=True, config=MARKET_CYCLE_PLOTLY_CONFIG)
@@ -3553,7 +3572,14 @@ def render_spy_macro_outlook(outlook: SPYMacroOutlook, market_cycle_history: pd.
     )
 
     horizon = st.radio("History chart horizon", list(SPY_MACRO_HORIZONS), index=0, horizontal=True, key="spy_macro_horizon")
-    range_selection = st.radio("SPY Macro history range", SPY_MACRO_RANGE_OPTIONS, index=4, horizontal=True, key="spy_macro_range")
+    _normalize_spy_macro_range_state()
+    range_selection = st.radio(
+        "SPY Macro history range",
+        SPY_MACRO_RANGE_OPTIONS,
+        index=SPY_MACRO_RANGE_OPTIONS.index("20Y"),
+        horizontal=True,
+        key="spy_macro_range",
+    )
     historical = _spy_macro_filtered_history(outlook.history, range_selection)
     show_windows = st.checkbox("Show drawdown windows", value=False, key="spy_macro_drawdown_windows")
     st.plotly_chart(build_spy_macro_history_fig(historical, horizon, show_windows), use_container_width=True, config=MARKET_CYCLE_PLOTLY_CONFIG)
