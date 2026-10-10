@@ -2686,9 +2686,9 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
 
     assets = {
         "SPX": ("Yahoo", "^GSPC", "#38bdf8"),
-        "NDX": ("Yahoo", "^NDX", "#a78bfa"),
-        "GOLD": ("TradingView", "XAUUSD", "#facc15"),
-        "BTC": ("TradingView", "BTCUSD", "#f97316"),
+        "NDX": ("Yahoo", "^NDX", "#38bdf8"),
+        "GOLD": ("TradingView", "XAUUSD", "#38bdf8"),
+        "BTC": ("TradingView", "BTCUSD", "#38bdf8"),
     }
     source, symbol, asset_color = assets[selected_asset]
     try:
@@ -6940,6 +6940,10 @@ def main():
             pass
 
     global_liquidity_history = pd.DataFrame()
+    monthly_liquidity = pd.DataFrame()
+    liquidity_forecast_signal = None
+    near_term_treasury_refinancing = None
+    current_cycle_maturity = None
     try:
         _, monthly_liquidity, weekly_liquidity = read_global_liquidity()
         liquidity_regime = _build_global_liquidity_regime_frame(
@@ -6947,6 +6951,37 @@ def main():
             _liquidity_prepare_dates(weekly_liquidity),
         )
         global_liquidity_history = liquidity_regime[["date", "global_liquidity_score"]]
+    except Exception:
+        pass
+
+    try:
+        global_m2_cycle_history = build_global_m2_cycle_history(monthly_liquidity)
+        if "CurrentCycleMaturityPct" in global_m2_cycle_history.columns:
+            maturity_values = pd.to_numeric(
+                global_m2_cycle_history["CurrentCycleMaturityPct"], errors="coerce"
+            ).dropna()
+            if not maturity_values.empty:
+                current_cycle_maturity = float(maturity_values.iloc[-1])
+    except Exception:
+        pass
+
+    try:
+        forecast_frame, _ = read_forecast_snapshot()
+        if not forecast_frame.empty and "LiquidityForwardSignal" in forecast_frame.columns:
+            forecast_signals = forecast_frame["LiquidityForwardSignal"].dropna()
+            if not forecast_signals.empty:
+                liquidity_forecast_signal = forecast_signals.iloc[-1]
+    except Exception:
+        pass
+
+    try:
+        treasury_snapshot = read_treasury_funding_policy_snapshot()
+        if "near_term_refinancing_pressure" in treasury_snapshot.monthly.columns:
+            refinancing_values = pd.to_numeric(
+                treasury_snapshot.monthly["near_term_refinancing_pressure"], errors="coerce"
+            ).dropna()
+            if not refinancing_values.empty:
+                near_term_treasury_refinancing = float(refinancing_values.iloc[-1])
     except Exception:
         pass
 
@@ -6964,6 +6999,9 @@ def main():
         inflation_history,
         inflation_state,
         inflation_direction_score,
+        liquidity_forecast_signal,
+        near_term_treasury_refinancing,
+        current_cycle_maturity,
     )
     render_top_analytics(top_analytics_slots, top_analytics)
     graph_ordered_df = filtered_df.copy()
