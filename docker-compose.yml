@@ -176,6 +176,8 @@ services:
     restart: unless-stopped
     depends_on:
       - caddy
+    environment:
+      TUNNEL_TRANSPORT_PROTOCOL: http2
     command:
       - tunnel
       - --no-autoupdate
