@@ -6940,8 +6940,10 @@ def main():
             pass
 
     global_liquidity_history = pd.DataFrame()
+    monthly_liquidity = pd.DataFrame()
     liquidity_forecast_signal = None
     near_term_treasury_refinancing = None
+    current_cycle_maturity = None
     try:
         _, monthly_liquidity, weekly_liquidity = read_global_liquidity()
         liquidity_regime = _build_global_liquidity_regime_frame(
@@ -6949,6 +6951,17 @@ def main():
             _liquidity_prepare_dates(weekly_liquidity),
         )
         global_liquidity_history = liquidity_regime[["date", "global_liquidity_score"]]
+    except Exception:
+        pass
+
+    try:
+        global_m2_cycle_history = build_global_m2_cycle_history(monthly_liquidity)
+        if "CurrentCycleMaturityPct" in global_m2_cycle_history.columns:
+            maturity_values = pd.to_numeric(
+                global_m2_cycle_history["CurrentCycleMaturityPct"], errors="coerce"
+            ).dropna()
+            if not maturity_values.empty:
+                current_cycle_maturity = float(maturity_values.iloc[-1])
     except Exception:
         pass
 
@@ -6988,6 +7001,7 @@ def main():
         inflation_direction_score,
         liquidity_forecast_signal,
         near_term_treasury_refinancing,
+        current_cycle_maturity,
     )
     render_top_analytics(top_analytics_slots, top_analytics)
     graph_ordered_df = filtered_df.copy()

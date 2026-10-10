@@ -18,6 +18,7 @@ def build_top_analytics(
     inflation_direction_score: Any = None,
     liquidity_forecast_signal: Any = None,
     near_term_treasury_refinancing: Any = None,
+    current_cycle_maturity: Any = None,
 ) -> list[tuple[str, str, list[str]]]:
     """Build the global metrics displayed above the app's view selector."""
     if isinstance(current_risk, dict):
@@ -51,6 +52,7 @@ def build_top_analytics(
                 f"ROC 6M {_format_percent(roc_6m)}",
                 f"Liquidity Forecast Signal: {_format_text(liquidity_forecast_signal)}",
                 f"Near-Term Treasury Refinancing: {_format_score(near_term_treasury_refinancing)}",
+                f"Current Cycle Maturity: {_format_maturity(current_cycle_maturity)}",
             ],
         ),
         (
@@ -211,6 +213,14 @@ def _format_score(value: Any) -> str:
     except (TypeError, ValueError):
         return "N/A"
     return f"{score:.1f} / 100" if np.isfinite(score) else "N/A"
+
+
+def _format_maturity(value: Any) -> str:
+    try:
+        maturity = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"{maturity:.0f}%" if np.isfinite(maturity) else "N/A"
 
 
 def _format_percent(value: float | None) -> str:
