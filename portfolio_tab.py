@@ -13,6 +13,14 @@ from btc_cycle import BTC_ACTUAL_HALVINGS, BTC_PROJECTED_HALVING
 from btc_data import load_btc_weekly_price
 from finance_core import download_completed_ohlcv
 from gold_regime.service import load_gold_mcp_weekly
+from gold_regime.trading_system_view import current_model_regime
+from gold_regime_tab import load_gold_silver_trading_data
+from market_cycle_tab import load_market_cycle_snapshot_cached
+from portfolio_positioning import (
+    build_btc_positioning_history,
+    build_spx_positioning_history,
+    positioning_snapshot,
+)
 from portfolio_prioritization import (
     DEFAULT_CONFIG,
     build_portfolio_snapshot,
@@ -64,6 +72,31 @@ def load_portfolio_model() -> dict[str, Any]:
     return snapshot
 
 
+@st.cache_data(show_spinner=False, ttl=21600)
+def load_portfolio_positioning_model(btc_gold_history: pd.DataFrame) -> dict[str, Any]:
+    diagnostics: dict[str, str] = {}
+    spx_history = pd.DataFrame()
+    gold_regime = "DATA_INCOMPLETE"
+    try:
+        market_cycle = load_market_cycle_snapshot_cached()
+        spx_history = build_spx_positioning_history(market_cycle.daily, market_cycle.correction_daily)
+        diagnostics["spx_current_risk"] = str(market_cycle.current.get("CurrentRiskSignalClass", "N/A"))
+        diagnostics["spx_correction_status"] = str(market_cycle.current.get("CorrectionStatus", "N/A"))
+    except Exception as exc:
+        diagnostics["spx_error"] = str(exc)
+    try:
+        gold_regime = current_model_regime(load_gold_silver_trading_data())
+    except Exception as exc:
+        diagnostics["gold_error"] = str(exc)
+    btc_history = build_btc_positioning_history(btc_gold_history)
+    return {
+        "current": positioning_snapshot(spx_history, gold_regime, btc_history),
+        "spx_history": spx_history,
+        "btc_history": btc_history,
+        "diagnostics": diagnostics,
+    }
+
+
 def _number(value: Any) -> float:
     try:
         result = float(value)
@@ -110,7 +143,7 @@ def _card(title: str, rows: list[tuple[str, str]], evidence: list[tuple[str, boo
     met = sum(bool(item[1]) for item in evidence)
     st.markdown(
         f"""
-<div style="border:1px solid #334155;border-radius:10px;padding:1rem;background:#0f141d;height:100%">
+<div style="border:1px solid #334155;border-radius:10px;padding:1rem;background:#0f141d;height:35rem;overflow-y:auto;box-sizing:border-box">
   <div style="font-size:1.05rem;font-weight:900;margin-bottom:0.7rem">{html.escape(title)}</div>
   {detail}
   <div style="font-size:0.72rem;color:#7dd3fc;font-weight:800;text-transform:uppercase;margin-top:0.8rem">Structural Evidence</div>
@@ -121,6 +154,32 @@ def _card(title: str, rows: list[tuple[str, str]], evidence: list[tuple[str, boo
 """,
         unsafe_allow_html=True,
     )
+
+
+def _positioning_card(title: str, position_label: str, rows: list[tuple[str, str]], color: str) -> None:
+    detail = "".join(
+        f"<div style='display:grid;grid-template-columns:1fr auto;gap:0.5rem;margin:0.22rem 0'>"
+        f"<span style='color:#94a3b8'>{html.escape(label)}</span><b style='text-align:right'>{html.escape(value)}</b></div>"
+        for label, value in rows
+    )
+    st.markdown(
+        f"""
+<div style="border:1px solid #334155;border-radius:10px;padding:1rem;background:#0f141d;height:100%">
+  <div style="font-size:0.72rem;color:#94a3b8;font-weight:900;letter-spacing:0.08em">{html.escape(title)}</div>
+  <div style="font-size:1.8rem;color:{color};font-weight:950;margin:0.25rem 0 0.75rem">{html.escape(position_label)}</div>
+  {detail}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _position_label(row: dict[str, Any], instrument: bool = False) -> str:
+    value = _number(row.get("position_pct"))
+    if not np.isfinite(value):
+        return "N/A"
+    suffix = f" {row.get('instrument')}" if instrument and value > 0 and row.get("instrument") else ""
+    return f"{value:.0f}%{suffix}"
 
 
 def _range_frame(frame: pd.DataFrame, choice: str) -> pd.DataFrame:
@@ -185,7 +244,7 @@ def _spx_gold_chart(history: pd.DataFrame, choice: str) -> go.Figure:
     for column, name, color, dash, width in specs:
         fig.add_trace(go.Scatter(x=data["Date"], y=data[column], name=name, mode="lines", line={"color": color, "width": width, "dash": dash or "solid"}))
     switches = data.loc[data["trading_switch"]]
-    fig.add_trace(go.Scatter(x=switches["Date"], y=switches["close"], name="Trading Switch", mode="markers", marker={"symbol": "diamond", "size": 10, "color": "#ffffff"}))
+    fig.add_trace(go.Scatter(x=switches["Date"], y=switches["close"], name="Trading Switch", mode="markers", marker={"symbol": "diamond", "size": 10, "color": "#38bdf8"}))
     for direction, color in (("SPX", "#38bdf8"), ("Gold", "#facc15")):
         initial = data.loc[data[f"{direction}_initial_event"]]
         sustained = data.loc[data[f"{direction}_sustained_event"]]
@@ -206,12 +265,13 @@ def _btc_gold_chart(history: pd.DataFrame, choice: str) -> go.Figure:
         ("channel_upper", f"{DEFAULT_CONFIG.btc_sell_percentile:.1f}% Channel", "#fb7185", "dash"),
         ("sma50m", "SMA50M", "#60a5fa", "dot"),
     ):
-        fig.add_trace(go.Scatter(x=data["Date"], y=data[column], name=name, mode="lines", line={"color": color, "dash": dash, "width": 1.5}), row=1, col=1)
+        visible = "legendonly" if column in {"channel_lower", "channel_upper"} else True
+        fig.add_trace(go.Scatter(x=data["Date"], y=data[column], name=name, mode="lines", line={"color": color, "dash": dash, "width": 1.5}, visible=visible), row=1, col=1)
     switches = data.loc[data["trading_switch"]]
-    fig.add_trace(go.Scatter(x=switches["Date"], y=switches["ratio"], name="Trading Switch", mode="markers", marker={"symbol": "diamond", "size": 10, "color": "#ffffff"}), row=1, col=1)
+    fig.add_trace(go.Scatter(x=switches["Date"], y=switches["ratio"], name="Trading Switch", mode="markers", marker={"symbol": "diamond", "size": 10, "color": "#38bdf8"}), row=1, col=1)
     for direction, color in (("BTC", "#fb923c"), ("Gold", "#facc15")):
         sustained = data.loc[data[f"{direction}_sustained_event"]]
-        fig.add_trace(go.Scatter(x=sustained["Date"], y=sustained["ratio"], name=f"{direction} Sustained", mode="markers", marker={"symbol": "star", "size": 10, "color": color}), row=1, col=1)
+        fig.add_trace(go.Scatter(x=sustained["Date"], y=sustained["ratio"], name=f"{direction} Sustained", mode="markers", marker={"symbol": "star", "size": 10, "color": color}, visible="legendonly"), row=1, col=1)
     fig.add_trace(go.Scatter(x=data["Date"], y=data["channel_percentile"], name="Channel Percentile", mode="lines", line={"color": "#38bdf8"}), row=2, col=1)
     for level, color, label in (
         (DEFAULT_CONFIG.btc_buy_percentile, "#4ade80", f"Buy BTC {DEFAULT_CONFIG.btc_buy_percentile:.1f}%"),
@@ -293,6 +353,55 @@ def render_portfolio_tab() -> None:
         unsafe_allow_html=True,
     )
 
+    try:
+        positioning = load_portfolio_positioning_model(snapshot["btc_gold"])
+    except Exception as exc:
+        positioning = {"current": {"SPX": {}, "GOLD": {}, "BTC": {}}, "diagnostics": {"load_error": str(exc)}}
+    positioning_current = positioning.get("current", {})
+    positioning_diagnostics = positioning.get("diagnostics", {})
+    spx_positioning = positioning_current.get("SPX", {})
+    gold_positioning_current = positioning_current.get("GOLD", {})
+    btc_positioning = positioning_current.get("BTC", {})
+
+    st.markdown("### Positioning")
+    st.caption("Independent exposure state machines; these values do not change the Asset Priority Ranking.")
+    position_cols = st.columns(3)
+    with position_cols[0]:
+        _positioning_card(
+            "SPX",
+            _position_label(spx_positioning),
+            [
+                ("Current Risk", str(positioning_diagnostics.get("spx_current_risk", "N/A"))),
+                ("Correction Status", str(positioning_diagnostics.get("spx_correction_status", "N/A"))),
+                ("Last Trigger", str(spx_positioning.get("last_trigger", "N/A"))),
+                ("Signal Date", _date(spx_positioning.get("last_signal_date"))),
+            ],
+            "#38bdf8",
+        )
+    with position_cols[1]:
+        _positioning_card(
+            "GOLD",
+            _position_label(gold_positioning_current, instrument=True),
+            [
+                ("Gold / Silver Regime", str(gold_positioning_current.get("regime", "DATA_INCOMPLETE"))),
+                ("Selected Instrument", str(gold_positioning_current.get("instrument", "N/A"))),
+                ("Rule", "Cash = 0%; metal = 100%"),
+            ],
+            "#facc15",
+        )
+    with position_cols[2]:
+        _positioning_card(
+            "BTC",
+            _position_label(btc_positioning),
+            [
+                ("BTC / Gold", str(btc_positioning.get("btc_gold_position", "N/A"))),
+                ("Halving Phase", str(btc_positioning.get("halving_phase", "DATA_INCOMPLETE"))),
+                ("Last Trigger", str(btc_positioning.get("last_trigger", "N/A"))),
+                ("Signal Date", _date(btc_positioning.get("last_signal_date"))),
+            ],
+            "#fb923c",
+        )
+
     st.markdown("### Structural Confirmation")
     left, right = st.columns(2)
     spx_direction = str(spx.get("position") or "SPX")
@@ -362,3 +471,5 @@ def render_portfolio_tab() -> None:
         st.dataframe(reconciliation, use_container_width=True, hide_index=True)
         diagnostics = snapshot.get("diagnostics", {})
         st.json({key: _date(value) if key.endswith(("_start", "_end")) else value for key, value in diagnostics.items()})
+        st.markdown("**Positioning diagnostics**")
+        st.json(positioning_diagnostics)
