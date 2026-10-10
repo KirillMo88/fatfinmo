@@ -6940,6 +6940,8 @@ def main():
             pass
 
     global_liquidity_history = pd.DataFrame()
+    liquidity_forecast_signal = None
+    near_term_treasury_refinancing = None
     try:
         _, monthly_liquidity, weekly_liquidity = read_global_liquidity()
         liquidity_regime = _build_global_liquidity_regime_frame(
@@ -6947,6 +6949,26 @@ def main():
             _liquidity_prepare_dates(weekly_liquidity),
         )
         global_liquidity_history = liquidity_regime[["date", "global_liquidity_score"]]
+    except Exception:
+        pass
+
+    try:
+        forecast_frame, _ = read_forecast_snapshot()
+        if not forecast_frame.empty and "LiquidityForwardSignal" in forecast_frame.columns:
+            forecast_signals = forecast_frame["LiquidityForwardSignal"].dropna()
+            if not forecast_signals.empty:
+                liquidity_forecast_signal = forecast_signals.iloc[-1]
+    except Exception:
+        pass
+
+    try:
+        treasury_snapshot = read_treasury_funding_policy_snapshot()
+        if "near_term_refinancing_pressure" in treasury_snapshot.monthly.columns:
+            refinancing_values = pd.to_numeric(
+                treasury_snapshot.monthly["near_term_refinancing_pressure"], errors="coerce"
+            ).dropna()
+            if not refinancing_values.empty:
+                near_term_treasury_refinancing = float(refinancing_values.iloc[-1])
     except Exception:
         pass
 
@@ -6964,6 +6986,8 @@ def main():
         inflation_history,
         inflation_state,
         inflation_direction_score,
+        liquidity_forecast_signal,
+        near_term_treasury_refinancing,
     )
     render_top_analytics(top_analytics_slots, top_analytics)
     graph_ordered_df = filtered_df.copy()

@@ -26,7 +26,16 @@ def test_top_analytics_uses_requested_order_and_source_metrics():
     )
 
     metrics = build_top_analytics(
-        "HIGH RISK", liquidity, vix, move, funding, inflation, "RISING", -0.06
+        "HIGH RISK",
+        liquidity,
+        vix,
+        move,
+        funding,
+        inflation,
+        "RISING",
+        -0.06,
+        "POSITIVE",
+        54.0,
     )
 
     assert [title for title, _, _ in metrics] == [
@@ -42,6 +51,8 @@ def test_top_analytics_uses_requested_order_and_source_metrics():
     assert metrics[1][2][0].startswith("ROC 1M +")
     assert metrics[1][2][1].startswith("ROC 3M +")
     assert metrics[1][2][2].startswith("ROC 6M +")
+    assert metrics[1][2][3] == "Liquidity Forecast Signal: POSITIVE"
+    assert metrics[1][2][4] == "Near-Term Treasury Refinancing: 54.0 / 100"
     assert metrics[2][1] == "30.00" and metrics[2][2][2] == "5Y percentile 100%"
     assert metrics[2][2][0].startswith("1W change +")
     assert metrics[3][1] == "110.00" and metrics[3][2][1].startswith("4W change +")
@@ -74,6 +85,10 @@ def test_inflation_card_reports_na_for_missing_history():
             "WTI N/A · 1M N/A · 3M N/A · 6M N/A",
         ],
     )
+    assert metrics[1][2][-2:] == [
+        "Liquidity Forecast Signal: N/A",
+        "Near-Term Treasury Refinancing: N/A",
+    ]
 
 
 def test_top_analytics_reports_na_when_five_year_history_is_incomplete():
