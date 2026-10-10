@@ -164,7 +164,7 @@ def _positioning_card(title: str, position_label: str, rows: list[tuple[str, str
     )
     st.markdown(
         f"""
-<div style="border:1px solid #334155;border-radius:10px;padding:1rem;background:#0f141d;height:100%">
+<div style="border:1px solid #334155;border-radius:10px;padding:1rem;background:#0f141d;height:13rem;overflow-y:auto;box-sizing:border-box">
   <div style="font-size:0.72rem;color:#94a3b8;font-weight:900;letter-spacing:0.08em">{html.escape(title)}</div>
   <div style="font-size:1.8rem;color:{color};font-weight:950;margin:0.25rem 0 0.75rem">{html.escape(position_label)}</div>
   {detail}

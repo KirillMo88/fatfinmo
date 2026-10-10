@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 
-BTC_ZERO_PHASES = {"BEAR_DELEVERAGING", "BOTTOMING_TRANSITION"}
+BTC_REDUCED_PHASES = {"BEAR_DELEVERAGING", "BOTTOMING_TRANSITION"}
 
 
 def _flag(value: Any) -> bool:
@@ -148,16 +148,11 @@ def build_btc_positioning_history(btc_gold_history: pd.DataFrame) -> pd.DataFram
             if entered_gold:
                 trigger = "BTC / GOLD: BTC → GOLD"
         elif engine == "BTC":
+            exposure = 75 if phase in BTC_REDUCED_PHASES else 100
             if entered_btc:
-                exposure = 75
                 trigger = "BTC / GOLD: GOLD → BTC"
-            elif phase_changed:
-                if phase in BTC_ZERO_PHASES:
-                    exposure = 0
-                    trigger = f"HALVING PHASE: {phase}"
-                else:
-                    exposure = 100
-                    trigger = f"HALVING PHASE: {phase}"
+            elif phase_changed and exposure != previous_exposure:
+                trigger = f"HALVING PHASE: {phase}"
         else:
             exposure = 0
 
