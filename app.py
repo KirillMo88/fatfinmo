@@ -6,6 +6,7 @@ import streamlit as st
 import yfinance as yf
 import altair as alt
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import time
 import os
 import json
@@ -2623,17 +2624,28 @@ def _load_liquidity_cycle_weekly_close(source: str, symbol: str) -> pd.DataFrame
 
 
 def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataFrame) -> None:
-    """Compare the long-run M2 growth gap with trailing one-year asset returns."""
-    st.markdown("### Global M2 Trend Gap vs 52W Asset Returns")
+    """Compare the long-run M2 growth gap with one asset, divergence, and drawdown."""
     if frame.empty or full_frame.empty:
-        st.info("No data for Global M2 Trend Gap vs 52W Asset Returns.")
+        st.info("No data for Global M2 Cycle and Asset Drawdown.")
         return
 
     visible_dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
     if visible_dates.empty:
-        st.info("No data for Global M2 Trend Gap vs 52W Asset Returns.")
+        st.info("No data for Global M2 Cycle and Asset Drawdown.")
         return
     start_date, end_date = visible_dates.min(), visible_dates.max()
+    st.markdown("### Global M2 Cycle and Asset Drawdown")
+    selected_asset = st.radio(
+        "Asset",
+        ["SPX", "NDX", "GOLD", "BTC"],
+        index=0,
+        horizontal=True,
+        key="global_m2_cycle_asset_selector",
+    )
+    chart_title = (
+        f"Global M2 Cycle, Log {selected_asset}, M2−{selected_asset} 52W Divergence, "
+        f"and {selected_asset} Drawdown"
+    )
 
     m2 = full_frame[["date", "global_m2_usd_bn"]].copy()
     m2["date"] = pd.to_datetime(m2["date"], errors="coerce")
@@ -2644,7 +2656,18 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
     m2_gap = (m2_change_52w - m2_change_52w.rolling(200, min_periods=200).mean()) * 100.0
     m2_gap = m2_gap.loc[(m2_gap.index >= start_date) & (m2_gap.index <= end_date)].dropna()
 
-    fig = go.Figure()
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.58, 0.22, 0.20],
+        specs=[
+            [{"secondary_y": True}],
+            [{"secondary_y": False}],
+            [{"secondary_y": False}],
+        ],
+    )
     if not m2_gap.empty:
         fig.add_trace(
             go.Scatter(
@@ -2654,64 +2677,145 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
                 name="Global M2: 52W Change − 200W SMA",
                 line={"color": "#f59e0b", "width": 2.4},
                 hovertemplate="Date: %{x|%Y-%m-%d}<br>M2 trend gap: %{y:.2f} pp<extra></extra>",
-            )
+            ),
+            row=1,
+            col=1,
+            secondary_y=False,
         )
 
-    assets = [
-        ("SPX", "Yahoo", "^GSPC", "#38bdf8"),
-        ("NDX", "Yahoo", "^NDX", "#a78bfa"),
-        ("BTCUSD", "TradingView", "BTCUSD", "#f97316"),
-        ("GOLD (XAUUSD)", "TradingView", "XAUUSD", "#facc15"),
-    ]
-    unavailable = []
-    for name, source, symbol, color in assets:
-        try:
-            close_frame = _load_liquidity_cycle_weekly_close(source, symbol)
-            if close_frame.empty:
-                unavailable.append(name)
-                continue
-            close = pd.Series(
-                pd.to_numeric(close_frame["close"], errors="coerce").to_numpy(),
-                index=pd.to_datetime(close_frame["date"], errors="coerce"),
-            ).dropna().sort_index()
-            change = (close.pct_change(52, fill_method=None) * 100.0).dropna()
-            change = change.loc[(change.index >= start_date) & (change.index <= end_date)]
-            if change.empty:
-                unavailable.append(name)
-                continue
-            fig.add_trace(
-                go.Scatter(
-                    x=change.index,
-                    y=change,
-                    mode="lines",
-                    name=f"{name} 52W Change",
-                    yaxis="y2",
-                    line={"color": color, "width": 1.8},
-                    hovertemplate="Date: %{x|%Y-%m-%d}<br>52W change: %{y:.2f}%<extra></extra>",
-                )
-            )
-        except Exception:
-            unavailable.append(name)
+    assets = {
+        "SPX": ("Yahoo", "^GSPC", "#38bdf8"),
+        "NDX": ("Yahoo", "^NDX", "#a78bfa"),
+        "GOLD": ("TradingView", "XAUUSD", "#facc15"),
+        "BTC": ("TradingView", "BTCUSD", "#f97316"),
+    }
+    source, symbol, asset_color = assets[selected_asset]
+    try:
+        close_frame = _load_liquidity_cycle_weekly_close(source, symbol)
+    except Exception:
+        close_frame = pd.DataFrame(columns=["date", "close"])
+    if close_frame.empty:
+        st.info(f"No weekly price data available for {selected_asset}.")
+        return
 
-    if not fig.data:
+    close = pd.Series(
+        pd.to_numeric(close_frame["close"], errors="coerce").to_numpy(),
+        index=pd.to_datetime(close_frame["date"], errors="coerce"),
+    )
+    close = close[~close.index.isna()].dropna().sort_index()
+    close = close[~close.index.duplicated(keep="last")]
+    positive_close = close.loc[close.gt(0)]
+    log_price = np.log(positive_close)
+    asset_change_52w = positive_close.pct_change(52, fill_method=None) * 100.0
+    drawdown = (positive_close / positive_close.cummax() - 1.0) * 100.0
+    log_price = log_price.loc[(log_price.index >= start_date) & (log_price.index <= end_date)]
+    drawdown = drawdown.loc[(drawdown.index >= start_date) & (drawdown.index <= end_date)]
+    if log_price.empty:
         st.info("No overlapping M2 and market observations for this time range.")
         return
-    fig.add_shape(type="line", xref="paper", x0=0, x1=1, yref="y", y0=0, y1=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
-    fig.update_layout(
-        xaxis={"title": ""},
-        yaxis={"title": "M2 trend gap, percentage points"},
-        yaxis2={"title": "Asset 52W change, %", "overlaying": "y", "side": "right", "showgrid": False},
-        legend={"orientation": "h", "yanchor": "top", "y": -0.18, "x": 0},
-        margin={"l": 56, "r": 58, "t": 18, "b": 75},
+
+    fig.add_trace(
+        go.Scatter(
+            x=log_price.index,
+            y=log_price,
+            mode="lines",
+            name=f"Log {selected_asset}",
+            line={"color": asset_color, "width": 2.0},
+            hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>Log {selected_asset}: %{{y:.3f}}<extra></extra>",
+        ),
+        row=1,
+        col=1,
+        secondary_y=True,
     )
+
+    m2_asset_change = pd.concat(
+        [
+            (m2_change_52w * 100.0).rename("m2_change_52w"),
+            asset_change_52w.rename("asset_change_52w"),
+        ],
+        axis=1,
+        join="inner",
+    ).dropna()
+    m2_asset_change["divergence"] = m2_asset_change["m2_change_52w"] - m2_asset_change["asset_change_52w"]
+    m2_asset_change = m2_asset_change.loc[
+        (m2_asset_change.index >= start_date) & (m2_asset_change.index <= end_date)
+    ]
+    if not m2_asset_change.empty:
+        divergence_colors = np.where(m2_asset_change["divergence"].ge(0), "#38bdf8", "#2563eb")
+        fig.add_trace(
+            go.Bar(
+                x=m2_asset_change.index,
+                y=m2_asset_change["divergence"],
+                name=f"Global M2 52W Change − {selected_asset} 52W Change",
+                marker={"color": divergence_colors, "line": {"width": 0}},
+                hovertemplate=(
+                    f"Date: %{{x|%Y-%m-%d}}<br>M2 − {selected_asset} 52W change: "
+                    "%{y:.2f} pp<extra></extra>"
+                ),
+            ),
+            row=2,
+            col=1,
+        )
+    fig.add_trace(
+        go.Bar(
+            x=drawdown.index,
+            y=drawdown,
+            name=f"{selected_asset} Drawdown",
+            marker={"color": "#ef4444", "line": {"width": 0}},
+            hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{selected_asset} drawdown: %{{y:.2f}}%<extra></extra>",
+        ),
+        row=3,
+        col=1,
+    )
+
+    # Highlight the deterioration leg of every negative M2 cycle: the first
+    # downward zero crossing through the lowest observation before recovery.
+    downward_crossings = m2_gap.index[(m2_gap.lt(0)) & (m2_gap.shift(1).ge(0))]
+    for crossing_date in downward_crossings:
+        cycle_tail = m2_gap.loc[crossing_date:]
+        recovery_dates = cycle_tail.index[(cycle_tail.ge(0)) & (cycle_tail.index > crossing_date)]
+        if len(recovery_dates):
+            cycle_tail = cycle_tail.loc[: recovery_dates[0]].iloc[:-1]
+        if cycle_tail.empty:
+            continue
+        minimum_date = cycle_tail.idxmin()
+        fig.add_vrect(
+            x0=crossing_date,
+            x1=minimum_date,
+            fillcolor="#ef4444",
+            opacity=0.16,
+            line_width=0,
+            row=1,
+            col=1,
+        )
+
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1}, row=1, col=1)
+    fig.add_hline(y=0, line={"color": "#94a3b8", "width": 1}, row=2, col=1)
+    fig.add_hline(y=0, line={"color": "#94a3b8", "width": 1}, row=3, col=1)
+    fig.update_layout(
+        legend={"orientation": "h", "yanchor": "top", "y": -0.12, "x": 0},
+        margin={"l": 56, "r": 58, "t": 18, "b": 92},
+        bargap=0,
+    )
+    fig.update_xaxes(title_text="", showticklabels=False, row=1, col=1)
+    fig.update_xaxes(title_text="", showticklabels=False, row=2, col=1)
+    fig.update_xaxes(title_text="Date", showticklabels=True, row=3, col=1)
+    fig.update_yaxes(title_text="M2 trend gap, pp", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text=f"Log {selected_asset}", showgrid=False, row=1, col=1, secondary_y=True)
+    fig.update_yaxes(title_text=f"M2 − {selected_asset} 52W, pp", row=2, col=1)
+    fig.update_yaxes(title_text="Drawdown, %", row=3, col=1)
     st.plotly_chart(
-        _style_liquidity_plotly(fig, 390, "Global M2 Trend Gap vs 52W Asset Returns"),
+        _style_liquidity_plotly(fig, 720, chart_title),
         use_container_width=True,
         config=LIQUIDITY_PLOTLY_CONFIG,
     )
-    st.caption("M2 primary axis: current 52W change minus its 200-week SMA. Secondary axis: 52-week price changes.")
-    if unavailable:
-        st.caption("Data unavailable for: " + ", ".join(unavailable))
+    st.caption(
+        "M2 primary axis: current 52W change minus its 200-week SMA. "
+        f"Secondary axis: natural log of {selected_asset}. Red zones run from a downward zero crossing "
+        "to the minimum of that negative M2 cycle. "
+        f"The middle histogram is M2 52W change minus {selected_asset} 52W change; drawdown is measured "
+        "from the asset's historical price peak."
+    )
 
 
 def _liquidity_phase_bands(full_frame: pd.DataFrame, visible_frame: pd.DataFrame) -> pd.DataFrame:
