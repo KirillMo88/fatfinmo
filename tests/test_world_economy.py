@@ -155,6 +155,15 @@ def test_snapshot_calculations_use_matching_bis_quarters_and_three_real_growth_y
     assert np.isclose(annual_2026["interest_on_total_debt_pct_gdp"], 5.67)
     assert np.isclose(annual_2026["current_account_pct"], 0.0)
     assert np.isclose(annual_2026["government_expenditure_pct"], 36.0)
+    annual_2025 = history.loc[
+        history["iso3"].eq("USA") & history["year"].eq(2025) & ~history["is_provisional"]
+    ].iloc[0]
+    assert np.isclose(annual_2025["government_debt_gdp_pct"], 108.5)
+    assert np.isclose(
+        annual_2025["government_debt_coverage_pct"],
+        1_000.0 / (27_000.0 * 108.5 / 100.0) * 100.0,
+    )
+    assert np.isnan(annual_2026["government_debt_coverage_pct"])
     assert diagnostics["bis_countries_mapped"] == 1
 
 

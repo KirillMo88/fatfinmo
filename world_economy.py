@@ -941,6 +941,21 @@ def build_world_economy_frames(
         history = history.merge(annual_mean, on=["iso3", "year"], how="outer")
     history = history.sort_values(["iso3", "year"]).reset_index(drop=True)
     history["country_name"] = history["country_name"].fillna(history["iso3"].map(country_info))
+    reserves_history = reserves[["iso3", "year", "gold_fx_reserves_usd_bn"]].copy()
+    reserves_history["year"] = pd.to_numeric(reserves_history["year"], errors="coerce").astype("Int64")
+    reserves_history["gold_fx_reserves_usd_bn"] = pd.to_numeric(
+        reserves_history["gold_fx_reserves_usd_bn"], errors="coerce"
+    )
+    reserves_history = reserves_history.dropna(subset=["iso3", "year"]).drop_duplicates(
+        ["iso3", "year"], keep="last"
+    )
+    history = history.merge(reserves_history, on=["iso3", "year"], how="left")
+    government_debt_usd_bn = history["nominal_gdp_usd_bn"] * history["government_debt_gdp_pct"] / 100.0
+    history["government_debt_coverage_pct"] = np.where(
+        government_debt_usd_bn.gt(0),
+        history["gold_fx_reserves_usd_bn"] / government_debt_usd_bn * 100.0,
+        np.nan,
+    )
     history["nominal_gdp_growth_pct"] = history.groupby("iso3")["nominal_gdp_usd_bn"].pct_change() * 100.0
     history["interest_on_total_debt_pct_gdp"] = (
         history["long_term_interest_rate_annual_avg_pct"]
