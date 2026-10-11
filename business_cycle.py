@@ -33,6 +33,19 @@ BUSINESS_CYCLE_FRED_SERIES = {
     "W875RX1": "Real Personal Income Ex Transfers",
 }
 
+INFORMATIONAL_PRODUCTION_FRED_SERIES = {
+    "IPMAN": "Industrial Production: Manufacturing",
+    "IPDMAN": "Industrial Production: Durable Manufacturing",
+    "IPNMAN": "Industrial Production: Nondurable Manufacturing",
+    "IPMINE": "Industrial Production: Mining",
+    "IPUTIL": "Industrial Production: Utilities",
+}
+
+INFORMATIONAL_CONSUMER_CREDIT_FRED_SERIES = {
+    "TOTALSL": "Total Consumer Credit",
+    "REVOLSL": "Revolving Credit",
+}
+
 INFLATION_FRED_SERIES = {
     "T5YIE": "5-Year Breakeven Inflation Rate",
     "T10YIE": "10-Year Breakeven Inflation Rate",
@@ -48,6 +61,11 @@ INFLATION_FRED_SERIES = {
 }
 
 ALL_FRED_SERIES = {**BUSINESS_CYCLE_FRED_SERIES, **INFLATION_FRED_SERIES}
+INFORMATIONAL_FRED_SERIES = {
+    **INFORMATIONAL_PRODUCTION_FRED_SERIES,
+    **INFORMATIONAL_CONSUMER_CREDIT_FRED_SERIES,
+}
+DOWNLOAD_FRED_SERIES = {**ALL_FRED_SERIES, **INFORMATIONAL_FRED_SERIES}
 TRADINGVIEW_ECONOMIC_FALLBACKS: dict[str, str] = {}
 
 MONTHLY_RELEASE_LAGS = {
@@ -56,6 +74,11 @@ MONTHLY_RELEASE_LAGS = {
     "UNRATE": 7,
     "PAYEMS": 7,
     "INDPRO": 18,
+    "IPMAN": 18,
+    "IPDMAN": 18,
+    "IPNMAN": 18,
+    "IPMINE": 18,
+    "IPUTIL": 18,
     "RSAFS": 18,
     "PCEC96": 32,
     "W875RX1": 32,
@@ -65,6 +88,8 @@ MONTHLY_RELEASE_LAGS = {
     "CPILFESL": 16,
     "PCEPILFE": 32,
     "PPIACO": 16,
+    "TOTALSL": 32,
+    "REVOLSL": 32,
 }
 WEEKLY_RELEASE_LAGS = {"ICSA": 6, "CCSA": 6}
 DAILY_SERIES = {"T5YIE", "T10YIE", "EXPINF1YR", "EXPINF5YR", "T5YIFR"}
@@ -178,20 +203,20 @@ def load_business_cycle_fred(api_key: str | None = None, observation_start: str 
         try:
             frame = download_fred_series(series_id, api_key=api_key, observation_start=observation_start)
             if not frame.empty:
-                frame["Description"] = ALL_FRED_SERIES[series_id]
+                frame["Description"] = DOWNLOAD_FRED_SERIES[series_id]
                 frame["IsReleaseDated"] = False
             return series_id, frame
         except (FredApiError, Exception):
             return series_id, pd.DataFrame()
 
     downloaded: dict[str, pd.DataFrame] = {}
-    with ThreadPoolExecutor(max_workers=min(6, len(ALL_FRED_SERIES))) as executor:
-        futures = [executor.submit(download_one, series_id) for series_id in ALL_FRED_SERIES]
+    with ThreadPoolExecutor(max_workers=min(6, len(DOWNLOAD_FRED_SERIES))) as executor:
+        futures = [executor.submit(download_one, series_id) for series_id in DOWNLOAD_FRED_SERIES]
         for future in as_completed(futures):
             series_id, frame = future.result()
             downloaded[series_id] = frame
 
-    for series_id in ALL_FRED_SERIES:
+    for series_id in DOWNLOAD_FRED_SERIES:
         frame = downloaded.get(series_id, pd.DataFrame())
 
         if series_id == "NAPM":
@@ -217,7 +242,7 @@ def load_business_cycle_fred(api_key: str | None = None, observation_start: str 
                     "Series_ID": [series_id],
                     "Date": [pd.NaT],
                     "Value": [np.nan],
-                    "Description": [ALL_FRED_SERIES[series_id]],
+                    "Description": [DOWNLOAD_FRED_SERIES[series_id]],
                     "IsReleaseDated": [False],
                 }
             )
@@ -408,7 +433,7 @@ def write_fred_cache(frame: pd.DataFrame) -> None:
 
 def build_business_cycle_history(calendar: pd.DatetimeIndex, fred: pd.DataFrame) -> pd.DataFrame:
     history = pd.DataFrame({"date": calendar})
-    for series_id in ALL_FRED_SERIES:
+    for series_id in DOWNLOAD_FRED_SERIES:
         history[series_id] = align_fred_series_to_weekly(
             fred_series(fred, series_id),
             calendar,
@@ -429,6 +454,15 @@ def build_business_cycle_history(calendar: pd.DatetimeIndex, fred: pd.DataFrame)
     for col in ["INDPRO", "RSAFS", "PCEC96", "W875RX1", "PAYEMS"]:
         history[f"{col}_YoY"] = num(history[col]).pct_change(52, fill_method=None) * 100.0
         history[f"{col}_YoY_3MMA"] = history[f"{col}_YoY"].rolling(13, min_periods=4).mean()
+    for col in INFORMATIONAL_PRODUCTION_FRED_SERIES:
+        history[f"{col}_YoY"] = num(history[col]).pct_change(52, fill_method=None) * 100.0
+        history[f"{col}_YoY_3MMA"] = history[f"{col}_YoY"].rolling(13, min_periods=4).mean()
+        history[f"{col}_Z"] = expanding_z(history[f"{col}_YoY_3MMA"])
+    history["NONREVOLSL"] = num(history["TOTALSL"]) - num(history["REVOLSL"])
+    for col in ["TOTALSL", "REVOLSL", "NONREVOLSL"]:
+        history[f"{col}_YoY"] = num(history[col]).pct_change(52, fill_method=None) * 100.0
+        history[f"{col}_YoY_3MMA"] = history[f"{col}_YoY"].rolling(13, min_periods=4).mean()
+        history[f"{col}_Z"] = expanding_z(history[f"{col}_YoY_3MMA"])
 
     history["ISM_Z"] = expanding_z(history["ISM_3MMA"])
     history["ISM_SERVICES_Z"] = expanding_z(history["ISM_SERVICES_3MMA"])

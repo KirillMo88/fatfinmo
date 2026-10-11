@@ -663,7 +663,7 @@ def build_pillar_score_fig(
     score_column: str,
     score_label: str,
     score_color: str,
-    components: list[tuple[str, str, str]],
+    components: list[tuple[str, str, str] | tuple[str, str, str, bool | str]],
 ) -> go.Figure:
     fig = go.Figure()
     fig.add_hrect(y0=-0.10, y1=0.10, fillcolor="#94a3b8", opacity=0.12, line_width=0)
@@ -677,7 +677,9 @@ def build_pillar_score_fig(
             hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{score_label}: %{{y:.2f}}<extra></extra>",
         )
     )
-    for column, label, color in components:
+    for component in components:
+        column, label, color = component[:3]
+        visible = component[3] if len(component) > 3 else True
         fig.add_trace(
             go.Scatter(
                 x=d["date"],
@@ -685,6 +687,7 @@ def build_pillar_score_fig(
                 mode="lines",
                 name=label,
                 line={"color": color, "width": 1.2, "dash": "dot"},
+                visible=visible,
                 hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{label}: %{{y:.2f}}<extra></extra>",
             )
         )
@@ -715,7 +718,14 @@ def build_production_score_fig(d: pd.DataFrame) -> go.Figure:
         "ProductionScore",
         "Production Score",
         "#22c55e",
-        [("IndustrialProduction_Z", "Industrial Production", "#86efac")],
+        [
+            ("IndustrialProduction_Z", "Total Industry (INDPRO)", "#86efac"),
+            ("IPMAN_Z", "Manufacturing (IPMAN)", "#38bdf8"),
+            ("IPDMAN_Z", "Durable Goods (IPDMAN)", "#f59e0b"),
+            ("IPNMAN_Z", "Nondurable Goods (IPNMAN)", "#c084fc"),
+            ("IPMINE_Z", "Mining (IPMINE)", "#fb7185"),
+            ("IPUTIL_Z", "Utilities (IPUTIL)", "#facc15"),
+        ],
     )
 
 
@@ -730,6 +740,9 @@ def build_demand_income_score_fig(d: pd.DataFrame) -> go.Figure:
             ("RetailSales_Z", "Retail Sales", "#fb923c"),
             ("RealPCE_Z", "Real PCE", "#facc15"),
             ("RealPersonalIncome_Z", "Real Income", "#f43f5e"),
+            ("TOTALSL_Z", "Total Consumer Credit (TOTALSL)", "#38bdf8"),
+            ("REVOLSL_Z", "Revolving Credit (REVOLSL)", "#a78bfa", "legendonly"),
+            ("NONREVOLSL_Z", "Non-Revolving Credit (TOTALSL − REVOLSL)", "#fbbf24", "legendonly"),
         ],
     )
 
