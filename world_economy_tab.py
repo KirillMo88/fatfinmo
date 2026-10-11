@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode, JsCode
 
@@ -154,7 +155,7 @@ def _avoid_nearby_label_collisions(frame: pd.DataFrame) -> list[str]:
 
 
 def _render_country_trajectory(history: pd.DataFrame, table: pd.DataFrame, reference_year: int) -> None:
-    st.subheader("Country Debt & Fiscal Trajectory — 10 Years")
+    st.subheader("Country Macro Trajectory")
     countries = table[["iso3", "country_name"]].drop_duplicates().dropna().sort_values("country_name")
     options = {f"{row.country_name} ({row.iso3})": row.iso3 for row in countries.itertuples(index=False)}
     default = next((label for label, code in options.items() if code == "USA"), next(iter(options), None))
@@ -174,14 +175,96 @@ def _render_country_trajectory(history: pd.DataFrame, table: pd.DataFrame, refer
     selected["is_provisional"] = selected["is_provisional"].fillna(False).astype(bool)
     selected = selected.sort_values(["year", "is_provisional"])
     trajectory = _country_trajectory_table(selected, reference_year)
-    trajectory_height = min(570, max(220, 42 + 35 * len(trajectory)))
-    chart_col, table_col = st.columns([1, 1.15], gap="medium")
-    with chart_col:
-        _render_debt_fiscal_plot(selected, reference_year, show_provisional, height=trajectory_height)
+    trajectory_height = min(570, max(400, 42 + 35 * len(trajectory)))
+    macro_chart_data = _trajectory_chart_data(selected, reference_year)
+
+    table_col, macro_col = st.columns(2, gap="medium")
     with table_col:
-        st.markdown("**Country Macro Trajectory**")
         st.dataframe(trajectory, use_container_width=True, hide_index=True, height=trajectory_height)
         st.caption("Nominal GDP 5Y/10Y columns show CAGR; other summary columns show 5Y/10Y change. Monthly and quarterly series use calendar-year averages; the current year may be partial.")
+    with macro_col:
+        _render_growth_fiscal_current_account_plot(macro_chart_data, height=trajectory_height)
+
+    debt_col, scatter_col = st.columns(2, gap="medium")
+    with debt_col:
+        _render_debt_interest_plot(macro_chart_data, height=trajectory_height)
+    with scatter_col:
+        _render_debt_fiscal_plot(selected, reference_year, show_provisional, height=trajectory_height)
+
+
+def _trajectory_chart_data(selected: pd.DataFrame, reference_year: int) -> pd.DataFrame:
+    annual = (
+        selected.loc[~selected["is_provisional"].fillna(False)]
+        .sort_values("year")
+        .drop_duplicates("year", keep="last")
+        .set_index("year")
+    )
+    years = list(range(reference_year - 10, reference_year + 1))
+    periods = [str(year) for year in years] + ["5Y AVG", "10Y AVG"]
+    sources = (
+        "real_gdp_growth_pct", "fiscal_balance_pct", "current_account_pct",
+        "total_debt_gdp_annual_avg_pct", "long_term_interest_rate_annual_avg_pct",
+        "interest_on_total_debt_pct_gdp",
+    )
+    result = pd.DataFrame({"Period": periods})
+    for source in sources:
+        values = pd.to_numeric(annual[source], errors="coerce") if source in annual.columns else pd.Series(dtype=float)
+        recent_5y = values.reindex(range(reference_year - 4, reference_year + 1))
+        prior_10y = values.reindex(range(reference_year - 10, reference_year))
+        result[source] = [values.get(year, np.nan) for year in years] + [recent_5y.mean(), prior_10y.mean()]
+    return result
+
+
+def _render_growth_fiscal_current_account_plot(data: pd.DataFrame, *, height: int) -> None:
+    fig = go.Figure()
+    series = (
+        ("Real GDP Growth", "real_gdp_growth_pct", "#176b8e"),
+        ("Fiscal Balance", "fiscal_balance_pct", "#f37032"),
+        ("Current Account Balance / GDP", "current_account_pct", "#45b6e8"),
+    )
+    for name, column, color in series:
+        fig.add_trace(go.Bar(
+            x=data["Period"], y=data[column], name=name, marker_color=color,
+            text=data[column], texttemplate="%{text:.2f}", textposition="outside",
+            textfont={"size": 9}, cliponaxis=False,
+            hovertemplate=f"{name}: %{{y:.2f}}%<extra></extra>",
+        ))
+    fig.update_layout(
+        title={"text": "GDP Growth, Fiscal Balance, Current Account", "x": 0.5},
+        height=height, barmode="group", margin={"l": 45, "r": 15, "t": 48, "b": 65},
+        legend={"orientation": "h", "yanchor": "top", "y": -0.18, "x": 0.5, "xanchor": "center"},
+        yaxis={"title": "% of GDP / growth", "zeroline": True, "gridcolor": "#293241"},
+        xaxis={"title": None, "gridcolor": "#293241"},
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+
+
+def _render_debt_interest_plot(data: pd.DataFrame, *, height: int) -> None:
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Bar(
+        x=data["Period"], y=data["long_term_interest_rate_annual_avg_pct"],
+        name="LT Interest Rate", marker_color="#f37032",
+        hovertemplate="LT Interest Rate: %{y:.2f}%<extra></extra>",
+    ), secondary_y=False)
+    fig.add_trace(go.Bar(
+        x=data["Period"], y=data["interest_on_total_debt_pct_gdp"],
+        name="Interest on Total Debt", marker_color="#45b6e8",
+        hovertemplate="Interest on Total Debt: %{y:.2f}% GDP<extra></extra>",
+    ), secondary_y=False)
+    fig.add_trace(go.Scatter(
+        x=data["Period"], y=data["total_debt_gdp_annual_avg_pct"],
+        name="Total Debt / GDP", mode="lines+markers", line={"color": "#176b8e", "width": 3},
+        marker={"size": 6}, hovertemplate="Total Debt / GDP: %{y:.2f}%<extra></extra>",
+    ), secondary_y=True)
+    fig.update_layout(
+        title={"text": "Total Debt / GDP, LT Interest Rate, Interest on Total Debt", "x": 0.5},
+        height=height, barmode="group", margin={"l": 48, "r": 48, "t": 48, "b": 65},
+        legend={"orientation": "h", "yanchor": "top", "y": -0.18, "x": 0.5, "xanchor": "center"},
+        xaxis={"gridcolor": "#293241"},
+    )
+    fig.update_yaxes(title_text="Interest (% / % GDP)", gridcolor="#293241", secondary_y=False)
+    fig.update_yaxes(title_text="Total Debt / GDP (%)", secondary_y=True, showgrid=False)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
 
 
 def _country_trajectory_table(selected: pd.DataFrame, reference_year: int) -> pd.DataFrame:
@@ -284,7 +367,9 @@ def _render_debt_fiscal_plot(
                                  hovertemplate=f"%{{customdata[0]}} · {reference_year} provisional<br>BIS quarter: %{{customdata[1]}}<br>IMF status: %{{customdata[2]}}<br>Debt/GDP: %{{x:.2f}}%<br>Fiscal: %{{y:.2f}}% GDP<br>GDP: $%{{customdata[3]:,.1f}}bn<br>Real growth: %{{customdata[4]:.2f}}%<br>WEO vintage: %{{customdata[5]}}<extra></extra>"))
     if show_provisional and provisional.empty:
         st.info(f"No BIS observation in {reference_year}; no provisional endpoint is shown.")
-    fig.update_layout(height=height, showlegend=False, margin={"l": 55, "r": 20, "t": 25, "b": 45},
+    fig.update_layout(height=height, showlegend=False,
+                      title={"text": "Country Debt & Fiscal Trajectory — 10 Years", "x": 0.5},
+                      margin={"l": 55, "r": 20, "t": 48, "b": 45},
                       xaxis_title="BIS Total Debt / GDP (%)",
                       yaxis={"title": f"General Government Fiscal Balance (% GDP) — {reference_year}", "autorange": "reversed", "zeroline": True})
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
@@ -315,6 +400,8 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         "long_term_interest_rate_observation_month": "Interest Rate Month",
         "long_term_interest_rate_delta_5y_pp": "Interest Rate Δ5Y (pp)",
         "long_term_interest_rate_delta_10y_pp": "Interest Rate Δ10Y (pp)",
+        "cds_5y_bps": "5Y CDS (bps)", "cds_var_6m_pct": "CDS Var 6m (%)",
+        "cds_pd_pct": "CDS Implied PD (%)",
         "fiscal_delta_5y_pp": "Fiscal Balance Δ5Y (pp)", "fiscal_delta_10y_pp": "Fiscal Balance Δ10Y (pp)",
         "fiscal_balance_usd_bn": f"Signed Fiscal Balance {year}F (USD bn)",
         f"real_gdp_growth_{year - 3}_pct": f"Real GDP Growth {year - 3} (%)",
@@ -333,6 +420,7 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         f"Current Account Balance {year}F (% GDP)", "Current Account Δ5Y (pp)", "Current Account Δ10Y (pp)",
         "Private Non-Financial Sector DSR (%)", "DSR Δ10Y (pp)",
         "Long-term Interest Rate (%)", "Interest Rate Δ5Y (pp)", "Interest Rate Δ10Y (pp)",
+        "5Y CDS (bps)", "CDS Var 6m (%)", "CDS Implied PD (%)",
     ]]
     # Use the same sortable grid data for both exports so the user gets the active ordering/filter.
     gb = GridOptionsBuilder.from_dataframe(display)
@@ -380,6 +468,8 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
             f"# IMF retrieved at UTC: {source_metadata.get('weo_retrieved_at_utc', '')}\n"
             f"# OECD long-term rates source: {source_metadata.get('oecd_long_term_rates_url', '')}\n"
             f"# OECD long-term rates retrieved at UTC: {source_metadata.get('oecd_long_term_rates_retrieved_at_utc', '')}\n"
+            f"# Sovereign CDS source: {source_metadata.get('sovereign_cds_url', '')}\n"
+            f"# Sovereign CDS retrieved at UTC: {source_metadata.get('sovereign_cds_retrieved_at_utc', '')}\n"
             "# Units: GDP USD billions; ratios in percent; 5Y/10Y changes in percentage points\n"
         )
         st.download_button("Download CSV", (csv_metadata + sorted_filtered.to_csv(index=False, na_rep="N/A")).encode("utf-8-sig"),
@@ -388,6 +478,35 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         st.download_button("Download XLSX", _xlsx_export(sorted_filtered, year, source_metadata), file_name=f"world_economy_{year}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="we_xlsx_download")
 
+    top_gdp_cds = table.nsmallest(10, "gdp_rank").dropna(subset=["cds_5y_bps"]).sort_values(
+        "gdp_rank", ascending=False
+    )
+    if not top_gdp_cds.empty:
+        st.subheader("Sovereign 5Y CDS — Top 10 GDP Countries")
+        fig = go.Figure(go.Bar(
+            x=top_gdp_cds["cds_5y_bps"],
+            y=top_gdp_cds["country_name"],
+            orientation="h",
+            marker_color="#5b9cf5",
+            customdata=top_gdp_cds[["cds_var_6m_pct", "cds_pd_pct"]],
+            hovertemplate=(
+                "%{y}<br>5Y CDS: %{x:.2f} bps<br>6M variation: %{customdata[0]:.2f}%"
+                "<br>Implied PD: %{customdata[1]:.2f}%<extra></extra>"
+            ),
+        ))
+        fig.update_layout(
+            height=max(300, 38 * len(top_gdp_cds) + 90),
+            margin={"l": 30, "r": 20, "t": 20, "b": 45},
+            xaxis_title="Basis points (bps)",
+            yaxis={"title": "", "categoryorder": "array", "categoryarray": top_gdp_cds["country_name"].tolist()},
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+        st.caption(
+            f"Source: {source_metadata.get('sovereign_cds_url', 'World Government Bonds Sovereign CDS')} · "
+            "PD is the source's implied probability of default using a 40% recovery assumption."
+        )
+
 
 def _xlsx_export(table: pd.DataFrame, year: int, source_metadata: dict[str, Any]) -> bytes:
     stream = BytesIO()
@@ -395,6 +514,7 @@ def _xlsx_export(table: pd.DataFrame, year: int, source_metadata: dict[str, Any]
         ("Reference year", year), ("BIS source", "BIS WS_TC F1.1 — total credit to non-financial sector, % GDP"),
         ("BIS DSR source", "BIS Debt Service Ratios — private non-financial sector"),
         ("OECD source", "Financial market — monthly long-term interest rates, percent per annum (IRLT/PA)"),
+        ("Sovereign CDS source", "World Government Bonds — 5Y CDS, six-month variation, implied probability of default (40% recovery)"),
         ("IMF source", "IMF World Economic Outlook — NGDPD, GGXCNL_NGDP, GGX_NGDP, BCA_NGDPD, NGDP_RPCH"),
         ("GDP unit", "USD billions"), ("5Y/10Y changes", "Percentage points; DSR compares same quarter"),
         ("BIS source URL", source_metadata.get("bis_topic_url", "")),
@@ -404,6 +524,8 @@ def _xlsx_export(table: pd.DataFrame, year: int, source_metadata: dict[str, Any]
         ("OECD long-term rates source URL", source_metadata.get("oecd_long_term_rates_url", "")),
         ("OECD long-term rates API URL", source_metadata.get("oecd_long_term_rates_api_url", "")),
         ("OECD long-term rates retrieved at UTC", source_metadata.get("oecd_long_term_rates_retrieved_at_utc", "")),
+        ("Sovereign CDS source URL", source_metadata.get("sovereign_cds_url", "")),
+        ("Sovereign CDS retrieved at UTC", source_metadata.get("sovereign_cds_retrieved_at_utc", "")),
         ("IMF source URL", source_metadata.get("weo_url", "")),
         ("IMF WEO vintage", source_metadata.get("weo_vintage", "")),
         ("IMF retrieved at UTC", source_metadata.get("weo_retrieved_at_utc", "")),
