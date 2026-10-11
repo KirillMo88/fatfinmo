@@ -159,7 +159,9 @@ def render_business_cycle_tab(api_key: str | None) -> None:
     with structural_col:
         st.plotly_chart(build_t5yifr_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
 
-    st.plotly_chart(build_inflation_price_income_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
+    composite_col, _ = st.columns(2)
+    with composite_col:
+        st.plotly_chart(build_inflation_price_income_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
 
     render_cpi_components_breakdown(int(st.session_state.get("business_cycle_refresh_nonce", 0)))
 
