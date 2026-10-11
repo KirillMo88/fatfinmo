@@ -349,12 +349,13 @@ def build_broker_margin_leverage_fig(
         )
     fig.update_yaxes(title_text="USD billions", row=1, col=1, secondary_y=False)
     if show_spx and weekly_spx is not None and not weekly_spx.empty and not positive_spx.empty:
-        min_spx = 5_000.0
+        min_spx = 300.0
         max_spx = max(float(positive_spx.max()), 10_000.0)
         first_power = int(np.floor(np.log10(min_spx))) - 1
         last_power = int(np.ceil(np.log10(max_spx))) + 1
         spx_ticks = sorted(
-            {
+            {min_spx}
+            | {
                 float(multiplier * 10**power)
                 for power in range(first_power, last_power + 1)
                 for multiplier in (1, 2, 5)
@@ -383,8 +384,6 @@ def build_broker_margin_leverage_fig(
     ]
     if show_reference_levels:
         for row in (2, 3):
-            fig.add_hrect(y0=90, y1=100, fillcolor="#ef4444", opacity=0.24, line_width=0, row=row, col=1)
-            fig.add_hrect(y0=0, y1=10, fillcolor="#22c55e", opacity=0.24, line_width=0, row=row, col=1)
             for level in (10, 50, 90):
                 fig.add_hline(y=level, line={"color": "#64748b", "dash": "dot" if level == 50 else "solid", "width": 0.8}, row=row, col=1)
         for lower, upper, color in [(90, 100, "#ef4444"), (0, 10, "#22c55e")]:
@@ -431,7 +430,52 @@ def build_broker_margin_leverage_fig(
             row=row,
             col=1,
         )
+        if show_reference_levels:
+            trace = fig.data[-1]
+            xaxis_ref = trace.xaxis or "x"
+            yaxis_ref = trace.yaxis or "y"
+            for lower, upper, color in ((90, 100, "#ef4444"), (0, 10, "#22c55e")):
+                fig.add_shape(
+                    type="rect",
+                    xref=f"{xaxis_ref} domain",
+                    yref=yaxis_ref,
+                    x0=0,
+                    x1=1,
+                    y0=lower,
+                    y1=upper,
+                    fillcolor=color,
+                    opacity=0.24,
+                    line={"width": 0},
+                    layer="below",
+                )
         fig.update_yaxes(title_text="Percentile", range=[0, 100], row=row, col=1)
+
+    growth_percentile = pd.to_numeric(quarterly["MarginLoansGrowthPct"], errors="coerce").reset_index(drop=True)
+    growth_dates = dates.reset_index(drop=True)
+    above_threshold = growth_percentile.gt(75).fillna(False)
+    in_high_growth_period = False
+    period_start: int | None = None
+    for index, is_above in enumerate(above_threshold.tolist() + [False]):
+        if is_above and not in_high_growth_period:
+            period_start = index
+            in_high_growth_period = True
+        elif not is_above and in_high_growth_period:
+            period_end = index
+            x0 = growth_dates.iloc[period_start]
+            x1 = growth_dates.iloc[period_end] if period_end < len(growth_dates) else pd.Timestamp(end)
+            if pd.notna(x0) and pd.notna(x1) and x1 > x0:
+                fig.add_vrect(
+                    x0=x0,
+                    x1=x1,
+                    fillcolor="#ef4444",
+                    opacity=0.16,
+                    line_width=0,
+                    layer="below",
+                    row=1,
+                    col=1,
+                )
+            period_start = None
+            in_high_growth_period = False
 
     ratio_custom = np.column_stack(
         [
