@@ -159,6 +159,8 @@ def render_business_cycle_tab(api_key: str | None) -> None:
     with structural_col:
         st.plotly_chart(build_t5yifr_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
 
+    st.plotly_chart(build_inflation_price_income_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
+
     render_cpi_components_breakdown(int(st.session_state.get("business_cycle_refresh_nonce", 0)))
 
     try:
@@ -819,6 +821,63 @@ def build_t5yifr_fig(d: pd.DataFrame) -> go.Figure:
     fig.update_yaxes(title_text="%", row=1, col=1)
     fig.update_yaxes(title_text="Change", row=2, col=1)
     return style_business_fig(fig, "Structural Inflation Expectations / T5YIFR", 320)
+
+
+def build_inflation_price_income_fig(d: pd.DataFrame) -> go.Figure:
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.64, 0.36],
+        vertical_spacing=0.07,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=d["date"],
+            y=d["CPIAUCSL_YoY"],
+            mode="lines",
+            name="CPIAUCSL 12M change",
+            line={"color": "#f8fafc", "width": 2.5},
+        ),
+        row=1,
+        col=1,
+    )
+    for column, name, color in (
+        ("PI_YoY", "PI 12M change", "#38bdf8"),
+        ("PPIACO_YoY", "PPIACO 12M change", "#fb923c"),
+    ):
+        fig.add_trace(
+            go.Scatter(
+                x=d["date"],
+                y=d[column],
+                mode="lines",
+                name=name,
+                line={"color": color, "width": 1.8, "dash": "dot"},
+            ),
+            row=1,
+            col=1,
+        )
+    for column, name, color in (
+        ("PI_WeightedContribution", "PI 12M change × 70%", "#38bdf8"),
+        ("PPIACO_WeightedContribution", "PPIACO 12M change × 30%", "#fb923c"),
+    ):
+        fig.add_trace(
+            go.Bar(
+                x=d["date"],
+                y=d[column],
+                name=name,
+                marker={"color": color},
+                opacity=0.82,
+            ),
+            row=2,
+            col=1,
+        )
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1}, row=1, col=1)
+    fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1}, row=2, col=1)
+    fig.update_layout(barmode="relative", bargap=0.05)
+    fig.update_yaxes(title_text="12M change, %", row=1, col=1)
+    fig.update_yaxes(title_text="Weighted contribution, pp", row=2, col=1)
+    return style_business_fig(fig, "Inflation 12M Change and Weighted PI/PPI Composite", 500)
 
 
 def render_returns_section(snapshot: BusinessCycleSnapshot) -> None:
