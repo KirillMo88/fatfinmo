@@ -358,6 +358,29 @@ def parse_oecd_long_term_rates_csv(csv_bytes: bytes) -> pd.DataFrame:
     """Parse OECD monthly long-term interest rates (IRLT, percent per annum)."""
     frame = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, low_memory=False)
     columns = {str(column).lstrip("\ufeff").split(":", 1)[0].strip().upper(): column for column in frame.columns}
+    normalized = {name.upper(): name for name in frame.columns}
+    cached_fields = {"ISO3", "PERIOD", "YEAR", "MONTH", "LONG_TERM_INTEREST_RATE_PCT"}
+    if cached_fields.issubset(normalized):
+        selected = frame[[normalized[name] for name in ("ISO3", "PERIOD", "YEAR", "MONTH", "LONG_TERM_INTEREST_RATE_PCT")]].copy()
+        selected.columns = ["iso3", "period", "year", "month", "long_term_interest_rate_pct"]
+        selected["iso3"] = selected["iso3"].map(lambda value: _safe_text(value).strip().upper())
+        selected["period"] = selected["period"].map(lambda value: _safe_text(value).strip())
+        selected["year"] = pd.to_numeric(selected["year"], errors="coerce").astype("Int64")
+        selected["month"] = pd.to_numeric(selected["month"], errors="coerce").astype("Int64")
+        selected["long_term_interest_rate_pct"] = pd.to_numeric(
+            selected["long_term_interest_rate_pct"].astype(str).str.replace(",", "", regex=False), errors="coerce"
+        )
+        selected = selected.loc[
+            selected["iso3"].str.fullmatch(r"[A-Z]{3}", na=False)
+            & selected["year"].notna() & selected["month"].between(1, 12)
+            & selected["long_term_interest_rate_pct"].notna()
+        ].copy()
+        if selected.empty:
+            raise ValueError("Cached OECD long-term interest rate observations failed date/value validation.")
+        return selected[["iso3", "period", "year", "month", "long_term_interest_rate_pct"]].drop_duplicates(
+            ["iso3", "year", "month"], keep="last"
+        ).sort_values(["iso3", "year", "month"]).reset_index(drop=True)
+
     required = {"REF_AREA", "FREQ", "MEASURE", "UNIT_MEASURE", "TIME_PERIOD", "OBS_VALUE"}
     missing = sorted(required - set(columns))
     if missing:

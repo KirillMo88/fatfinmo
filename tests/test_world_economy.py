@@ -221,6 +221,20 @@ def test_oecd_parser_selects_monthly_long_term_rates_in_percent_per_annum() -> N
     assert parsed.iloc[0]["long_term_interest_rate_pct"] == 4.2
 
 
+def test_oecd_parser_accepts_normalized_persistent_cache() -> None:
+    cached = pd.DataFrame([
+        {"iso3": "usa", "period": "2026-08", "year": 2026, "month": 8,
+         "long_term_interest_rate_pct": 4.2},
+    ])
+    parsed = parse_oecd_long_term_rates_csv(cached.to_csv(index=False).encode("utf-8"))
+    assert len(parsed) == 1
+    assert parsed.iloc[0]["iso3"] == "USA"
+    assert parsed.iloc[0]["period"] == "2026-08"
+    assert parsed.iloc[0]["year"] == 2026
+    assert parsed.iloc[0]["month"] == 8
+    assert parsed.iloc[0]["long_term_interest_rate_pct"] == 4.2
+
+
 def test_weo_parser_converts_gdp_usd_billions_but_leaves_percent_series_unchanged() -> None:
     raw = pd.DataFrame([
         {"COUNTRY.ID": "USA", "COUNTRY": "United States", "INDICATOR.ID": "NGDPD", "LATEST_ACTUAL_ANNUAL_DATA": 2025,
