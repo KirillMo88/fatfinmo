@@ -26,7 +26,7 @@ BIS_BULK_URL = "https://data.bis.org/static/bulk/WS_TC_csv_flat.zip"
 BIS_TOPIC_URL = "https://data.bis.org/topics/TOTAL_CREDIT"
 IMF_WEO_URL = "https://data.imf.org/Datasets/WEO"
 IMF_WEO_API_URL = "https://data.imf.org/Datasets/WEO"
-IMF_INDICATORS = ("NGDPD", "GGXCNL_NGDP", "NGDP_RPCH")
+IMF_INDICATORS = ("NGDPD", "GGXCNL_NGDP", "GGX_NGDP", "NGDP_RPCH")
 BIS_TOTAL_CREDIT_SERIES_TEMPLATE = "Q.{bis_iso2}.C.A.M.770.A"
 DEFAULT_REFERENCE_YEAR = int(os.environ.get("WORLD_ECONOMY_REFERENCE_YEAR", "2026"))
 BIS_AGGREGATE_CODES = {"4T", "5A", "5R", "G2", "W"}
@@ -49,7 +49,7 @@ WEO_VINTAGE_MONTHS = {
 TABLE_COLUMNS = [
     "gdp_rank", "country_name", "iso3", "reference_year", "imf_vintage", "nominal_gdp_usd_bn", "gdp_cagr_5y_pct",
     "gdp_cagr_10y_pct", "total_debt_gdp_pct", "bis_observation_quarter",
-    "debt_delta_5y_pp", "debt_delta_10y_pp", "fiscal_balance_pct",
+    "debt_delta_5y_pp", "debt_delta_10y_pp", "fiscal_balance_pct", "government_expenditure_pct",
     "fiscal_delta_5y_pp", "fiscal_delta_10y_pp", "fiscal_balance_usd_bn",
 ]
 
@@ -360,6 +360,7 @@ def build_world_economy_frames(
 
     gdp = _indicator_panel(imf, "NGDPD", "nominal_gdp_usd_bn")
     fiscal = _indicator_panel(imf, "GGXCNL_NGDP", "fiscal_balance_pct")
+    expenditure = _indicator_panel(imf, "GGX_NGDP", "government_expenditure_pct")
     real = _indicator_panel(imf, "NGDP_RPCH", "real_gdp_growth_pct")
     country_info = imf[["iso3", "country_name"]].drop_duplicates("iso3").set_index("iso3")["country_name"]
     latest_bis = bis.sort_values(["year", "quarter"]).groupby("iso3", as_index=False).tail(1)
@@ -369,6 +370,7 @@ def build_world_economy_frames(
     for iso3 in universe:
         current_gdp = _value(gdp, iso3, reference_year, "nominal_gdp_usd_bn")
         current_fiscal = _value(fiscal, iso3, reference_year, "fiscal_balance_pct")
+        current_expenditure = _value(expenditure, iso3, reference_year, "government_expenditure_pct")
         gdp5 = _value(gdp, iso3, reference_year - 5, "nominal_gdp_usd_bn")
         gdp10 = _value(gdp, iso3, reference_year - 10, "nominal_gdp_usd_bn")
         debt_row = latest_bis.loc[iso3] if iso3 in latest_bis.index else None
@@ -394,6 +396,7 @@ def build_world_economy_frames(
             "debt_delta_5y_pp": debt - debt5 if np.isfinite(debt) and np.isfinite(debt5) else np.nan,
             "debt_delta_10y_pp": debt - debt10 if np.isfinite(debt) and np.isfinite(debt10) else np.nan,
             "fiscal_balance_pct": current_fiscal,
+            "government_expenditure_pct": current_expenditure,
             "fiscal_delta_5y_pp": current_fiscal - fiscal5 if np.isfinite(current_fiscal) and np.isfinite(fiscal5) else np.nan,
             "fiscal_delta_10y_pp": current_fiscal - fiscal10 if np.isfinite(current_fiscal) and np.isfinite(fiscal10) else np.nan,
             "fiscal_balance_usd_bn": current_gdp * current_fiscal / 100.0 if np.isfinite(current_gdp) and np.isfinite(current_fiscal) else np.nan,

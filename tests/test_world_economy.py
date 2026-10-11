@@ -35,6 +35,8 @@ def _imf_frame() -> pd.DataFrame:
              "value": 18_000 + (year - 2016) * 1_000, "latest_actual_year": 2025, "scale": "Billions"},
             {"iso3": "USA", "country_name": "United States", "indicator_id": "GGXCNL_NGDP", "year": year,
              "value": -5 + (year - 2016) * 0.1, "latest_actual_year": 2025, "scale": "Percent of GDP"},
+            {"iso3": "USA", "country_name": "United States", "indicator_id": "GGX_NGDP", "year": year,
+             "value": 35 + (year - 2016) * 0.1, "latest_actual_year": 2025, "scale": "Percent of GDP"},
             {"iso3": "USA", "country_name": "United States", "indicator_id": "NGDP_RPCH", "year": year,
              "value": 2.0 + (year - 2023) * 0.1, "latest_actual_year": 2025, "scale": "Percent change"},
         ])
@@ -56,6 +58,7 @@ def test_snapshot_calculations_use_matching_bis_quarters_and_three_real_growth_y
     assert reference_year == 2026
     assert warning is None
     assert row["bis_observation_quarter"] == "2026Q1"
+    assert np.isclose(row["government_expenditure_pct"], 36.0)
     assert row["debt_delta_5y_pp"] == 15.0
     assert row["debt_delta_10y_pp"] == 35.0
     assert np.isclose(row["fiscal_balance_usd_bn"], row["nominal_gdp_usd_bn"] * row["fiscal_balance_pct"] / 100)
@@ -88,14 +91,18 @@ def test_weo_parser_converts_gdp_usd_billions_but_leaves_percent_series_unchange
          "SCALE": "Millions", "2026": 28_000},
         {"COUNTRY.ID": "USA", "COUNTRY": "United States", "INDICATOR.ID": "GGXCNL_NGDP", "LATEST_ACTUAL_ANNUAL_DATA": 2025,
          "SCALE": "Percent of GDP", "2026": -6.1},
+        {"COUNTRY.ID": "USA", "COUNTRY": "United States", "INDICATOR.ID": "GGX_NGDP", "LATEST_ACTUAL_ANNUAL_DATA": 2025,
+         "SCALE": "Percent of GDP", "2026": 37.4},
         {"COUNTRY.ID": "USA", "COUNTRY": "United States", "INDICATOR.ID": "NGDP_RPCH", "LATEST_ACTUAL_ANNUAL_DATA": 2025,
          "SCALE": "Percent change", "2026": 1.8},
     ])
     parsed = parse_weo_countries_frame(raw)
     gdp = parsed.loc[parsed["indicator_id"].eq("NGDPD"), "value"].iloc[0]
     fiscal = parsed.loc[parsed["indicator_id"].eq("GGXCNL_NGDP"), "value"].iloc[0]
+    expenditure = parsed.loc[parsed["indicator_id"].eq("GGX_NGDP"), "value"].iloc[0]
     assert gdp == 28.0
     assert fiscal == -6.1
+    assert expenditure == 37.4
 
 
 def test_reference_year_advances_dynamic_growth_years_without_inventing_bis_quarter() -> None:
