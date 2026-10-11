@@ -32,6 +32,8 @@ OECD_LONG_TERM_RATES_URL = "https://sdmx.oecd.org/public/rest/data/OECD.SDD.STES
 OECD_LONG_TERM_RATES_EXPLORER_URL = "https://data-explorer.oecd.org/vis?df%5Bds%5D=dsDisseminateFinalDMZ&df%5Bid%5D=DSD_STES%40DF_FINMARK&df%5Bag%5D=OECD.SDD.STES&dq=.M..PA.....&lom=LASTNPERIODS&lo=5&to%5BTIME_PERIOD%5D=false&vw=tb"
 WORLD_GOVERNMENT_BONDS_CDS_URL = "https://www.worldgovernmentbonds.com/sovereign-cds/"
 WORLD_GOVERNMENT_BONDS_CDS_API_URL = "https://www.worldgovernmentbonds.com/wp-json/cds/v1/main"
+WORLD_BANK_RESERVES_URL = "https://api.worldbank.org/v2/country/all/indicator/FI.RES.TOTL.CD"
+WORLD_BANK_RESERVES_SOURCE_URL = "https://data.worldbank.org/indicator/FI.RES.TOTL.CD"
 # User-supplied annual Russian long-term interest rates. Screenshot dates are
 # interpreted as MM/DD/YYYY; only the month is needed by the rate table.
 RUSSIAN_LONG_TERM_RATES = (
@@ -44,7 +46,7 @@ RUSSIAN_LONG_TERM_RATES = (
 )
 IMF_WEO_URL = "https://data.imf.org/Datasets/WEO"
 IMF_WEO_API_URL = "https://data.imf.org/Datasets/WEO"
-IMF_INDICATORS = ("NGDPD", "GGXCNL_NGDP", "GGX_NGDP", "BCA_NGDPD", "NGDP_RPCH")
+IMF_INDICATORS = ("NGDPD", "GGXCNL_NGDP", "GGX_NGDP", "BCA_NGDPD", "NGDP_RPCH", "GGXWDG_NGDP")
 BIS_TOTAL_CREDIT_SERIES_TEMPLATE = "Q.{bis_iso2}.C.A.M.770.A"
 DEFAULT_REFERENCE_YEAR = int(os.environ.get("WORLD_ECONOMY_REFERENCE_YEAR", "2026"))
 BIS_AGGREGATE_CODES = {"4T", "5A", "5R", "G2", "W"}
@@ -67,6 +69,7 @@ WEO_VINTAGE_MONTHS = {
 TABLE_COLUMNS = [
     "gdp_rank", "country_name", "iso3", "reference_year", "imf_vintage", "nominal_gdp_usd_bn", "gdp_cagr_5y_pct",
     "gdp_cagr_10y_pct", "total_debt_gdp_pct", "bis_observation_quarter",
+    "government_debt_gdp_pct", "government_debt_coverage_pct",
     "debt_delta_5y_pp", "debt_delta_10y_pp", "fiscal_balance_pct", "government_expenditure_pct",
     "fiscal_delta_5y_pp", "fiscal_delta_10y_pp", "fiscal_balance_usd_bn", "current_account_pct",
     "current_account_delta_5y_pp", "current_account_delta_10y_pp", "dsr_pct", "dsr_observation_quarter",
@@ -92,11 +95,14 @@ def load_world_economy_data(
     oecd_rates_path = cache_dir / "oecd_long_term_interest_rates.csv"
     cds_path = cache_dir / "world_government_bonds_sovereign_cds.html"
     weo_path = cache_dir / "imf_weo_countries.xlsx"
+    reserves_path = cache_dir / "world_bank_gold_fx_reserves.csv"
     metadata_path = cache_dir / "source_metadata.json"
     metadata = _read_json(metadata_path)
     warning: str | None = None
 
-    should_refresh = force_refresh or _cache_is_stale((bis_path, dsr_path, weo_path, oecd_rates_path, cds_path))
+    should_refresh = force_refresh or _cache_is_stale(
+        (bis_path, dsr_path, weo_path, oecd_rates_path, cds_path, reserves_path)
+    )
     if should_refresh:
         try:
             with httpx.Client(timeout=httpx.Timeout(90.0, connect=20.0), follow_redirects=True) as client:
@@ -141,11 +147,20 @@ def load_world_economy_data(
                 cds_html = cds_payload["table"].encode("utf-8")
                 _parse_world_government_bonds_cds(cds_html)
 
+                reserves: pd.DataFrame | None = None
+                reserves_error: str | None = None
+                try:
+                    reserves = _fetch_world_bank_reserves(client, reference_year)
+                except Exception as exc:
+                    reserves_error = str(exc)
+
             _atomic_write_bytes(bis_path, bis_bytes)
             _atomic_write_bytes(dsr_path, dsr_bytes)
             _atomic_write_bytes(weo_path, weo_bytes)
             _atomic_write_bytes(oecd_rates_path, oecd_rates_bytes)
             _atomic_write_bytes(cds_path, cds_html)
+            if reserves is not None:
+                _atomic_write_bytes(reserves_path, reserves.to_csv(index=False).encode("utf-8"))
             vintage_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", weo_vintage).strip("_") or "unknown"
             weo_archive_path = cache_dir / f"imf_weo_{vintage_slug}.xlsx"
             if not weo_archive_path.exists():
@@ -174,8 +189,19 @@ def load_world_economy_data(
                 "sovereign_cds_source": "World Government Bonds, Sovereign 5Y CDS; Var 6m and implied PD (40% recovery assumption)",
                 "sovereign_cds_url": WORLD_GOVERNMENT_BONDS_CDS_URL,
                 "sovereign_cds_retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
+                "world_bank_reserves_source": "World Bank WDI, FI.RES.TOTL.CD — total reserves including gold (current US$)",
+                "world_bank_reserves_url": WORLD_BANK_RESERVES_SOURCE_URL,
+                "world_bank_reserves_api_url": WORLD_BANK_RESERVES_URL,
+                "world_bank_reserves_retrieved_at_utc": (
+                    datetime.now(timezone.utc).isoformat() if reserves is not None
+                    else metadata.get("world_bank_reserves_retrieved_at_utc")
+                ),
             }
+            if reserves_error:
+                metadata["world_bank_reserves_error"] = reserves_error
             _atomic_write_text(metadata_path, json.dumps(metadata, indent=2, ensure_ascii=False) + "\n")
+            if reserves_error:
+                warning = f"World Bank reserves refresh failed; using cached values if available: {reserves_error}"
         except Exception as exc:
             if not (bis_path.exists() and weo_path.exists()):
                 raise RuntimeError(f"Could not refresh World Economy sources and no validated cache is available: {exc}") from exc
@@ -193,12 +219,16 @@ def load_world_economy_data(
     cds = _parse_world_government_bonds_cds(cds_path.read_bytes()) if cds_path.exists() else pd.DataFrame(
         columns=["iso3", "country_name", "cds_5y_bps", "cds_var_6m_pct", "cds_pd_pct"]
     )
+    reserves = parse_world_bank_reserves_frame(pd.read_csv(reserves_path)) if reserves_path.exists() else pd.DataFrame(
+        columns=["iso3", "year", "gold_fx_reserves_usd_bn"]
+    )
     table, history, diagnostics, effective_year, year_warning = build_world_economy_frames(
         bis,
         imf,
         dsr=dsr,
         long_term_rates=oecd_rates,
         cds=cds,
+        reserves=reserves,
         reference_year=reference_year,
         source_metadata=metadata,
     )
@@ -593,6 +623,70 @@ def _parse_world_government_bonds_cds(html_bytes: bytes) -> pd.DataFrame:
     return frame.reset_index(drop=True)
 
 
+def parse_world_bank_reserves_frame(data: pd.DataFrame | list[dict[str, Any]]) -> pd.DataFrame:
+    """Normalize World Bank FI.RES.TOTL.CD observations to USD billions by country/year."""
+    frame = data.copy() if isinstance(data, pd.DataFrame) else pd.json_normalize(data)
+    columns = {str(column).strip().casefold(): column for column in frame.columns}
+    cached_fields = {"iso3", "year", "gold_fx_reserves_usd_bn"}
+    if cached_fields.issubset(columns):
+        selected = frame[[columns[name] for name in ("iso3", "year", "gold_fx_reserves_usd_bn")]].copy()
+        selected.columns = ["iso3", "year", "gold_fx_reserves_usd_bn"]
+        selected["iso3"] = selected["iso3"].astype(str).str.strip().str.upper()
+        selected["year"] = pd.to_numeric(selected["year"], errors="coerce")
+        selected["gold_fx_reserves_usd_bn"] = pd.to_numeric(
+            selected["gold_fx_reserves_usd_bn"], errors="coerce"
+        )
+    else:
+        required = {"countryiso3code", "date", "value"}
+        missing = sorted(required - set(columns))
+        if missing:
+            raise ValueError(f"World Bank reserves response is missing fields: {', '.join(missing)}")
+        selected = pd.DataFrame({
+            "iso3": frame[columns["countryiso3code"]].astype(str).str.strip().str.upper(),
+            "year": pd.to_numeric(frame[columns["date"]], errors="coerce"),
+            "gold_fx_reserves_usd_bn": pd.to_numeric(frame[columns["value"]], errors="coerce") / 1_000_000_000.0,
+        })
+        region_column = columns.get("region.id")
+        if region_column:
+            selected = selected.loc[frame[region_column].astype(str).str.upper().ne("NA")].copy()
+    selected = selected.loc[
+        selected["iso3"].str.fullmatch(r"[A-Z]{3}", na=False)
+        & selected["year"].notna()
+        & selected["gold_fx_reserves_usd_bn"].notna()
+        & selected["gold_fx_reserves_usd_bn"].ge(0)
+    ].copy()
+    if selected.empty:
+        raise ValueError("World Bank reserves response contains no valid country observations.")
+    selected["year"] = selected["year"].astype(int)
+    return selected.drop_duplicates(["iso3", "year"], keep="last").sort_values(
+        ["iso3", "year"]
+    ).reset_index(drop=True)
+
+
+def _fetch_world_bank_reserves(client: httpx.Client, reference_year: int) -> pd.DataFrame:
+    records: list[dict[str, Any]] = []
+    params = {"format": "json", "per_page": 20000, "date": f"2000:{int(reference_year)}"}
+    page = 1
+    pages = 1
+    while page <= pages:
+        response = client.get(WORLD_BANK_RESERVES_URL, params={**params, "page": page})
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list) or len(payload) < 2 or not isinstance(payload[0], dict):
+            raise ValueError("World Bank reserves API returned an invalid paginated response.")
+        if payload[0].get("message"):
+            raise ValueError(f"World Bank reserves API error: {payload[0]['message']}")
+        if page == 1:
+            pages = int(payload[0].get("pages", 0))
+        if isinstance(payload[1], list):
+            records.extend(item for item in payload[1] if isinstance(item, dict))
+        page += 1
+    frame = parse_world_bank_reserves_frame(records)
+    if frame["iso3"].nunique() < 40:
+        raise ValueError("World Bank reserves data failed the minimum country-coverage validation.")
+    return frame
+
+
 def build_world_economy_frames(
     bis: pd.DataFrame,
     imf: pd.DataFrame,
@@ -600,6 +694,7 @@ def build_world_economy_frames(
     dsr: pd.DataFrame | None = None,
     long_term_rates: pd.DataFrame | None = None,
     cds: pd.DataFrame | None = None,
+    reserves: pd.DataFrame | None = None,
     reference_year: int = 2026,
     source_metadata: dict[str, Any] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], int, str | None]:
@@ -617,6 +712,9 @@ def build_world_economy_frames(
     )
     cds = cds.copy() if cds is not None else pd.DataFrame(
         columns=["iso3", "country_name", "cds_5y_bps", "cds_var_6m_pct", "cds_pd_pct"]
+    )
+    reserves = reserves.copy() if reserves is not None else pd.DataFrame(
+        columns=["iso3", "year", "gold_fx_reserves_usd_bn"]
     )
     metadata = source_metadata or {}
     bis["year"] = pd.to_numeric(bis["year"], errors="coerce").astype("Int64")
@@ -661,6 +759,7 @@ def build_world_economy_frames(
     gdp = _indicator_panel(imf, "NGDPD", "nominal_gdp_usd_bn")
     fiscal = _indicator_panel(imf, "GGXCNL_NGDP", "fiscal_balance_pct")
     expenditure = _indicator_panel(imf, "GGX_NGDP", "government_expenditure_pct")
+    government_debt = _indicator_panel(imf, "GGXWDG_NGDP", "government_debt_gdp_pct")
     current_account = _indicator_panel(imf, "BCA_NGDPD", "current_account_pct")
     real = _indicator_panel(imf, "NGDP_RPCH", "real_gdp_growth_pct")
     country_info = imf[["iso3", "country_name"]].drop_duplicates("iso3").set_index("iso3")["country_name"]
@@ -673,6 +772,21 @@ def build_world_economy_frames(
         current_gdp = _value(gdp, iso3, reference_year, "nominal_gdp_usd_bn")
         current_fiscal = _value(fiscal, iso3, reference_year, "fiscal_balance_pct")
         current_expenditure = _value(expenditure, iso3, reference_year, "government_expenditure_pct")
+        current_government_debt_gdp = _value(government_debt, iso3, reference_year, "government_debt_gdp_pct")
+        reserve_history = reserves.loc[
+            reserves["iso3"].eq(iso3)
+            & pd.to_numeric(reserves["year"], errors="coerce").le(reference_year)
+        ].sort_values("year", ascending=False)
+        government_debt_coverage = np.nan
+        for reserve_row in reserve_history.itertuples(index=False):
+            reserve_year = int(reserve_row.year)
+            reserve_value = float(reserve_row.gold_fx_reserves_usd_bn)
+            reserve_year_gdp = _value(gdp, iso3, reserve_year, "nominal_gdp_usd_bn")
+            reserve_year_debt_gdp = _value(government_debt, iso3, reserve_year, "government_debt_gdp_pct")
+            government_debt_usd_bn = reserve_year_gdp * reserve_year_debt_gdp / 100.0
+            if np.isfinite(reserve_value) and np.isfinite(government_debt_usd_bn) and government_debt_usd_bn > 0:
+                government_debt_coverage = reserve_value / government_debt_usd_bn * 100.0
+                break
         current_account_pct = _value(current_account, iso3, reference_year, "current_account_pct")
         current_account_5y = _value(current_account, iso3, reference_year - 5, "current_account_pct")
         current_account_10y = _value(current_account, iso3, reference_year - 10, "current_account_pct")
@@ -725,6 +839,8 @@ def build_world_economy_frames(
             "gdp_cagr_5y_pct": _cagr(current_gdp, gdp5, 5),
             "gdp_cagr_10y_pct": _cagr(current_gdp, gdp10, 10),
             "total_debt_gdp_pct": debt,
+            "government_debt_gdp_pct": current_government_debt_gdp,
+            "government_debt_coverage_pct": government_debt_coverage,
             "bis_observation_quarter": f"{debt_year}Q{debt_quarter}" if debt_year and debt_quarter else None,
             "debt_delta_5y_pp": debt - debt5 if np.isfinite(debt) and np.isfinite(debt5) else np.nan,
             "debt_delta_10y_pp": debt - debt10 if np.isfinite(debt) and np.isfinite(debt10) else np.nan,
@@ -783,6 +899,7 @@ def build_world_economy_frames(
     history["country_name"] = history["country_name"].fillna(history["iso3"].map(country_info))
     history["fiscal_balance_pct"] = history.get("GGXCNL_NGDP", np.nan)
     history["government_expenditure_pct"] = history.get("GGX_NGDP", np.nan)
+    history["government_debt_gdp_pct"] = history.get("GGXWDG_NGDP", np.nan)
     history["current_account_pct"] = history.get("BCA_NGDPD", np.nan)
     history["nominal_gdp_usd_bn"] = history.get("NGDPD", np.nan)
     history["real_gdp_growth_pct"] = history.get("NGDP_RPCH", np.nan)
@@ -835,11 +952,11 @@ def build_world_economy_frames(
 
     provisional = bis.loc[bis["year"].eq(reference_year)].sort_values(["year", "quarter"]).groupby("iso3", as_index=False).tail(1)
     provisional = provisional.merge(
-        imf_history.loc[imf_history["year"].eq(reference_year), ["iso3", "year", "GGXCNL_NGDP", "GGX_NGDP", "BCA_NGDPD", "NGDPD", "NGDP_RPCH"]],
+        imf_history.loc[imf_history["year"].eq(reference_year), ["iso3", "year", "GGXCNL_NGDP", "GGX_NGDP", "BCA_NGDPD", "NGDPD", "NGDP_RPCH", "GGXWDG_NGDP"]],
         on=["iso3", "year"], how="left",
     )
     provisional = provisional.merge(
-        imf_latest.loc[imf_latest["year"].eq(reference_year), ["iso3", "year", "GGXCNL_NGDP", "GGX_NGDP", "BCA_NGDPD", "NGDPD", "NGDP_RPCH"]],
+        imf_latest.loc[imf_latest["year"].eq(reference_year), ["iso3", "year", "GGXCNL_NGDP", "GGX_NGDP", "BCA_NGDPD", "NGDPD", "NGDP_RPCH", "GGXWDG_NGDP"]],
         on=["iso3", "year"], how="left", suffixes=("", "_latest_actual_year"),
     )
     if not provisional.empty:
@@ -847,6 +964,7 @@ def build_world_economy_frames(
         provisional["country_name"] = provisional["iso3"].map(country_info).fillna(provisional["country_name"])
         provisional["fiscal_balance_pct"] = provisional["GGXCNL_NGDP"]
         provisional["government_expenditure_pct"] = provisional["GGX_NGDP"]
+        provisional["government_debt_gdp_pct"] = provisional["GGXWDG_NGDP"]
         provisional["current_account_pct"] = provisional["BCA_NGDPD"]
         provisional["nominal_gdp_usd_bn"] = provisional["NGDPD"]
         provisional["real_gdp_growth_pct"] = provisional["NGDP_RPCH"]
@@ -919,6 +1037,9 @@ def build_world_economy_frames(
         "imf_vintage": metadata.get("weo_vintage"),
         "imf_retrieved_at_utc": metadata.get("weo_retrieved_at_utc"),
         "imf_indicators": list(IMF_INDICATORS),
+        "world_bank_reserves_source_url": metadata.get("world_bank_reserves_url", WORLD_BANK_RESERVES_SOURCE_URL),
+        "world_bank_reserves_retrieved_at_utc": metadata.get("world_bank_reserves_retrieved_at_utc"),
+        "world_bank_reserves_countries": int(reserves["iso3"].nunique()) if not reserves.empty else 0,
         "reference_year": int(reference_year),
         "countries_with_reference_gdp_and_fiscal": int(coverage.sum()),
         "countries_in_table": int(len(table)),

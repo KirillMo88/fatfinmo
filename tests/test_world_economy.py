@@ -9,6 +9,7 @@ import pandas as pd
 from world_economy import (
     OECD_LONG_TERM_RATES_URL,
     WORLD_GOVERNMENT_BONDS_CDS_URL,
+    WORLD_BANK_RESERVES_URL,
     _cagr,
     _weo_gdp_to_usd_bn,
     build_world_economy_frames,
@@ -17,6 +18,7 @@ from world_economy import (
     parse_bis_bulk_csv,
     parse_bis_dsr_bulk_csv,
     parse_oecd_long_term_rates_csv,
+    parse_world_bank_reserves_frame,
     parse_weo_countries_frame,
 )
 
@@ -70,6 +72,8 @@ def _imf_frame() -> pd.DataFrame:
              "value": -5 + (year - 2016) * 0.1, "latest_actual_year": 2025, "scale": "Percent of GDP"},
             {"iso3": "USA", "country_name": "United States", "indicator_id": "GGX_NGDP", "year": year,
              "value": 35 + (year - 2016) * 0.1, "latest_actual_year": 2025, "scale": "Percent of GDP"},
+            {"iso3": "USA", "country_name": "United States", "indicator_id": "GGXWDG_NGDP", "year": year,
+             "value": 95 + (year - 2016) * 1.5, "latest_actual_year": 2025, "scale": "Percent of GDP"},
             {"iso3": "USA", "country_name": "United States", "indicator_id": "BCA_NGDPD", "year": year,
              "value": -2 + (year - 2016) * 0.2, "latest_actual_year": 2025, "scale": "Percent of GDP"},
             {"iso3": "USA", "country_name": "United States", "indicator_id": "NGDP_RPCH", "year": year,
@@ -101,6 +105,12 @@ def _cds_frame() -> pd.DataFrame:
     }])
 
 
+def _reserves_frame() -> pd.DataFrame:
+    return pd.DataFrame([{
+        "iso3": "USA", "year": 2025, "gold_fx_reserves_usd_bn": 1_000.0,
+    }])
+
+
 def test_formula_helpers_preserve_sign_and_require_positive_gdp() -> None:
     assert np.isclose(_cagr(200, 100, 5), (2 ** (1 / 5) - 1) * 100)
     assert np.isnan(_cagr(0, 100, 5))
@@ -111,13 +121,15 @@ def test_formula_helpers_preserve_sign_and_require_positive_gdp() -> None:
 def test_snapshot_calculations_use_matching_bis_quarters_and_three_real_growth_years() -> None:
     table, history, diagnostics, reference_year, warning = build_world_economy_frames(
         _bis_frame(), _imf_frame(), dsr=_dsr_frame(), long_term_rates=_long_term_rates_frame(),
-        cds=_cds_frame(), reference_year=2026,
+        cds=_cds_frame(), reserves=_reserves_frame(), reference_year=2026,
     )
     row = table.iloc[0]
     assert reference_year == 2026
     assert warning is None
     assert row["bis_observation_quarter"] == "2026Q1"
     assert np.isclose(row["government_expenditure_pct"], 36.0)
+    assert np.isclose(row["government_debt_gdp_pct"], 110.0)
+    assert np.isclose(row["government_debt_coverage_pct"], 1_000.0 / (27_000.0 * 108.5 / 100.0) * 100.0)
     assert np.isclose(row["current_account_pct"], 0.0)
     assert np.isclose(row["current_account_delta_5y_pp"], 1.0)
     assert np.isclose(row["current_account_delta_10y_pp"], 2.0)
@@ -167,6 +179,20 @@ def test_sovereign_cds_parser_extracts_bps_variation_and_default_probability() -
     assert us["cds_5y_bps"] == 37.36
     assert us["cds_var_6m_pct"] == -7.25
     assert us["cds_pd_pct"] == 0.62
+
+
+def test_world_bank_reserves_parser_converts_usd_to_billions_and_drops_aggregates() -> None:
+    parsed = parse_world_bank_reserves_frame([
+        {"countryiso3code": "USA", "date": "2025", "value": 3_000_000_000_000,
+         "country": {"id": "USA", "value": "United States"}, "region": {"id": "NAC", "value": "North America"}},
+        {"countryiso3code": "CAN", "date": "2025", "value": 250_000_000_000,
+         "country": {"id": "CAN", "value": "Canada"}, "region": {"id": "NAC", "value": "North America"}},
+        {"countryiso3code": "WLD", "date": "2025", "value": 20_000_000_000_000,
+         "country": {"id": "WLD", "value": "World"}, "region": {"id": "NA", "value": "Aggregates"}},
+    ])
+    assert "indicator/FI.RES.TOTL.CD" in WORLD_BANK_RESERVES_URL
+    assert parsed["iso3"].tolist() == ["CAN", "USA"]
+    assert parsed.loc[parsed["iso3"].eq("USA"), "gold_fx_reserves_usd_bn"].iloc[0] == 3_000.0
 
 
 def test_bis_parser_selects_only_quarterly_total_nfc_percent_gdp_series() -> None:
@@ -243,6 +269,8 @@ def test_weo_parser_converts_gdp_usd_billions_but_leaves_percent_series_unchange
          "SCALE": "Percent of GDP", "2026": -6.1},
         {"COUNTRY.ID": "USA", "COUNTRY": "United States", "INDICATOR.ID": "GGX_NGDP", "LATEST_ACTUAL_ANNUAL_DATA": 2025,
          "SCALE": "Percent of GDP", "2026": 37.4},
+        {"COUNTRY.ID": "USA", "COUNTRY": "United States", "INDICATOR.ID": "GGXWDG_NGDP", "LATEST_ACTUAL_ANNUAL_DATA": 2025,
+         "SCALE": "Percent of GDP", "2026": 110.0},
         {"COUNTRY.ID": "USA", "COUNTRY": "United States", "INDICATOR.ID": "BCA_NGDPD", "LATEST_ACTUAL_ANNUAL_DATA": 2025,
          "SCALE": "Percent of GDP", "2026": 1.2},
         {"COUNTRY.ID": "USA", "COUNTRY": "United States", "INDICATOR.ID": "NGDP_RPCH", "LATEST_ACTUAL_ANNUAL_DATA": 2025,
@@ -252,10 +280,12 @@ def test_weo_parser_converts_gdp_usd_billions_but_leaves_percent_series_unchange
     gdp = parsed.loc[parsed["indicator_id"].eq("NGDPD"), "value"].iloc[0]
     fiscal = parsed.loc[parsed["indicator_id"].eq("GGXCNL_NGDP"), "value"].iloc[0]
     expenditure = parsed.loc[parsed["indicator_id"].eq("GGX_NGDP"), "value"].iloc[0]
+    government_debt = parsed.loc[parsed["indicator_id"].eq("GGXWDG_NGDP"), "value"].iloc[0]
     current_account = parsed.loc[parsed["indicator_id"].eq("BCA_NGDPD"), "value"].iloc[0]
     assert gdp == 28.0
     assert fiscal == -6.1
     assert expenditure == 37.4
+    assert government_debt == 110.0
     assert current_account == 1.2
 
 
