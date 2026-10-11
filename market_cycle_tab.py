@@ -2337,14 +2337,14 @@ def build_current_risk_signals_fig(history: pd.DataFrame, start: pd.Timestamp, e
         )
     )
     categories = [
-        ("LOW CONFIRMATION", "#22c55e", "circle", 8),
-        ("MODERATE", "#facc15", "diamond", 9),
-        ("HIGH RISK", "#f97316", "triangle-up", 10),
-        ("RED FLAG", "#fb7185", "x", 11),
-        ("RED FLAG + TOP CONFIRMATION", "#ef4444", "star", 12),
-        ("RED FLAG + CREDIT CONFIRMATION", "#7f1d1d", "star-diamond", 13),
+        ("LOW CONFIRMATION", "#22c55e", "circle", 8, "legendonly"),
+        ("MODERATE", "#facc15", "diamond", 9, "legendonly"),
+        ("HIGH RISK", "#f97316", "triangle-up", 10, True),
+        ("RED FLAG", "#3b82f6", "diamond", 11, True),
+        ("RED FLAG + TOP CONFIRMATION", "#ef4444", "star", 12, True),
+        ("RED FLAG + CREDIT CONFIRMATION", "#ef4444", "diamond", 13, True),
     ]
-    for category, color, symbol, size in categories:
+    for category, color, symbol, size, visible in categories:
         points = d[
             d["CurrentRiskEventMarker"].fillna(False).astype(bool)
             & d["CurrentRiskEventMarkerClass"].eq(category)
@@ -2374,6 +2374,7 @@ def build_current_risk_signals_fig(history: pd.DataFrame, start: pd.Timestamp, e
                 y=points["CurrentRiskSPYRawClose"].combine_first(points["SPY_Close"]),
                 mode="markers",
                 name=category,
+                visible=visible,
                 marker={"color": color, "symbol": symbol, "size": size, "line": {"color": "#0f131a", "width": 1}},
                 customdata=custom,
                 hovertemplate=(
