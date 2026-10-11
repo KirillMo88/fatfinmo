@@ -306,6 +306,8 @@ def _country_trajectory_table(selected: pd.DataFrame, reference_year: int) -> pd
         ("Nominal GDP Growth", "nominal_gdp_growth_pct", "pct"),
         ("Real GDP Growth", "real_gdp_growth_pct", "pct"),
         ("Total Debt / GDP", "total_debt_gdp_annual_avg_pct", "pct"),
+        ("Government Debt / GDP", "government_debt_gdp_pct", "pct"),
+        ("Government Debt Coverage", "government_debt_coverage_pct", "pct"),
         ("Interest Rate", "long_term_interest_rate_annual_avg_pct", "pct"),
         ("Interest on total Debt (% GDP)", "interest_on_total_debt_pct_gdp", "pct"),
         ("DSR Private non-financial sector", "dsr_annual_avg_pct", "pct"),

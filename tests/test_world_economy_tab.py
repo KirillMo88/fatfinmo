@@ -4,6 +4,7 @@ import pandas as pd
 
 from world_economy_tab import (
     _add_trajectory_average_separator,
+    _country_trajectory_table,
     _top_gdp_cds_countries,
     _trajectory_chart_data,
 )
@@ -66,3 +67,32 @@ def test_top_gdp_cds_excludes_russia_and_replaces_it_with_next_country() -> None
     assert "RUS" not in selected["iso3"].tolist()
     assert "CAN" in selected["iso3"].tolist()
     assert selected.iloc[0]["gdp_rank"] == 11
+
+
+def test_country_trajectory_table_places_government_debt_rows_after_total_debt() -> None:
+    history = pd.DataFrame({
+        "year": [2025, 2026],
+        "is_provisional": [False, False],
+        "nominal_gdp_usd_bn": [27_000.0, 28_000.0],
+        "nominal_gdp_growth_pct": [5.0, 3.7],
+        "real_gdp_growth_pct": [2.0, 2.2],
+        "total_debt_gdp_annual_avg_pct": [250.0, 251.0],
+        "government_debt_gdp_pct": [108.5, 110.0],
+        "government_debt_coverage_pct": [3.41, float("nan")],
+        "long_term_interest_rate_annual_avg_pct": [4.2, 4.5],
+        "interest_on_total_debt_pct_gdp": [10.5, 11.3],
+        "dsr_annual_avg_pct": [13.8, 13.9],
+        "fiscal_balance_pct": [-6.8, -7.5],
+        "government_expenditure_pct": [37.7, 37.9],
+        "current_account_pct": [-3.6, -3.7],
+    })
+
+    trajectory = _country_trajectory_table(history, 2026)
+
+    labels = trajectory["Indicator"].tolist()
+    total_debt_index = labels.index("Total Debt / GDP")
+    assert labels[total_debt_index + 1:total_debt_index + 3] == [
+        "Government Debt / GDP", "Government Debt Coverage",
+    ]
+    assert trajectory.loc[trajectory["Indicator"].eq("Government Debt Coverage"), "2025"].iloc[0] == "3.41"
+    assert trajectory.loc[trajectory["Indicator"].eq("Government Debt Coverage"), "2026"].iloc[0] == "—"
