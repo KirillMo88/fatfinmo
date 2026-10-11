@@ -489,18 +489,30 @@ def build_world_economy_frames(
             axis=1,
         )
         provisional["is_provisional"] = True
+        fiscal_latest_year = provisional.get(
+            "GGXCNL_NGDP_latest_actual_year", pd.Series(np.nan, index=provisional.index)
+        )
+        gdp_latest_year = provisional.get(
+            "NGDPD_latest_actual_year", pd.Series(np.nan, index=provisional.index)
+        )
+        growth_latest_year = provisional.get(
+            "NGDP_RPCH_latest_actual_year", pd.Series(np.nan, index=provisional.index)
+        )
+        # WEO latest-actual columns use pandas' nullable Int64 dtype. Comparing a
+        # provisional year with a missing latest-actual year therefore returns
+        # pd.NA, which np.where cannot treat as a boolean.
         provisional["fiscal_status"] = np.where(
-            provisional["year"].le(provisional.get("GGXCNL_NGDP_latest_actual_year", pd.Series(np.nan, index=provisional.index))),
+            (fiscal_latest_year.notna() & provisional["year"].le(fiscal_latest_year)).fillna(False),
             "IMF historical / estimate",
             "IMF forecast",
         )
         provisional["gdp_status"] = np.where(
-            provisional["year"].le(provisional.get("NGDPD_latest_actual_year", pd.Series(np.nan, index=provisional.index))),
+            (gdp_latest_year.notna() & provisional["year"].le(gdp_latest_year)).fillna(False),
             "IMF historical / estimate",
             "IMF forecast",
         )
         provisional["real_growth_status"] = np.where(
-            provisional["year"].le(provisional.get("NGDP_RPCH_latest_actual_year", pd.Series(np.nan, index=provisional.index))),
+            (growth_latest_year.notna() & provisional["year"].le(growth_latest_year)).fillna(False),
             "IMF historical / estimate",
             "IMF forecast",
         )
