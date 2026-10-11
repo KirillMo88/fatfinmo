@@ -41,6 +41,11 @@ INFORMATIONAL_PRODUCTION_FRED_SERIES = {
     "IPUTIL": "Industrial Production: Utilities",
 }
 
+INFORMATIONAL_CONSUMER_CREDIT_FRED_SERIES = {
+    "TOTALSL": "Total Consumer Credit",
+    "REVOLSL": "Revolving Credit",
+}
+
 INFLATION_FRED_SERIES = {
     "T5YIE": "5-Year Breakeven Inflation Rate",
     "T10YIE": "10-Year Breakeven Inflation Rate",
@@ -56,7 +61,11 @@ INFLATION_FRED_SERIES = {
 }
 
 ALL_FRED_SERIES = {**BUSINESS_CYCLE_FRED_SERIES, **INFLATION_FRED_SERIES}
-DOWNLOAD_FRED_SERIES = {**ALL_FRED_SERIES, **INFORMATIONAL_PRODUCTION_FRED_SERIES}
+INFORMATIONAL_FRED_SERIES = {
+    **INFORMATIONAL_PRODUCTION_FRED_SERIES,
+    **INFORMATIONAL_CONSUMER_CREDIT_FRED_SERIES,
+}
+DOWNLOAD_FRED_SERIES = {**ALL_FRED_SERIES, **INFORMATIONAL_FRED_SERIES}
 TRADINGVIEW_ECONOMIC_FALLBACKS: dict[str, str] = {}
 
 MONTHLY_RELEASE_LAGS = {
@@ -79,6 +88,8 @@ MONTHLY_RELEASE_LAGS = {
     "CPILFESL": 16,
     "PCEPILFE": 32,
     "PPIACO": 16,
+    "TOTALSL": 32,
+    "REVOLSL": 32,
 }
 WEEKLY_RELEASE_LAGS = {"ICSA": 6, "CCSA": 6}
 DAILY_SERIES = {"T5YIE", "T10YIE", "EXPINF1YR", "EXPINF5YR", "T5YIFR"}
@@ -444,6 +455,11 @@ def build_business_cycle_history(calendar: pd.DatetimeIndex, fred: pd.DataFrame)
         history[f"{col}_YoY"] = num(history[col]).pct_change(52, fill_method=None) * 100.0
         history[f"{col}_YoY_3MMA"] = history[f"{col}_YoY"].rolling(13, min_periods=4).mean()
     for col in INFORMATIONAL_PRODUCTION_FRED_SERIES:
+        history[f"{col}_YoY"] = num(history[col]).pct_change(52, fill_method=None) * 100.0
+        history[f"{col}_YoY_3MMA"] = history[f"{col}_YoY"].rolling(13, min_periods=4).mean()
+        history[f"{col}_Z"] = expanding_z(history[f"{col}_YoY_3MMA"])
+    history["NONREVOLSL"] = num(history["TOTALSL"]) - num(history["REVOLSL"])
+    for col in ["TOTALSL", "REVOLSL", "NONREVOLSL"]:
         history[f"{col}_YoY"] = num(history[col]).pct_change(52, fill_method=None) * 100.0
         history[f"{col}_YoY_3MMA"] = history[f"{col}_YoY"].rolling(13, min_periods=4).mean()
         history[f"{col}_Z"] = expanding_z(history[f"{col}_YoY_3MMA"])
