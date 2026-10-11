@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from world_economy import (
+    OECD_LONG_TERM_RATES_URL,
     _cagr,
     _weo_gdp_to_usd_bn,
     build_world_economy_frames,
@@ -15,6 +16,12 @@ from world_economy import (
     parse_oecd_long_term_rates_csv,
     parse_weo_countries_frame,
 )
+
+
+def test_oecd_long_term_rates_uses_data_explorer_api_query() -> None:
+    assert "/public/rest/data/" in OECD_LONG_TERM_RATES_URL
+    assert "dimensionAtObservation=AllDimensions" in OECD_LONG_TERM_RATES_URL
+    assert "format=csvfile" in OECD_LONG_TERM_RATES_URL
 
 
 def _bis_frame() -> pd.DataFrame:
