@@ -7097,11 +7097,11 @@ def main():
         st.warning("Fund flow data unavailable")
 
     view_options = [
-        "Portfolio",
         "Table",
         "Charts",
         "Graphs",
         "AI Dashboard",
+        "Portfolio",
         "Technical Outlook",
         "Market Cycle",
         "Commodity Cycle",
