@@ -60,7 +60,7 @@ from spy_macro_outlook import (
 MARKET_CYCLE_TTL_SECONDS = 21600
 MARKET_CYCLE_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
 # Bump when the snapshot's calculated fields or their semantics change.
-MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v7"
+MARKET_CYCLE_CACHE_SCHEMA = "market-cycle-snapshot-v8"
 SPY_MACRO_CACHE_SCHEMA = "spy-macro-outlook-v1"
 MARKET_CYCLE_PERSISTENT_CACHE_DIR = Path(
     os.getenv("MARKET_CYCLE_CACHE_DIR", Path(__file__).resolve().parent / "persistent" / "snapshots")
@@ -191,12 +191,12 @@ def render_broker_margin_leverage(quarterly: pd.DataFrame, daily_spx: pd.DataFra
         "Insufficient Data" if latest_loan is None or pd.isna(latest_loan["MarginLoansGrowthPct"]) else f"{latest_loan['MarginLoansGrowthPct']:.1f}",
     )
     kpis[3].metric(
-        "Margin / Market Cap",
-        "Insufficient Data" if common is None or pd.isna(common["MarginToMarketCapPct"]) else f"{common['MarginToMarketCapPct']:.3f}%",
+        "Margin / 3Y Avg Market Cap",
+        "Insufficient Data" if common is None or pd.isna(common["MarginToMarketCap3YAvgPct"]) else f"{common['MarginToMarketCap3YAvgPct']:.3f}%",
     )
     kpis[4].metric(
         f"Leverage Percentile ({lookback})",
-        "Insufficient Data" if common is None or pd.isna(common["MarginToMarketCapPctile"]) else f"{common['MarginToMarketCapPctile']:.1f}",
+        "Insufficient Data" if common is None or pd.isna(common["MarginToMarketCap3YAvgPctile"]) else f"{common['MarginToMarketCap3YAvgPctile']:.1f}",
     )
     kpis[5].metric(
         "Latest Common Quarter",
@@ -210,7 +210,7 @@ def render_broker_margin_leverage(quarterly: pd.DataFrame, daily_spx: pd.DataFra
             "Latest source observations — "
             f"broker receivables: {loan_date:%Y-%m-%d}" if loan_date is not None else "Latest source observations — broker receivables: unavailable"
         )
-        st.caption(f"US equity market cap: {equity_date:%Y-%m-%d}" if equity_date is not None else "US equity market cap: unavailable")
+        st.caption(f"US equity market cap source: {equity_date:%Y-%m-%d}" if equity_date is not None else "US equity market cap source: unavailable")
 
     range_options = ["MAX", "20Y", "10Y", "5Y"]
     controls = st.columns([1.1, 1.15, 1.2, 1.1, 1.1, 1.25])
@@ -223,8 +223,8 @@ def render_broker_margin_leverage(quarterly: pd.DataFrame, daily_spx: pd.DataFra
     show_loans = controls[1].checkbox("Broker Margin Loans", value=True, key="broker_margin_show_loans")
     show_spx = controls[2].checkbox("Log SPX", value=True, key="broker_margin_show_spx")
     show_refs = controls[3].checkbox("Percentile levels", value=True, key="broker_margin_show_refs")
-    show_ratio = controls[4].checkbox("Margin / Market Cap", value=True, key="broker_margin_show_ratio")
-    show_ratio_pct = controls[5].checkbox("Ratio Percentile", value=True, key="broker_margin_show_ratio_pct")
+    show_ratio = controls[4].checkbox("Margin / 3Y Avg Market Cap", value=True, key="broker_margin_show_ratio")
+    show_ratio_pct = controls[5].checkbox(f"Leverage Percentile ({lookback})", value=True, key="broker_margin_show_ratio_pct")
 
     spx_weekly = weekly_log_spx(daily_spx)
     end_dates = [pd.to_datetime(history["Date"], errors="coerce").max()]
@@ -248,27 +248,36 @@ def render_broker_margin_leverage(quarterly: pd.DataFrame, daily_spx: pd.DataFra
     st.plotly_chart(
         fig,
         use_container_width=True,
-        config={"displayModeBar": True, "responsive": True, "scrollZoom": True},
+        config={"displayModeBar": True, "responsive": True, "scrollZoom": False},
     )
     st.caption(
         "FRED Z.1 quarterly end-of-period source values are in millions of USD; displayed as USD billions/trillions. "
+        "Broker leverage uses the trailing 12-quarter simple average of US equity market cap. "
         "Quarterly broker series remain quarterly (not interpolated). SPX uses weekly closes from the existing yfinance history. "
         "The broker series includes customer receivables beyond pure margin debt and is a proxy, not total market leverage. "
         "Percentiles include the current observation and use only current/past observations."
     )
+    leverage_percentile_dates = history.loc[history["MarginToMarketCap3YAvgPctile"].notna(), "Date"]
+    if not leverage_percentile_dates.empty:
+        st.caption(f"Earliest available {lookback} leverage percentile: {leverage_percentile_dates.min():%Y-%m-%d}.")
+    else:
+        st.caption(f"The {lookback} leverage percentile is not yet calculable from available historical data.")
 
     if latest_loan is None or common is None:
-        st.info("Broker Leverage Interpretation — Insufficient Data: both loan and equity-market-cap observations are required for the normalized leverage interpretation.")
+        st.info("Broker Leverage Interpretation — Insufficient Data: broker loans and a complete 12-quarter market-cap average are required for the normalized leverage interpretation.")
         return
     title, detail = broker_leverage_interpretation(
         common.get("MarginLoansGrowthPct"),
-        common.get("MarginToMarketCapPctile"),
+        common.get("MarginToMarketCap3YAvgPctile"),
+        lookback,
     )
     st.markdown("#### Broker Leverage Interpretation")
     st.info(f"**{title}.** {detail}")
     st.caption(
         f"Credit state: {classify_credit_growth(common.get('MarginLoansGrowthPct'))} · "
-        f"Normalized leverage: {classify_normalized_leverage(common.get('MarginToMarketCapPctile'))}. "
+        f"Trend-adjusted leverage: {classify_normalized_leverage(common.get('MarginToMarketCap3YAvgPctile'))}. "
+        "Broker leverage is normalized by the trailing 3-year average US public equity market capitalization rather than current market capitalization. "
+        "This reduces sensitivity to short-term fluctuations in equity market valuations and measures broker credit relative to the trend size of the equity market. "
         "Descriptive context only; this module does not generate trading signals or affect Market Cycle classifications."
     )
 
@@ -297,7 +306,7 @@ def build_broker_margin_leverage_fig(
             "Broker Margin Loans vs Log SPX",
             f"Margin Loans — Level Percentile ({lookback})",
             f"Margin Loans — YoY Growth Percentile ({lookback})",
-            f"Broker Leverage / Equity Market Cap — Ratio & Percentile ({lookback})",
+            f"Broker Leverage / 3Y Average Market Cap — Ratio & Percentile ({lookback})",
         ),
     )
     dates = pd.to_datetime(quarterly["Date"], errors="coerce")
@@ -322,6 +331,8 @@ def build_broker_margin_leverage_fig(
             secondary_y=False,
         )
     if show_spx and weekly_spx is not None and not weekly_spx.empty:
+        spx_values = pd.to_numeric(weekly_spx["SPX_Close"], errors="coerce")
+        positive_spx = spx_values[spx_values.gt(0)].dropna()
         fig.add_trace(
             go.Scatter(
                 x=weekly_spx["Date"],
@@ -337,7 +348,34 @@ def build_broker_margin_leverage_fig(
             secondary_y=True,
         )
     fig.update_yaxes(title_text="USD billions", row=1, col=1, secondary_y=False)
-    fig.update_yaxes(title_text="ln(SPX)", row=1, col=1, secondary_y=True)
+    if show_spx and weekly_spx is not None and not weekly_spx.empty and not positive_spx.empty:
+        min_spx = float(positive_spx.min())
+        max_spx = float(positive_spx.max())
+        first_power = int(np.floor(np.log10(min_spx))) - 1
+        last_power = int(np.ceil(np.log10(max_spx))) + 1
+        spx_ticks = sorted(
+            {
+                float(multiplier * 10**power)
+                for power in range(first_power, last_power + 1)
+                for multiplier in (1, 2, 5)
+                if min_spx <= multiplier * 10**power <= max_spx
+            }
+        )
+        if len(spx_ticks) < 2:
+            spx_ticks = np.linspace(min_spx, max_spx, 4).tolist()
+        fig.update_yaxes(
+            title_text="SPX (log scale)",
+            type="linear",
+            range=[float(np.log(min_spx)), float(np.log(max_spx))],
+            tickmode="array",
+            tickvals=np.log(spx_ticks).tolist(),
+            ticktext=[f"{value:,.0f}" if value >= 100 else f"{value:g}" for value in spx_ticks],
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
+    else:
+        fig.update_yaxes(title_text="SPX (log scale)", row=1, col=1, secondary_y=True)
 
     percentile_panels = [
         (2, "MarginLoansLevelPct", "Level Percentile", "#38bdf8", "MarginLoansBillions"),
@@ -346,10 +384,10 @@ def build_broker_margin_leverage_fig(
     if show_reference_levels:
         for row in (2, 3):
             fig.add_hrect(y0=90, y1=100, fillcolor="#ef4444", opacity=0.07, line_width=0, row=row, col=1)
-            fig.add_hrect(y0=0, y1=10, fillcolor="#38bdf8", opacity=0.06, line_width=0, row=row, col=1)
+            fig.add_hrect(y0=0, y1=10, fillcolor="#22c55e", opacity=0.09, line_width=0, row=row, col=1)
             for level in (10, 50, 90):
                 fig.add_hline(y=level, line={"color": "#64748b", "dash": "dot" if level == 50 else "solid", "width": 0.8}, row=row, col=1)
-        for lower, upper, color in [(90, 100, "#ef4444"), (0, 10, "#38bdf8")]:
+        for lower, upper, color in [(90, 100, "#ef4444"), (0, 10, "#22c55e")]:
             fig.add_shape(
                 type="rect",
                 xref="x4",
@@ -399,24 +437,27 @@ def build_broker_margin_leverage_fig(
         [
             quarterly["MarginLoansBillions"],
             quarterly["EquityMarketCapTrillions"],
-            quarterly["MarginToMarketCapPct"],
-            quarterly["MarginToMarketCapPctile"],
+            quarterly["EquityMarketCap3YAvgTrillions"],
+            quarterly["MarginToMarketCap3YAvgPct"],
+            quarterly["MarginToMarketCap3YAvgPctile"],
         ]
     )
     if show_ratio:
         fig.add_trace(
             go.Scatter(
                 x=dates,
-                y=pd.to_numeric(quarterly["MarginToMarketCapPct"], errors="coerce"),
+                y=pd.to_numeric(quarterly["MarginToMarketCap3YAvgPct"], errors="coerce"),
                 mode="lines+markers",
-                name="Margin / Market Cap Ratio",
+                name="Margin / 3Y Average Market Cap",
                 line={"color": "#a78bfa", "width": 1.8},
                 marker={"size": 4},
                 customdata=ratio_custom,
                 hovertemplate=(
-                    "Date: %{x|%Y-%m-%d}<br>Broker receivables: $%{customdata[0]:,.1f}B"
-                    "<br>US equity market cap: $%{customdata[1]:,.2f}T<br>Margin / Market Cap: %{customdata[2]:.3f}%"
-                    "<br>Ratio Percentile: %{customdata[3]:.1f}<extra></extra>"
+                    "Quarter end: %{x|%Y-%m-%d}<br>Broker margin loans: $%{customdata[0]:,.1f}B"
+                    "<br>US equity market cap: $%{customdata[1]:,.2f}T"
+                    "<br>3Y average market cap: $%{customdata[2]:,.2f}T"
+                    "<br>Broker leverage ratio (3Y SMA): %{customdata[3]:.3f}%"
+                    f"<br>Broker leverage percentile ({lookback}): %{{customdata[4]:.1f}}<extra></extra>"
                 ),
             ),
             row=4,
@@ -427,22 +468,24 @@ def build_broker_margin_leverage_fig(
         fig.add_trace(
             go.Scatter(
                 x=dates,
-                y=pd.to_numeric(quarterly["MarginToMarketCapPctile"], errors="coerce"),
+                y=pd.to_numeric(quarterly["MarginToMarketCap3YAvgPctile"], errors="coerce"),
                 mode="lines",
-                name="Ratio Percentile",
+                name=f"Leverage Percentile ({lookback} Rolling)",
                 line={"color": "#2dd4bf", "width": 1.8},
                 customdata=ratio_custom,
                 hovertemplate=(
-                    "Date: %{x|%Y-%m-%d}<br>Broker receivables: $%{customdata[0]:,.1f}B"
-                    "<br>US equity market cap: $%{customdata[1]:,.2f}T<br>Margin / Market Cap: %{customdata[2]:.3f}%"
-                    "<br>Ratio Percentile: %{y:.1f}<extra></extra>"
+                    "Quarter end: %{x|%Y-%m-%d}<br>Broker margin loans: $%{customdata[0]:,.1f}B"
+                    "<br>US equity market cap: $%{customdata[1]:,.2f}T"
+                    "<br>3Y average market cap: $%{customdata[2]:,.2f}T"
+                    "<br>Broker leverage ratio (3Y SMA): %{customdata[3]:.3f}%"
+                    f"<br>Broker leverage percentile ({lookback}): %{{y:.1f}}<extra></extra>"
                 ),
             ),
             row=4,
             col=1,
             secondary_y=True,
         )
-    fig.update_yaxes(title_text="Margin / cap, %", row=4, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="Margin / 3Y avg cap, %", row=4, col=1, secondary_y=False)
     fig.update_yaxes(title_text="Percentile", range=[0, 100], row=4, col=1, secondary_y=True)
     for row in range(1, 5):
         fig.update_xaxes(
