@@ -41,6 +41,7 @@ INFLATION_FRED_SERIES = {
     "MICH": "University of Michigan 1Y Inflation Expectations",
     "T5YIFR": "5-Year, 5-Year Forward Inflation Expectation Rate",
     "CPIAUCSL": "Headline CPI",
+    "PI": "Personal Income",
     "CPILFESL": "Core CPI",
     "PCEPILFE": "Core PCE",
     "PPIACO": "PPI All Commodities",
@@ -60,6 +61,7 @@ MONTHLY_RELEASE_LAGS = {
     "W875RX1": 32,
     "MICH": 30,
     "CPIAUCSL": 16,
+    "PI": 32,
     "CPILFESL": 16,
     "PCEPILFE": 32,
     "PPIACO": 16,
@@ -566,6 +568,13 @@ def add_inflation_layer(history: pd.DataFrame) -> None:
         history[f"{col}_3MAnnualized"] = annualized_3m
         history[f"{col}_RealizedMomentum"] = component
         components.append(component)
+    history["PI_YoY"] = num(history["PI"]).pct_change(52, fill_method=None) * 100.0
+    history["PI_WeightedContribution"] = history["PI_YoY"] * 0.70
+    history["PPIACO_WeightedContribution"] = history["PPIACO_YoY"] * 0.30
+    history["PI_PPI_Weighted12M"] = (
+        history[["PI_WeightedContribution", "PPIACO_WeightedContribution"]]
+        .sum(axis=1, min_count=2)
+    )
     history["RealizedInflationMomentum"] = weighted_mean(components, [0.35, 0.30, 0.20, 0.15])
     realized_momentum = num(history["RealizedInflationMomentum"])
     history["RealizedInflationDirection"] = np.select(
