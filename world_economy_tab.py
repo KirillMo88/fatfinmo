@@ -323,16 +323,16 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         "avg_real_gdp_growth_3y_pct": f"Average Real GDP Growth {year - 3}–{year - 1} (%)",
     })
     gdp_label = f"GDP {year}F, USD bn"
+    avg_growth_label = f"Average Real GDP Growth {year - 3}–{year - 1} (%)"
     display = display[[
         "GDP Rank", "Country", gdp_label, "Nominal USD GDP CAGR 5Y (%)", "Nominal USD GDP CAGR 10Y (%)",
-        "Latest BIS Total Debt/GDP (%)", "BIS Quarter", "Debt/GDP Δ5Y (pp)", "Debt/GDP Δ10Y (pp)",
-        f"Fiscal Balance {year}F (% GDP)", f"General Government Total Expenditure {year}F (% GDP)",
+        avg_growth_label, "Latest BIS Total Debt/GDP (%)", "BIS Quarter", "Debt/GDP Δ5Y (pp)",
+        "Debt/GDP Δ10Y (pp)", f"Signed Fiscal Balance {year}F (USD bn)",
+        f"Fiscal Balance {year}F (% GDP)", "Fiscal Balance Δ5Y (pp)", "Fiscal Balance Δ10Y (pp)",
+        f"General Government Total Expenditure {year}F (% GDP)",
         f"Current Account Balance {year}F (% GDP)", "Current Account Δ5Y (pp)", "Current Account Δ10Y (pp)",
-        "Private Non-Financial Sector DSR (%)", "DSR Quarter", "DSR Δ5Y (pp)", "DSR Δ10Y (pp)",
-        "Long-term Interest Rate (%)", "Interest Rate Month", "Interest Rate Δ5Y (pp)", "Interest Rate Δ10Y (pp)",
-        "Fiscal Balance Δ5Y (pp)", "Fiscal Balance Δ10Y (pp)",
-        f"Signed Fiscal Balance {year}F (USD bn)", f"Real GDP Growth {year - 3} (%)", f"Real GDP Growth {year - 2} (%)",
-        f"Real GDP Growth {year - 1} (%)", f"Average Real GDP Growth {year - 3}–{year - 1} (%)",
+        "Private Non-Financial Sector DSR (%)", "DSR Δ10Y (pp)",
+        "Long-term Interest Rate (%)", "Interest Rate Δ5Y (pp)", "Interest Rate Δ10Y (pp)",
     ]]
     # Use the same sortable grid data for both exports so the user gets the active ordering/filter.
     gb = GridOptionsBuilder.from_dataframe(display)
@@ -360,7 +360,7 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
     growth_style = JsCode("""function(params) { if (params.value == null || isNaN(params.value)) return {}; return Number(params.value) < 0 ? {backgroundColor:'#7f1d1d', color:'#f8fafc'} : {}; }""")
     gb.configure_column(f"Average Real GDP Growth {year - 3}–{year - 1} (%)", cellStyle=growth_style)
     gb.configure_grid_options(domLayout="normal", rowHeight=30, suppressMovableColumns=False)
-    st.caption("DSR changes compare the same quarter 5/10 years earlier; OECD long-term interest rate changes compare the same month 5/10 years earlier. Rate and balance changes are percentage points.")
+    st.caption("DSR Δ10Y compares the same quarter 10 years earlier; OECD long-term interest rate changes compare the same month 5/10 years earlier. Rate and balance changes are percentage points.")
     response = AgGrid(display, gridOptions=gb.build(), data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
                       update_mode=GridUpdateMode.SORTING_CHANGED | GridUpdateMode.MODEL_CHANGED,
                       fit_columns_on_grid_load=False, allow_unsafe_jscode=True,
