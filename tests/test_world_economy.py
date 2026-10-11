@@ -114,3 +114,21 @@ def test_reference_year_advances_dynamic_growth_years_without_inventing_bis_quar
     assert "real_gdp_growth_2025_pct" in table.columns
     assert "real_gdp_growth_2026_pct" in table.columns
     assert history.loc[history["is_provisional"], "year"].empty
+
+
+def test_missing_imf_latest_actual_year_is_treated_as_forecast_for_provisional_bis_country() -> None:
+    bis = _bis_frame()
+    bis.loc[len(bis)] = {
+        "iso3": "CAN", "bis_iso2": "CA", "country_name": "Canada", "year": 2026,
+        "quarter": 1, "period": "2026-Q1", "debt_gdp_pct": 90.0,
+        "bis_series_id": "Q.CA.C.A.M.770.A", "observation_status": "",
+    }
+    imf = _imf_frame()
+    imf["latest_actual_year"] = imf["latest_actual_year"].astype("Int64")
+
+    _, history, _, _, _ = build_world_economy_frames(bis, imf, reference_year=2026)
+
+    canada = history.loc[history["iso3"].eq("CAN") & history["is_provisional"]].iloc[0]
+    assert canada["fiscal_status"] == "IMF forecast"
+    assert canada["gdp_status"] == "IMF forecast"
+    assert canada["real_growth_status"] == "IMF forecast"
