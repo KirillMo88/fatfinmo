@@ -715,7 +715,14 @@ def build_production_score_fig(d: pd.DataFrame) -> go.Figure:
         "ProductionScore",
         "Production Score",
         "#22c55e",
-        [("IndustrialProduction_Z", "Industrial Production", "#86efac")],
+        [
+            ("IndustrialProduction_Z", "Total Industry (INDPRO)", "#86efac"),
+            ("IPMAN_Z", "Manufacturing (IPMAN)", "#38bdf8"),
+            ("IPDMAN_Z", "Durable Goods (IPDMAN)", "#f59e0b"),
+            ("IPNMAN_Z", "Nondurable Goods (IPNMAN)", "#c084fc"),
+            ("IPMINE_Z", "Mining (IPMINE)", "#fb7185"),
+            ("IPUTIL_Z", "Utilities (IPUTIL)", "#facc15"),
+        ],
     )
 
 
