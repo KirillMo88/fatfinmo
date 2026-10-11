@@ -242,6 +242,7 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         "gdp_cagr_10y_pct": "Nominal USD GDP CAGR 10Y (%)", "total_debt_gdp_pct": "Latest BIS Total Debt/GDP (%)",
         "bis_observation_quarter": "BIS Quarter", "debt_delta_5y_pp": "Debt/GDP Δ5Y (pp)",
         "debt_delta_10y_pp": "Debt/GDP Δ10Y (pp)", "fiscal_balance_pct": f"Fiscal Balance {year}F (% GDP)",
+        "government_expenditure_pct": f"General Government Total Expenditure {year}F (% GDP)",
         "fiscal_delta_5y_pp": "Fiscal Balance Δ5Y (pp)", "fiscal_delta_10y_pp": "Fiscal Balance Δ10Y (pp)",
         "fiscal_balance_usd_bn": f"Signed Fiscal Balance {year}F (USD bn)",
         f"real_gdp_growth_{year - 3}_pct": f"Real GDP Growth {year - 3} (%)",
@@ -253,15 +254,26 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
     display = display[[
         "GDP Rank", "Country", gdp_label, "Nominal USD GDP CAGR 5Y (%)", "Nominal USD GDP CAGR 10Y (%)",
         "Latest BIS Total Debt/GDP (%)", "BIS Quarter", "Debt/GDP Δ5Y (pp)", "Debt/GDP Δ10Y (pp)",
-        f"Fiscal Balance {year}F (% GDP)", "Fiscal Balance Δ5Y (pp)", "Fiscal Balance Δ10Y (pp)",
+        f"Fiscal Balance {year}F (% GDP)", f"General Government Total Expenditure {year}F (% GDP)",
+        "Fiscal Balance Δ5Y (pp)", "Fiscal Balance Δ10Y (pp)",
         f"Signed Fiscal Balance {year}F (USD bn)", f"Real GDP Growth {year - 3} (%)", f"Real GDP Growth {year - 2} (%)",
         f"Real GDP Growth {year - 1} (%)", f"Average Real GDP Growth {year - 3}–{year - 1} (%)",
     ]]
     # Use the same sortable grid data for both exports so the user gets the active ordering/filter.
     gb = GridOptionsBuilder.from_dataframe(display)
-    numeric_formatter = JsCode("""function(params) { if (params.value == null || params.value === '' || isNaN(Number(params.value))) return 'N/A'; const n=Number(params.value); return n.toLocaleString(undefined,{maximumFractionDigits:2}); }""")
+    numeric_formatter = JsCode("""function(params) {
+        if (params.value == null || params.value === '') return 'N/A';
+        const n = Number(params.value);
+        if (!Number.isFinite(n)) return params.value;
+        const field = params.colDef.field || '';
+        const precision = field.includes('%') || field.includes('(pp)') ? 2 : 0;
+        return n.toLocaleString(undefined, {minimumFractionDigits: precision, maximumFractionDigits: precision});
+    }""")
     gb.configure_default_column(sortable=True, filter=False, resizable=True, wrapHeaderText=True,
-                                autoHeaderHeight=True, valueFormatter=numeric_formatter)
+                                autoHeaderHeight=True)
+    for column in display.columns:
+        if pd.api.types.is_numeric_dtype(display[column]):
+            gb.configure_column(column, valueFormatter=numeric_formatter)
     gb.configure_grid_options(ensureDomOrder=True)
     gb.configure_column("GDP Rank", sort="asc", sortIndex=0)
     debt_style = JsCode("""function(params) { if (params.value == null || isNaN(params.value)) return {}; return Number(params.value) > 0 ? {backgroundColor:'#7f1d1d', color:'#f8fafc'} : Number(params.value) < 0 ? {backgroundColor:'#166534', color:'#f8fafc'} : {}; }""")
