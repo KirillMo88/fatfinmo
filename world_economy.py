@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from functools import lru_cache
+from html.parser import HTMLParser
 import io
 import json
 import os
@@ -29,6 +30,18 @@ BIS_TOPIC_URL = "https://data.bis.org/topics/TOTAL_CREDIT"
 BIS_DSR_TOPIC_URL = "https://data.bis.org/topics/DSR"
 OECD_LONG_TERM_RATES_URL = "https://sdmx.oecd.org/public/rest/data/OECD.SDD.STES,DSD_STES@DF_FINMARK,4.0/.M.IRLT.PA.....?dimensionAtObservation=AllDimensions&format=csvfile"
 OECD_LONG_TERM_RATES_EXPLORER_URL = "https://data-explorer.oecd.org/vis?df%5Bds%5D=dsDisseminateFinalDMZ&df%5Bid%5D=DSD_STES%40DF_FINMARK&df%5Bag%5D=OECD.SDD.STES&dq=.M..PA.....&lom=LASTNPERIODS&lo=5&to%5BTIME_PERIOD%5D=false&vw=tb"
+WORLD_GOVERNMENT_BONDS_CDS_URL = "https://www.worldgovernmentbonds.com/sovereign-cds/"
+WORLD_GOVERNMENT_BONDS_CDS_API_URL = "https://www.worldgovernmentbonds.com/wp-json/cds/v1/main"
+# User-supplied annual Russian long-term interest rates. Screenshot dates are
+# interpreted as MM/DD/YYYY; only the month is needed by the rate table.
+RUSSIAN_LONG_TERM_RATES = (
+    (2003, 1, 9.72), (2004, 1, 9.40), (2005, 3, 6.83), (2006, 1, 6.47),
+    (2007, 1, 6.27), (2008, 1, 9.49), (2009, 1, 8.00), (2010, 1, 7.44),
+    (2011, 3, 8.50), (2012, 1, 6.85), (2013, 1, 7.71), (2014, 1, 14.09),
+    (2015, 1, 9.74), (2016, 1, 8.38), (2017, 2, 7.59), (2018, 1, 8.71),
+    (2019, 1, 6.23), (2020, 1, 5.91), (2021, 1, 8.46), (2022, 1, 10.34),
+    (2023, 2, 12.30), (2024, 1, 15.18), (2025, 1, 14.47), (2026, 5, 16.88),
+)
 IMF_WEO_URL = "https://data.imf.org/Datasets/WEO"
 IMF_WEO_API_URL = "https://data.imf.org/Datasets/WEO"
 IMF_INDICATORS = ("NGDPD", "GGXCNL_NGDP", "GGX_NGDP", "BCA_NGDPD", "NGDP_RPCH")
@@ -60,6 +73,7 @@ TABLE_COLUMNS = [
     "dsr_delta_5y_pp", "dsr_delta_10y_pp",
     "long_term_interest_rate_pct", "long_term_interest_rate_observation_month",
     "long_term_interest_rate_delta_5y_pp", "long_term_interest_rate_delta_10y_pp",
+    "cds_5y_bps", "cds_var_6m_pct", "cds_pd_pct",
 ]
 
 
@@ -69,19 +83,20 @@ def load_world_economy_data(
     force_refresh: bool = False,
     storage_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Load validated official BIS and IMF data, retaining the last good raw files on refresh errors."""
+    """Load validated macro and market data, retaining the last good raw files on refresh errors."""
     reference_year = int(reference_year if reference_year is not None else DEFAULT_REFERENCE_YEAR)
     cache_dir = Path(storage_dir or WORLD_ECONOMY_STORAGE_DIR)
     cache_dir.mkdir(parents=True, exist_ok=True)
     bis_path = cache_dir / "bis_ws_tc_csv_flat.zip"
     dsr_path = cache_dir / "bis_ws_dsr_csv_flat.zip"
     oecd_rates_path = cache_dir / "oecd_long_term_interest_rates.csv"
+    cds_path = cache_dir / "world_government_bonds_sovereign_cds.html"
     weo_path = cache_dir / "imf_weo_countries.xlsx"
     metadata_path = cache_dir / "source_metadata.json"
     metadata = _read_json(metadata_path)
     warning: str | None = None
 
-    should_refresh = force_refresh or _cache_is_stale((bis_path, dsr_path, weo_path, oecd_rates_path))
+    should_refresh = force_refresh or _cache_is_stale((bis_path, dsr_path, weo_path, oecd_rates_path, cds_path))
     if should_refresh:
         try:
             with httpx.Client(timeout=httpx.Timeout(90.0, connect=20.0), follow_redirects=True) as client:
@@ -105,13 +120,32 @@ def load_world_economy_data(
 
                 oecd_response = client.get(OECD_LONG_TERM_RATES_URL)
                 oecd_response.raise_for_status()
-                oecd_rates_bytes = oecd_response.content
-                _parse_oecd_long_term_rates(oecd_rates_bytes)
+                oecd_rates = _parse_oecd_long_term_rates(oecd_response.content)
+                oecd_rates = _with_russian_long_term_rate_override(oecd_rates)
+                oecd_rates_bytes = oecd_rates.to_csv(index=False).encode("utf-8")
+
+                cds_response = client.post(
+                    WORLD_GOVERNMENT_BONDS_CDS_API_URL,
+                    json={},
+                    headers={
+                        "Referer": WORLD_GOVERNMENT_BONDS_CDS_URL,
+                        "Origin": "https://www.worldgovernmentbonds.com",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                    },
+                )
+                cds_response.raise_for_status()
+                cds_payload = cds_response.json()
+                if not cds_payload.get("success") or not isinstance(cds_payload.get("table"), str):
+                    raise ValueError("World Government Bonds CDS endpoint returned an invalid table response.")
+                cds_html = cds_payload["table"].encode("utf-8")
+                _parse_world_government_bonds_cds(cds_html)
 
             _atomic_write_bytes(bis_path, bis_bytes)
             _atomic_write_bytes(dsr_path, dsr_bytes)
             _atomic_write_bytes(weo_path, weo_bytes)
             _atomic_write_bytes(oecd_rates_path, oecd_rates_bytes)
+            _atomic_write_bytes(cds_path, cds_html)
             vintage_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", weo_vintage).strip("_") or "unknown"
             weo_archive_path = cache_dir / f"imf_weo_{vintage_slug}.xlsx"
             if not weo_archive_path.exists():
@@ -136,6 +170,10 @@ def load_world_economy_data(
                 "oecd_long_term_rates_url": OECD_LONG_TERM_RATES_EXPLORER_URL,
                 "oecd_long_term_rates_api_url": OECD_LONG_TERM_RATES_URL,
                 "oecd_long_term_rates_retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
+                "russian_long_term_rates_source": "User-provided annual values; override OECD observations for Russia",
+                "sovereign_cds_source": "World Government Bonds, Sovereign 5Y CDS; Var 6m and implied PD (40% recovery assumption)",
+                "sovereign_cds_url": WORLD_GOVERNMENT_BONDS_CDS_URL,
+                "sovereign_cds_retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
             }
             _atomic_write_text(metadata_path, json.dumps(metadata, indent=2, ensure_ascii=False) + "\n")
         except Exception as exc:
@@ -149,12 +187,18 @@ def load_world_economy_data(
     bis = _parse_bis_bulk(bis_path.read_bytes())
     dsr = _parse_bis_dsr(dsr_path.read_bytes())
     imf = _parse_weo_workbook(weo_path.read_bytes())
-    oecd_rates = _parse_oecd_long_term_rates(oecd_rates_path.read_bytes())
+    oecd_rates = _with_russian_long_term_rate_override(
+        _parse_oecd_long_term_rates(oecd_rates_path.read_bytes())
+    )
+    cds = _parse_world_government_bonds_cds(cds_path.read_bytes()) if cds_path.exists() else pd.DataFrame(
+        columns=["iso3", "country_name", "cds_5y_bps", "cds_var_6m_pct", "cds_pd_pct"]
+    )
     table, history, diagnostics, effective_year, year_warning = build_world_economy_frames(
         bis,
         imf,
         dsr=dsr,
         long_term_rates=oecd_rates,
+        cds=cds,
         reference_year=reference_year,
         source_metadata=metadata,
     )
@@ -356,6 +400,19 @@ def _parse_oecd_long_term_rates(data: bytes) -> pd.DataFrame:
     return frame
 
 
+def _with_russian_long_term_rate_override(rates: pd.DataFrame) -> pd.DataFrame:
+    """Replace OECD's Russian observations with the user-provided annual series."""
+    rows = pd.DataFrame([
+        {"iso3": "RUS", "period": f"{year}-{month:02d}", "year": year, "month": month,
+         "long_term_interest_rate_pct": value}
+        for year, month, value in RUSSIAN_LONG_TERM_RATES
+    ])
+    base = rates.loc[~rates["iso3"].eq("RUS")].copy()
+    return pd.concat([base, rows], ignore_index=True).sort_values(
+        ["iso3", "year", "month"], kind="stable"
+    ).reset_index(drop=True)
+
+
 @lru_cache(maxsize=512)
 def _bis_iso2_to_iso3(iso2: str) -> str | None:
     if iso2 in SPECIAL_ISO2_TO_ISO3:
@@ -442,12 +499,84 @@ def _validate_weo_workbook(workbook_bytes: bytes) -> str:
     return "Unknown WEO vintage"
 
 
+def _parse_world_government_bonds_cds(html_bytes: bytes) -> pd.DataFrame:
+    """Parse the public World Government Bonds CDS table returned by its page endpoint."""
+    class TableParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.rows: list[list[dict[str, Any]]] = []
+            self.row: list[dict[str, Any]] | None = None
+            self.cell: dict[str, Any] | None = None
+            self.in_tbody = False
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            attr = dict(attrs)
+            if tag == "tbody":
+                self.in_tbody = True
+            elif tag == "tr" and self.in_tbody:
+                self.row = []
+            elif tag == "td" and self.row is not None:
+                self.cell = {**attr, "classes": [], "text": []}
+            elif self.cell is not None and attr.get("class"):
+                self.cell["classes"].extend(str(attr["class"]).split())
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "td" and self.cell is not None and self.row is not None:
+                self.row.append(self.cell)
+                self.cell = None
+            elif tag == "tr" and self.row is not None:
+                self.rows.append(self.row)
+                self.row = None
+            elif tag == "tbody":
+                self.in_tbody = False
+
+        def handle_data(self, data: str) -> None:
+            if self.cell is not None:
+                self.cell["text"].append(data)
+
+    parser = TableParser()
+    parser.feed(html_bytes.decode("utf-8", errors="replace"))
+    if not parser.rows:
+        raise ValueError("World Government Bonds response has no CDS table.")
+    records: list[dict[str, Any]] = []
+    for cells in parser.rows:
+        if len(cells) < 8:
+            continue
+        country_name = " ".join("".join(cells[1]["text"]).split())
+        flag_classes = cells[0]["classes"]
+        flag_position = flag_classes.index("flag") if "flag" in flag_classes else -1
+        iso2 = flag_classes[flag_position + 1].upper() if flag_position >= 0 and flag_position + 1 < len(flag_classes) else ""
+        iso3 = _bis_iso2_to_iso3(iso2) if iso2 else None
+        if not iso3:
+            continue
+
+        def cell_number(cell: Any, *, prefer_sort_key: bool = True) -> float:
+            sort_key = cell.get("sorttable_customkey") if prefer_sort_key else None
+            raw = sort_key or " ".join("".join(cell["text"]).split())
+            match = re.search(r"[-+]?\d+(?:[,.]\d+)*", raw.replace(",", ""))
+            return float(match.group(0)) if match else np.nan
+
+        records.append({
+            "iso3": iso3,
+            "country_name": country_name,
+            "cds_5y_bps": cell_number(cells[3]),
+            "cds_var_6m_pct": cell_number(cells[5]),
+            # The provider reuses the CDS sort key in the PD column; read its displayed value.
+            "cds_pd_pct": cell_number(cells[6], prefer_sort_key=False),
+        })
+    frame = pd.DataFrame(records)
+    if len(frame) < 15 or frame["iso3"].duplicated().any() or frame["cds_5y_bps"].notna().sum() < 15:
+        raise ValueError("World Government Bonds CDS table failed country coverage or uniqueness validation.")
+    return frame.reset_index(drop=True)
+
+
 def build_world_economy_frames(
     bis: pd.DataFrame,
     imf: pd.DataFrame,
     *,
     dsr: pd.DataFrame | None = None,
     long_term_rates: pd.DataFrame | None = None,
+    cds: pd.DataFrame | None = None,
     reference_year: int = 2026,
     source_metadata: dict[str, Any] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], int, str | None]:
@@ -462,6 +591,9 @@ def build_world_economy_frames(
     )
     long_term_rates = long_term_rates.copy() if long_term_rates is not None else pd.DataFrame(
         columns=["iso3", "period", "year", "month", "long_term_interest_rate_pct"]
+    )
+    cds = cds.copy() if cds is not None else pd.DataFrame(
+        columns=["iso3", "country_name", "cds_5y_bps", "cds_var_6m_pct", "cds_pd_pct"]
     )
     metadata = source_metadata or {}
     bis["year"] = pd.to_numeric(bis["year"], errors="coerce").astype("Int64")
@@ -511,6 +643,7 @@ def build_world_economy_frames(
     country_info = imf[["iso3", "country_name"]].drop_duplicates("iso3").set_index("iso3")["country_name"]
     latest_bis = bis.sort_values(["year", "quarter"]).groupby("iso3", as_index=False).tail(1)
     latest_bis = latest_bis.set_index("iso3")
+    cds_by_iso3 = cds.drop_duplicates("iso3", keep="last").set_index("iso3")
     universe = sorted(iso3_values)
     rows: list[dict[str, Any]] = []
     for iso3 in universe:
@@ -550,8 +683,14 @@ def build_world_economy_frames(
             rate_year = int(rate_observation["year"])
             rate_month = int(rate_observation["month"])
             rate_period = str(rate_observation["period"])
-            rate_delta_5y = rate_value - _rate_matching_value(long_term_rates, iso3, rate_year - 5, rate_month)
-            rate_delta_10y = rate_value - _rate_matching_value(long_term_rates, iso3, rate_year - 10, rate_month)
+            if iso3 == "RUS":
+                # Russian inputs are annual observations, not monthly OECD data.
+                rate_delta_5y = rate_value - _rate_matching_year_value(long_term_rates, iso3, rate_year - 5)
+                rate_delta_10y = rate_value - _rate_matching_year_value(long_term_rates, iso3, rate_year - 10)
+            else:
+                rate_delta_5y = rate_value - _rate_matching_value(long_term_rates, iso3, rate_year - 5, rate_month)
+                rate_delta_10y = rate_value - _rate_matching_value(long_term_rates, iso3, rate_year - 10, rate_month)
+        cds_row = cds_by_iso3.loc[iso3] if iso3 in cds_by_iso3.index else None
         latest_real = [_value(real, iso3, reference_year - offset, "real_gdp_growth_pct") for offset in (3, 2, 1)]
         avg_real = float(np.mean(latest_real)) if all(np.isfinite(value) for value in latest_real) else np.nan
         row = {
@@ -582,6 +721,9 @@ def build_world_economy_frames(
             "long_term_interest_rate_observation_month": rate_period,
             "long_term_interest_rate_delta_5y_pp": rate_delta_5y,
             "long_term_interest_rate_delta_10y_pp": rate_delta_10y,
+            "cds_5y_bps": float(cds_row["cds_5y_bps"]) if cds_row is not None and pd.notna(cds_row["cds_5y_bps"]) else np.nan,
+            "cds_var_6m_pct": float(cds_row["cds_var_6m_pct"]) if cds_row is not None and pd.notna(cds_row["cds_var_6m_pct"]) else np.nan,
+            "cds_pd_pct": float(cds_row["cds_pd_pct"]) if cds_row is not None and pd.notna(cds_row["cds_pd_pct"]) else np.nan,
             f"real_gdp_growth_{reference_year - 3}_pct": latest_real[0],
             f"real_gdp_growth_{reference_year - 2}_pct": latest_real[1],
             f"real_gdp_growth_{reference_year - 1}_pct": latest_real[2],
@@ -790,6 +932,13 @@ def _rate_matching_value(rates: pd.DataFrame, iso3: str, year: int, month: int) 
         "long_term_interest_rate_pct",
     ]
     return float(values.iloc[0]) if not values.empty and pd.notna(values.iloc[0]) else np.nan
+
+
+def _rate_matching_year_value(rates: pd.DataFrame, iso3: str, year: int) -> float:
+    values = rates.loc[
+        rates["iso3"].eq(iso3) & rates["year"].eq(year), "long_term_interest_rate_pct"
+    ]
+    return float(values.iloc[-1]) if not values.empty and pd.notna(values.iloc[-1]) else np.nan
 
 
 def _cagr(current: float, prior: float, years: int) -> float:

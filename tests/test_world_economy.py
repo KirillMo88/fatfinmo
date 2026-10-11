@@ -8,9 +8,12 @@ import pandas as pd
 
 from world_economy import (
     OECD_LONG_TERM_RATES_URL,
+    WORLD_GOVERNMENT_BONDS_CDS_URL,
     _cagr,
     _weo_gdp_to_usd_bn,
     build_world_economy_frames,
+    _parse_world_government_bonds_cds,
+    _with_russian_long_term_rate_override,
     parse_bis_bulk_csv,
     parse_bis_dsr_bulk_csv,
     parse_oecd_long_term_rates_csv,
@@ -22,6 +25,27 @@ def test_oecd_long_term_rates_uses_data_explorer_api_query() -> None:
     assert "/public/rest/data/" in OECD_LONG_TERM_RATES_URL
     assert "dimensionAtObservation=AllDimensions" in OECD_LONG_TERM_RATES_URL
     assert "format=csvfile" in OECD_LONG_TERM_RATES_URL
+
+
+def test_russian_annual_rates_override_oecd_and_keep_annual_changes() -> None:
+    source = pd.DataFrame([
+        {"iso3": "RUS", "period": "2026-01", "year": 2026, "month": 1,
+         "long_term_interest_rate_pct": 99.0},
+        {"iso3": "USA", "period": "2026-08", "year": 2026, "month": 8,
+         "long_term_interest_rate_pct": 4.2},
+    ])
+    rates = _with_russian_long_term_rate_override(source)
+    rus = rates.loc[rates["iso3"].eq("RUS")]
+    current = rus.loc[rus["year"].eq(2026)].iloc[0]
+    prior_5y = rus.loc[rus["year"].eq(2021)].iloc[0]
+    prior_10y = rus.loc[rus["year"].eq(2016)].iloc[0]
+
+    assert len(rus) == 24
+    assert current["period"] == "2026-05"
+    assert current["long_term_interest_rate_pct"] == 16.88
+    assert np.isclose(current["long_term_interest_rate_pct"] - prior_5y["long_term_interest_rate_pct"], 8.42)
+    assert np.isclose(current["long_term_interest_rate_pct"] - prior_10y["long_term_interest_rate_pct"], 8.50)
+    assert rates.loc[rates["iso3"].eq("USA"), "long_term_interest_rate_pct"].iloc[0] == 4.2
 
 
 def _bis_frame() -> pd.DataFrame:
@@ -70,6 +94,13 @@ def _long_term_rates_frame() -> pd.DataFrame:
     ])
 
 
+def _cds_frame() -> pd.DataFrame:
+    return pd.DataFrame([{
+        "iso3": "USA", "country_name": "United States", "cds_5y_bps": 37.36,
+        "cds_var_6m_pct": 0.05, "cds_pd_pct": 0.62,
+    }])
+
+
 def test_formula_helpers_preserve_sign_and_require_positive_gdp() -> None:
     assert np.isclose(_cagr(200, 100, 5), (2 ** (1 / 5) - 1) * 100)
     assert np.isnan(_cagr(0, 100, 5))
@@ -79,7 +110,8 @@ def test_formula_helpers_preserve_sign_and_require_positive_gdp() -> None:
 
 def test_snapshot_calculations_use_matching_bis_quarters_and_three_real_growth_years() -> None:
     table, history, diagnostics, reference_year, warning = build_world_economy_frames(
-        _bis_frame(), _imf_frame(), dsr=_dsr_frame(), long_term_rates=_long_term_rates_frame(), reference_year=2026,
+        _bis_frame(), _imf_frame(), dsr=_dsr_frame(), long_term_rates=_long_term_rates_frame(),
+        cds=_cds_frame(), reference_year=2026,
     )
     row = table.iloc[0]
     assert reference_year == 2026
@@ -96,6 +128,9 @@ def test_snapshot_calculations_use_matching_bis_quarters_and_three_real_growth_y
     assert row["long_term_interest_rate_observation_month"] == "2026-08"
     assert np.isclose(row["long_term_interest_rate_delta_5y_pp"], 2.9)
     assert np.isclose(row["long_term_interest_rate_delta_10y_pp"], 2.7)
+    assert np.isclose(row["cds_5y_bps"], 37.36)
+    assert np.isclose(row["cds_var_6m_pct"], 0.05)
+    assert np.isclose(row["cds_pd_pct"], 0.62)
     assert row["debt_delta_5y_pp"] == 15.0
     assert row["debt_delta_10y_pp"] == 35.0
     assert np.isclose(row["fiscal_balance_usd_bn"], row["nominal_gdp_usd_bn"] * row["fiscal_balance_pct"] / 100)
@@ -109,6 +144,29 @@ def test_snapshot_calculations_use_matching_bis_quarters_and_three_real_growth_y
     assert np.isclose(annual_2026["current_account_pct"], 0.0)
     assert np.isclose(annual_2026["government_expenditure_pct"], 36.0)
     assert diagnostics["bis_countries_mapped"] == 1
+
+
+def test_sovereign_cds_parser_extracts_bps_variation_and_default_probability() -> None:
+    assert "sovereign-cds" in WORLD_GOVERNMENT_BONDS_CDS_URL
+    rows = []
+    for index, iso2 in enumerate(("US", "GB", "DE", "FR", "JP", "CN", "IT", "BR", "IN", "CA", "AU", "CH", "SE", "DK", "ES")):
+        rows.append(
+            f'<tr><td><span class="flag {iso2.lower()}"></span></td><td>{iso2}</td><td>AA</td>'
+            '<td sorttable_customkey="37.36">37.36</td><td>+10.0 %</td>'
+            f'<td sorttable_customkey="{index - 7}.25">{index - 7}.25 %</td>'
+            '<td sorttable_customkey="37.36">0.62 %</td><td>11 Oct</td></tr>'
+        )
+    html = (
+        '<table><thead><tr><th>Country</th><th>S&P</th><th>5Y CDS</th><th>Var 1m</th>'
+        '<th>Var 6m</th><th>PD (*)</th><th>Date</th></tr></thead><tbody>'
+        + "".join(rows) + '</tbody></table>'
+    ).encode()
+    parsed = _parse_world_government_bonds_cds(html)
+    us = parsed.loc[parsed["iso3"].eq("USA")].iloc[0]
+    assert len(parsed) == 15
+    assert us["cds_5y_bps"] == 37.36
+    assert us["cds_var_6m_pct"] == -7.25
+    assert us["cds_pd_pct"] == 0.62
 
 
 def test_bis_parser_selects_only_quarterly_total_nfc_percent_gdp_series() -> None:
