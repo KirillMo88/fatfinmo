@@ -349,8 +349,8 @@ def build_broker_margin_leverage_fig(
         )
     fig.update_yaxes(title_text="USD billions", row=1, col=1, secondary_y=False)
     if show_spx and weekly_spx is not None and not weekly_spx.empty and not positive_spx.empty:
-        min_spx = float(positive_spx.min())
-        max_spx = float(positive_spx.max())
+        min_spx = 5_000.0
+        max_spx = max(float(positive_spx.max()), 10_000.0)
         first_power = int(np.floor(np.log10(min_spx))) - 1
         last_power = int(np.ceil(np.log10(max_spx))) + 1
         spx_ticks = sorted(
@@ -383,8 +383,8 @@ def build_broker_margin_leverage_fig(
     ]
     if show_reference_levels:
         for row in (2, 3):
-            fig.add_hrect(y0=90, y1=100, fillcolor="#ef4444", opacity=0.07, line_width=0, row=row, col=1)
-            fig.add_hrect(y0=0, y1=10, fillcolor="#22c55e", opacity=0.09, line_width=0, row=row, col=1)
+            fig.add_hrect(y0=90, y1=100, fillcolor="#ef4444", opacity=0.24, line_width=0, row=row, col=1)
+            fig.add_hrect(y0=0, y1=10, fillcolor="#22c55e", opacity=0.24, line_width=0, row=row, col=1)
             for level in (10, 50, 90):
                 fig.add_hline(y=level, line={"color": "#64748b", "dash": "dot" if level == 50 else "solid", "width": 0.8}, row=row, col=1)
         for lower, upper, color in [(90, 100, "#ef4444"), (0, 10, "#22c55e")]:
@@ -397,7 +397,7 @@ def build_broker_margin_leverage_fig(
                 y0=lower,
                 y1=upper,
                 fillcolor=color,
-                opacity=0.07,
+                opacity=0.24,
                 line={"width": 0},
                 layer="below",
             )
