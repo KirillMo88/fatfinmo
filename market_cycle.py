@@ -11,6 +11,11 @@ import yfinance as yf
 from ta.momentum import RSIIndicator
 
 from correction_bottom import calculate_correction_bottom_indicator
+from broker_margin_leverage import (
+    BROKER_MARGIN_LOANS_SERIES,
+    US_EQUITY_MARKET_CAP_SERIES,
+    build_broker_margin_leverage_history,
+)
 from current_risk import CURRENT_RISK_MODEL_VERSION, calculate_current_risk_v1
 from finance_core import drop_incomplete_daily_bar
 from fred_client import FredApiError, download_fred_series
@@ -23,7 +28,7 @@ warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 MARKET_CYCLE_MODEL_VERSION = "MARKET_CYCLE_V1"
 MARKET_CYCLE_TICKERS = ("^GSPC", "SPY", "^VIX", "^VIX3M", "QQQ", "GLD", "BTC-USD", "RSP", "IWM", "XLI", "XLP")
-MARKET_CYCLE_FRED_SERIES = ("PPIACO",)
+MARKET_CYCLE_FRED_SERIES = ("PPIACO", BROKER_MARGIN_LOANS_SERIES, US_EQUITY_MARKET_CAP_SERIES)
 MARKET_CYCLE_SPX_REFERENCE_PATH = Path(__file__).with_name("data") / "SPCFD_SPX_1W_reference.csv"
 CURRENT_RISK_RAW_TICKERS = {"SPY": "SPY_RAW", "QQQ": "QQQ_RAW"}
 MARKET_CYCLE_TRADINGVIEW_BREADTH = {"S5FI": "SPXAboveSMA50D", "S5TH": "SPXAboveSMA200D"}
@@ -51,11 +56,16 @@ class MarketCycleSnapshot:
     category_validation: pd.DataFrame
     data_quality: pd.DataFrame
     interpretation: str
+    broker_margin_history: pd.DataFrame
 
 
 def build_market_cycle_snapshot(end_date: str | pd.Timestamp | None = None) -> MarketCycleSnapshot:
     end = pd.Timestamp(end_date).tz_localize(None).normalize() if end_date else pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
     raw = download_market_cycle_prices(end)
+    broker_margin_history = build_broker_margin_leverage_history(
+        raw.get(BROKER_MARGIN_LOANS_SERIES),
+        raw.get(US_EQUITY_MARKET_CAP_SERIES),
+    )
     daily = build_daily_frame(raw, end)
     weekly = build_weekly_frame(raw, end)
     monthly = build_monthly_frame(raw, end)
@@ -129,6 +139,7 @@ def build_market_cycle_snapshot(end_date: str | pd.Timestamp | None = None) -> M
         category_validation=category_validation,
         data_quality=quality,
         interpretation=interpretation,
+        broker_margin_history=broker_margin_history,
     )
 
 
