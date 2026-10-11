@@ -61,6 +61,7 @@ from market_model import (
 from table_export import dataframe_to_excel_xls_bytes
 from ai_dashboard import AI_GROUP_LABELS, AI_UNIVERSE, canonical_ai_group_label, is_ai_group_label
 from ai_dashboard_tab import render_ai_dashboard_tab
+from world_economy_tab import render_world_economy_tab
 from business_cycle_tab import (
     load_business_cycle_snapshot_cached,
     render_business_cycle_tab,
@@ -7117,6 +7118,7 @@ def main():
         "CFTC COT",
         "Gold Regime",
         "BTC Cycle",
+        "World Economy",
         "Crypto Derivatives",
         "Alpha Engine",
         "Market Regime",
@@ -7137,6 +7139,8 @@ def main():
     )
     if active_view == "Portfolio":
         render_portfolio_tab()
+    elif active_view == "World Economy":
+        render_world_economy_tab()
     elif active_view == "Table":
         gb = GridOptionsBuilder.from_dataframe(table_display_df)
         gb.configure_default_column(
