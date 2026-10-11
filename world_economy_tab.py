@@ -173,6 +173,61 @@ def _render_country_trajectory(history: pd.DataFrame, table: pd.DataFrame, refer
         selected = selected.loc[~selected["is_provisional"].fillna(False)]
     selected["is_provisional"] = selected["is_provisional"].fillna(False).astype(bool)
     selected = selected.sort_values(["year", "is_provisional"])
+    chart_col, table_col = st.columns([1.15, 1], gap="medium")
+    with chart_col:
+        _render_debt_fiscal_plot(selected, reference_year, show_provisional)
+    with table_col:
+        st.markdown("**Country Macro Trajectory**")
+        trajectory = _country_trajectory_table(selected, reference_year)
+        st.dataframe(trajectory, use_container_width=True, hide_index=True, height=570)
+        st.caption("Nominal GDP 5Y/10Y columns show CAGR; other summary columns show 5Y/10Y change. Monthly and quarterly series use calendar-year averages; the current year may be partial.")
+
+
+def _country_trajectory_table(selected: pd.DataFrame, reference_year: int) -> pd.DataFrame:
+    start_year = reference_year - 10
+    annual = selected.loc[~selected["is_provisional"].fillna(False)].sort_values("year").drop_duplicates("year", keep="last")
+    by_year = annual.set_index("year")
+    series = [
+        ("Nominal GDP (USD bn)", "nominal_gdp_usd_bn", "level"),
+        ("Nominal GDP Growth", "nominal_gdp_growth_pct", "pct"),
+        ("Real GDP Growth", "real_gdp_growth_pct", "pct"),
+        ("Total Debt / GDP", "total_debt_gdp_annual_avg_pct", "pct"),
+        ("Interest Rate", "long_term_interest_rate_annual_avg_pct", "pct"),
+        ("Interest on total Debt (% GDP)", "interest_on_total_debt_pct_gdp", "pct"),
+        ("DSR Private non-financial sector", "dsr_annual_avg_pct", "pct"),
+        ("Fiscal Balance", "fiscal_balance_pct", "pct"),
+        ("Government share in total Expenditure", "government_expenditure_pct", "pct"),
+        ("Current Account Balance / GDP", "current_account_pct", "pct"),
+    ]
+    year_columns = [str(year) for year in range(start_year, reference_year + 1)]
+    result: list[dict[str, Any]] = []
+    for label, source, kind in series:
+        row: dict[str, Any] = {"Indicator": label}
+        values: dict[int, float] = {}
+        for year in range(start_year, reference_year + 1):
+            value = pd.to_numeric(by_year.loc[year, source], errors="coerce") if year in by_year.index and source in by_year.columns else np.nan
+            if isinstance(value, pd.Series):
+                value = value.iloc[-1]
+            values[year] = float(value) if pd.notna(value) else np.nan
+            row[str(year)] = _format_trajectory_value(values[year], kind)
+        for horizon in (5, 10):
+            first, last = values.get(reference_year - horizon, np.nan), values.get(reference_year, np.nan)
+            if kind == "level":
+                summary = ((last / first) ** (1 / horizon) - 1) * 100 if np.isfinite(first) and np.isfinite(last) and first > 0 and last > 0 else np.nan
+            else:
+                summary = last - first if np.isfinite(first) and np.isfinite(last) else np.nan
+            row[f"{horizon}Y CAGR / Δ"] = _format_trajectory_value(summary, "pct")
+        result.append(row)
+    return pd.DataFrame(result, columns=["Indicator", *year_columns, "5Y CAGR / Δ", "10Y CAGR / Δ"])
+
+
+def _format_trajectory_value(value: float, kind: str) -> str:
+    if not np.isfinite(value):
+        return "—"
+    return f"{value:,.0f}" if kind == "level" else f"{value:.2f}"
+
+
+def _render_debt_fiscal_plot(selected: pd.DataFrame, reference_year: int, show_provisional: bool) -> None:
     fig = go.Figure()
     # Separate each discontinuous valid run; missing annual points are never bridged.
     completed = selected.loc[~selected["is_provisional"]].sort_values("year")
@@ -243,6 +298,16 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         "bis_observation_quarter": "BIS Quarter", "debt_delta_5y_pp": "Debt/GDP Δ5Y (pp)",
         "debt_delta_10y_pp": "Debt/GDP Δ10Y (pp)", "fiscal_balance_pct": f"Fiscal Balance {year}F (% GDP)",
         "government_expenditure_pct": f"General Government Total Expenditure {year}F (% GDP)",
+        "current_account_pct": f"Current Account Balance {year}F (% GDP)",
+        "current_account_delta_5y_pp": "Current Account Δ5Y (pp)",
+        "current_account_delta_10y_pp": "Current Account Δ10Y (pp)",
+        "dsr_pct": "Private Non-Financial Sector DSR (%)",
+        "dsr_observation_quarter": "DSR Quarter",
+        "dsr_delta_5y_pp": "DSR Δ5Y (pp)", "dsr_delta_10y_pp": "DSR Δ10Y (pp)",
+        "long_term_interest_rate_pct": "Long-term Interest Rate (%)",
+        "long_term_interest_rate_observation_month": "Interest Rate Month",
+        "long_term_interest_rate_delta_5y_pp": "Interest Rate Δ5Y (pp)",
+        "long_term_interest_rate_delta_10y_pp": "Interest Rate Δ10Y (pp)",
         "fiscal_delta_5y_pp": "Fiscal Balance Δ5Y (pp)", "fiscal_delta_10y_pp": "Fiscal Balance Δ10Y (pp)",
         "fiscal_balance_usd_bn": f"Signed Fiscal Balance {year}F (USD bn)",
         f"real_gdp_growth_{year - 3}_pct": f"Real GDP Growth {year - 3} (%)",
@@ -255,6 +320,9 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         "GDP Rank", "Country", gdp_label, "Nominal USD GDP CAGR 5Y (%)", "Nominal USD GDP CAGR 10Y (%)",
         "Latest BIS Total Debt/GDP (%)", "BIS Quarter", "Debt/GDP Δ5Y (pp)", "Debt/GDP Δ10Y (pp)",
         f"Fiscal Balance {year}F (% GDP)", f"General Government Total Expenditure {year}F (% GDP)",
+        f"Current Account Balance {year}F (% GDP)", "Current Account Δ5Y (pp)", "Current Account Δ10Y (pp)",
+        "Private Non-Financial Sector DSR (%)", "DSR Quarter", "DSR Δ5Y (pp)", "DSR Δ10Y (pp)",
+        "Long-term Interest Rate (%)", "Interest Rate Month", "Interest Rate Δ5Y (pp)", "Interest Rate Δ10Y (pp)",
         "Fiscal Balance Δ5Y (pp)", "Fiscal Balance Δ10Y (pp)",
         f"Signed Fiscal Balance {year}F (USD bn)", f"Real GDP Growth {year - 3} (%)", f"Real GDP Growth {year - 2} (%)",
         f"Real GDP Growth {year - 1} (%)", f"Average Real GDP Growth {year - 3}–{year - 1} (%)",
@@ -285,6 +353,7 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
     growth_style = JsCode("""function(params) { if (params.value == null || isNaN(params.value)) return {}; return Number(params.value) < 0 ? {backgroundColor:'#7f1d1d', color:'#f8fafc'} : {}; }""")
     gb.configure_column(f"Average Real GDP Growth {year - 3}–{year - 1} (%)", cellStyle=growth_style)
     gb.configure_grid_options(domLayout="normal", rowHeight=30, suppressMovableColumns=False)
+    st.caption("DSR changes compare the same quarter 5/10 years earlier; OECD long-term interest rate changes compare the same month 5/10 years earlier. Rate and balance changes are percentage points.")
     response = AgGrid(display, gridOptions=gb.build(), data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
                       update_mode=GridUpdateMode.SORTING_CHANGED | GridUpdateMode.MODEL_CHANGED,
                       fit_columns_on_grid_load=False, allow_unsafe_jscode=True,
@@ -298,9 +367,13 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         csv_metadata = (
             f"# Reference year: {year}\n# BIS source: {source_metadata.get('bis_topic_url', '')}\n"
             f"# BIS retrieved at UTC: {source_metadata.get('bis_retrieved_at_utc', '')}\n"
+            f"# BIS DSR source: {source_metadata.get('bis_dsr_topic_url', '')}\n"
+            f"# BIS DSR retrieved at UTC: {source_metadata.get('bis_dsr_retrieved_at_utc', '')}\n"
             f"# IMF source: {source_metadata.get('weo_url', '')}\n# IMF WEO vintage: {source_metadata.get('weo_vintage', '')}\n"
             f"# IMF retrieved at UTC: {source_metadata.get('weo_retrieved_at_utc', '')}\n"
-            "# Units: GDP USD billions; debt and fiscal deltas percentage points\n"
+            f"# OECD long-term rates source: {source_metadata.get('oecd_long_term_rates_url', '')}\n"
+            f"# OECD long-term rates retrieved at UTC: {source_metadata.get('oecd_long_term_rates_retrieved_at_utc', '')}\n"
+            "# Units: GDP USD billions; ratios in percent; 5Y/10Y changes in percentage points\n"
         )
         st.download_button("Download CSV", (csv_metadata + sorted_filtered.to_csv(index=False, na_rep="N/A")).encode("utf-8-sig"),
                            file_name=f"world_economy_{year}.csv", mime="text/csv", key="we_csv_download")
@@ -313,10 +386,17 @@ def _xlsx_export(table: pd.DataFrame, year: int, source_metadata: dict[str, Any]
     stream = BytesIO()
     metadata = pd.DataFrame([
         ("Reference year", year), ("BIS source", "BIS WS_TC F1.1 — total credit to non-financial sector, % GDP"),
-        ("IMF source", "IMF World Economic Outlook — NGDPD, GGXCNL_NGDP, NGDP_RPCH"),
-        ("GDP unit", "USD billions"), ("Debt/fiscal changes", "Percentage points"),
+        ("BIS DSR source", "BIS Debt Service Ratios — private non-financial sector"),
+        ("OECD source", "Financial market — monthly long-term interest rates, percent per annum (IRLT/PA)"),
+        ("IMF source", "IMF World Economic Outlook — NGDPD, GGXCNL_NGDP, GGX_NGDP, BCA_NGDPD, NGDP_RPCH"),
+        ("GDP unit", "USD billions"), ("5Y/10Y changes", "Percentage points; DSR compares same quarter"),
         ("BIS source URL", source_metadata.get("bis_topic_url", "")),
         ("BIS retrieved at UTC", source_metadata.get("bis_retrieved_at_utc", "")),
+        ("BIS DSR source URL", source_metadata.get("bis_dsr_topic_url", "")),
+        ("BIS DSR retrieved at UTC", source_metadata.get("bis_dsr_retrieved_at_utc", "")),
+        ("OECD long-term rates source URL", source_metadata.get("oecd_long_term_rates_url", "")),
+        ("OECD long-term rates API URL", source_metadata.get("oecd_long_term_rates_api_url", "")),
+        ("OECD long-term rates retrieved at UTC", source_metadata.get("oecd_long_term_rates_retrieved_at_utc", "")),
         ("IMF source URL", source_metadata.get("weo_url", "")),
         ("IMF WEO vintage", source_metadata.get("weo_vintage", "")),
         ("IMF retrieved at UTC", source_metadata.get("weo_retrieved_at_utc", "")),
