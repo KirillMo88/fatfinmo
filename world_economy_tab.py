@@ -200,7 +200,7 @@ def _trajectory_chart_data(selected: pd.DataFrame, reference_year: int) -> pd.Da
         .set_index("year")
     )
     years = list(range(reference_year - 10, reference_year + 1))
-    periods = [str(year) for year in years] + ["5Y AVG", "10Y AVG"]
+    periods = [str(year) for year in years] + ["5Y Avg", "10Y Avg"]
     sources = (
         "real_gdp_growth_pct", "fiscal_balance_pct", "current_account_pct",
         "total_debt_gdp_annual_avg_pct", "long_term_interest_rate_annual_avg_pct",
@@ -210,8 +210,8 @@ def _trajectory_chart_data(selected: pd.DataFrame, reference_year: int) -> pd.Da
     for source in sources:
         values = pd.to_numeric(annual[source], errors="coerce") if source in annual.columns else pd.Series(dtype=float)
         recent_5y = values.reindex(range(reference_year - 4, reference_year + 1))
-        prior_10y = values.reindex(range(reference_year - 10, reference_year))
-        result[source] = [values.get(year, np.nan) for year in years] + [recent_5y.mean(), prior_10y.mean()]
+        recent_10y = values.reindex(range(reference_year - 9, reference_year + 1))
+        result[source] = [values.get(year, np.nan) for year in years] + [recent_5y.mean(), recent_10y.mean()]
     return result
 
 
@@ -234,7 +234,12 @@ def _render_growth_fiscal_current_account_plot(data: pd.DataFrame, *, height: in
         height=height, barmode="group", margin={"l": 45, "r": 15, "t": 48, "b": 65},
         legend={"orientation": "h", "yanchor": "top", "y": -0.18, "x": 0.5, "xanchor": "center"},
         yaxis={"title": "% of GDP / growth", "zeroline": True, "gridcolor": "#293241"},
-        xaxis={"title": None, "gridcolor": "#293241"},
+        xaxis={
+            "title": None, "gridcolor": "#293241", "type": "category",
+            "categoryorder": "array", "categoryarray": data["Period"].tolist(),
+            "tickmode": "array", "tickvals": data["Period"].tolist(),
+            "ticktext": data["Period"].tolist(), "automargin": True,
+        },
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
 
@@ -260,7 +265,12 @@ def _render_debt_interest_plot(data: pd.DataFrame, *, height: int) -> None:
         title={"text": "Total Debt / GDP, LT Interest Rate, Interest on Total Debt", "x": 0.5},
         height=height, barmode="group", margin={"l": 48, "r": 48, "t": 48, "b": 65},
         legend={"orientation": "h", "yanchor": "top", "y": -0.18, "x": 0.5, "xanchor": "center"},
-        xaxis={"gridcolor": "#293241"},
+        xaxis={
+            "gridcolor": "#293241", "type": "category",
+            "categoryorder": "array", "categoryarray": data["Period"].tolist(),
+            "tickmode": "array", "tickvals": data["Period"].tolist(),
+            "ticktext": data["Period"].tolist(), "automargin": True,
+        },
     )
     fig.update_yaxes(title_text="Interest (% / % GDP)", gridcolor="#293241", secondary_y=False)
     fig.update_yaxes(title_text="Total Debt / GDP (%)", secondary_y=True, showgrid=False)
