@@ -173,13 +173,14 @@ def _render_country_trajectory(history: pd.DataFrame, table: pd.DataFrame, refer
         selected = selected.loc[~selected["is_provisional"].fillna(False)]
     selected["is_provisional"] = selected["is_provisional"].fillna(False).astype(bool)
     selected = selected.sort_values(["year", "is_provisional"])
-    chart_col, table_col = st.columns([1.15, 1], gap="medium")
+    trajectory = _country_trajectory_table(selected, reference_year)
+    trajectory_height = min(570, max(220, 42 + 35 * len(trajectory)))
+    chart_col, table_col = st.columns([1, 1.15], gap="medium")
     with chart_col:
-        _render_debt_fiscal_plot(selected, reference_year, show_provisional)
+        _render_debt_fiscal_plot(selected, reference_year, show_provisional, height=trajectory_height)
     with table_col:
         st.markdown("**Country Macro Trajectory**")
-        trajectory = _country_trajectory_table(selected, reference_year)
-        st.dataframe(trajectory, use_container_width=True, hide_index=True, height=570)
+        st.dataframe(trajectory, use_container_width=True, hide_index=True, height=trajectory_height)
         st.caption("Nominal GDP 5Y/10Y columns show CAGR; other summary columns show 5Y/10Y change. Monthly and quarterly series use calendar-year averages; the current year may be partial.")
 
 
@@ -227,7 +228,13 @@ def _format_trajectory_value(value: float, kind: str) -> str:
     return f"{value:,.0f}" if kind == "level" else f"{value:.2f}"
 
 
-def _render_debt_fiscal_plot(selected: pd.DataFrame, reference_year: int, show_provisional: bool) -> None:
+def _render_debt_fiscal_plot(
+    selected: pd.DataFrame,
+    reference_year: int,
+    show_provisional: bool,
+    *,
+    height: int = 570,
+) -> None:
     fig = go.Figure()
     # Separate each discontinuous valid run; missing annual points are never bridged.
     completed = selected.loc[~selected["is_provisional"]].sort_values("year")
@@ -277,7 +284,7 @@ def _render_debt_fiscal_plot(selected: pd.DataFrame, reference_year: int, show_p
                                  hovertemplate=f"%{{customdata[0]}} · {reference_year} provisional<br>BIS quarter: %{{customdata[1]}}<br>IMF status: %{{customdata[2]}}<br>Debt/GDP: %{{x:.2f}}%<br>Fiscal: %{{y:.2f}}% GDP<br>GDP: $%{{customdata[3]:,.1f}}bn<br>Real growth: %{{customdata[4]:.2f}}%<br>WEO vintage: %{{customdata[5]}}<extra></extra>"))
     if show_provisional and provisional.empty:
         st.info(f"No BIS observation in {reference_year}; no provisional endpoint is shown.")
-    fig.update_layout(height=570, margin={"l": 55, "r": 20, "t": 25, "b": 45},
+    fig.update_layout(height=height, showlegend=False, margin={"l": 55, "r": 20, "t": 25, "b": 45},
                       xaxis_title="BIS Total Debt / GDP (%)",
                       yaxis={"title": f"General Government Fiscal Balance (% GDP) — {reference_year}", "autorange": "reversed", "zeroline": True})
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
