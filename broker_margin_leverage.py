@@ -31,11 +31,11 @@ def build_broker_margin_leverage_history(
     margin_loans: pd.DataFrame | None,
     equity_market_cap: pd.DataFrame | None,
 ) -> pd.DataFrame:
-    """Align both FRED end-of-quarter level series by reporting quarter.
+    """Align FRED end-of-quarter series and calculate trend-adjusted leverage.
 
-    Source observations are in millions of USD. The returned frame starts in
-    1990 and keeps unmatched source quarters so loan percentiles do not depend
-    on market-cap availability; normalized ratios require both observations.
+    Source observations are in millions of USD. Retain all available quarters
+    so the 12-quarter market-cap SMA and rolling leverage percentiles can be
+    initialized before the displayed 1990 start date.
     """
     loans = _quarterly_series(margin_loans, "MarginLoansMillions")
     market_cap = _quarterly_series(equity_market_cap, "EquityMarketCapMillions")
@@ -45,16 +45,8 @@ def build_broker_margin_leverage_history(
             columns=[
                 "Date", "MarginLoansMillions", "EquityMarketCapMillions",
                 "MarginLoansBillions", "EquityMarketCapTrillions", "MarginLoansYoY",
-                "MarginToMarketCapPct",
-            ]
-        )
-    quarterly = quarterly.loc[quarterly.index >= pd.Period("1990Q1", freq="Q-DEC")].copy()
-    if quarterly.empty:
-        return pd.DataFrame(
-            columns=[
-                "Date", "MarginLoansMillions", "EquityMarketCapMillions",
-                "MarginLoansBillions", "EquityMarketCapTrillions", "MarginLoansYoY",
-                "MarginToMarketCapPct",
+                "EquityMarketCap3YAvgMillions", "EquityMarketCap3YAvgTrillions",
+                "MarginToMarketCap3YAvgPct",
             ]
         )
     full_quarters = pd.period_range(quarterly.index.min(), quarterly.index.max(), freq="Q-DEC")
@@ -66,10 +58,13 @@ def build_broker_margin_leverage_history(
     result["EquityMarketCapTrillions"] = result["EquityMarketCapMillions"] / 1_000_000.0
     loans_millions = pd.to_numeric(result["MarginLoansMillions"], errors="coerce")
     equity_millions = pd.to_numeric(result["EquityMarketCapMillions"], errors="coerce")
+    result["EquityMarketCap3YAvgMillions"] = equity_millions.rolling(12, min_periods=12).mean()
+    result["EquityMarketCap3YAvgTrillions"] = result["EquityMarketCap3YAvgMillions"] / 1_000_000.0
     result["MarginLoansYoY"] = loans_millions.pct_change(4, fill_method=None) * 100.0
-    result["MarginToMarketCapPct"] = np.where(
-        loans_millions.gt(0) & equity_millions.gt(0),
-        100.0 * loans_millions / equity_millions,
+    trend_cap = pd.to_numeric(result["EquityMarketCap3YAvgMillions"], errors="coerce")
+    result["MarginToMarketCap3YAvgPct"] = np.where(
+        loans_millions.gt(0) & trend_cap.gt(0),
+        100.0 * loans_millions / trend_cap,
         np.nan,
     )
     return result.drop(columns="Quarter").sort_values("Date").reset_index(drop=True)
@@ -97,7 +92,7 @@ def apply_broker_margin_percentiles(frame: pd.DataFrame, lookback: str) -> pd.Da
     result = frame.copy()
     result["MarginLoansLevelPct"] = historical_percentile(result["MarginLoansBillions"], lookback)
     result["MarginLoansGrowthPct"] = historical_percentile(result["MarginLoansYoY"], lookback)
-    result["MarginToMarketCapPctile"] = historical_percentile(result["MarginToMarketCapPct"], lookback)
+    result["MarginToMarketCap3YAvgPctile"] = historical_percentile(result["MarginToMarketCap3YAvgPct"], lookback)
     return result
 
 
@@ -122,7 +117,7 @@ def weekly_log_spx(daily: pd.DataFrame) -> pd.DataFrame:
 def latest_common_observation(frame: pd.DataFrame) -> pd.Series | None:
     if frame is None or frame.empty:
         return None
-    valid = frame.dropna(subset=["MarginLoansBillions", "EquityMarketCapTrillions"])
+    valid = frame.dropna(subset=["MarginLoansBillions", "EquityMarketCap3YAvgTrillions", "MarginToMarketCap3YAvgPct"])
     return None if valid.empty else valid.iloc[-1]
 
 
@@ -156,36 +151,41 @@ def classify_normalized_leverage(percentile: Any) -> str:
     return "Extreme"
 
 
-def broker_leverage_interpretation(growth_percentile: Any, ratio_percentile: Any) -> tuple[str, str]:
+def broker_leverage_interpretation(
+    growth_percentile: Any, ratio_percentile: Any, lookback: str = "10Y"
+) -> tuple[str, str]:
     growth = pd.to_numeric(pd.Series([growth_percentile]), errors="coerce").iloc[0]
     leverage = pd.to_numeric(pd.Series([ratio_percentile]), errors="coerce").iloc[0]
     if not np.isfinite(growth) or not np.isfinite(leverage):
         return (
             "Insufficient Data",
-            "One or more 10-year percentile measures are not yet available; no interpretation is inferred.",
+            f"One or more {lookback} percentile measures are not yet available; no interpretation is inferred.",
         )
 
     if growth >= 90 and leverage >= 90:
-        title = "Extreme Credit Expansion / High Leverage"
-        detail = "Broker credit is expanding at an extreme historical rate while normalized leverage is also historically extreme."
-    elif growth >= 90 and 25 <= leverage <= 75:
-        title = "Rapid Credit Expansion / Normal Leverage"
-        detail = "Broker customer receivables are expanding at a historically elevated rate, while their level relative to US equity market capitalization remains within its normal historical range."
+        title = "Extreme Credit Expansion / Extreme Trend-Adjusted Leverage"
+        detail = "Broker credit is expanding at an extreme historical rate while leverage relative to the trailing 3-year average US public equity market capitalization is also historically extreme."
+    elif growth >= 90 and 75 <= leverage < 90:
+        title = "Rapid Credit Expansion / Elevated Trend-Adjusted Leverage"
+        detail = f"Broker credit growth is unusually strong and leverage relative to the trailing 3-year average US public equity market capitalization is elevated versus its {lookback} history."
+    elif growth >= 90 and 25 <= leverage < 75:
+        title = "Rapid Credit Expansion / Normal Trend-Adjusted Leverage"
+        detail = f"Broker customer receivables are expanding at a historically elevated rate, while leverage relative to the trailing 3-year average US public equity market capitalization remains in its normal {lookback} historical range."
     elif growth >= 90 and leverage <= 25:
-        title = "Credit Recovery / Low Leverage"
-        detail = "Broker credit growth is unusually strong, while normalized broker leverage remains historically low."
+        title = "Credit Recovery / Low Trend-Adjusted Leverage"
+        detail = "Broker credit growth is unusually strong, while leverage relative to the trailing 3-year average US public equity market capitalization remains historically low."
     elif 25 <= growth <= 75 and leverage >= 90:
-        title = "Elevated Leverage / Moderate Credit Growth"
-        detail = "Normalized broker leverage is extreme even though the pace of credit growth is within its normal range."
+        title = "Extreme Trend-Adjusted Leverage / Moderate Credit Growth"
+        detail = "Broker leverage relative to the trailing 3-year average US public equity market capitalization is extreme even though the pace of credit growth is within its normal range."
     elif growth <= 10 and leverage >= 90:
-        title = "Credit Contraction / Elevated Leverage"
-        detail = "Broker credit growth is at an extreme low while normalized leverage remains elevated relative to history."
+        title = "Credit Contraction / Extreme Trend-Adjusted Leverage"
+        detail = "Broker credit growth is at an extreme low while leverage relative to the trailing 3-year average US public equity market capitalization remains elevated relative to history."
     elif growth <= 10 and leverage <= 25:
-        title = "Broad Credit Deleveraging"
-        detail = "Broker credit is contracting sharply and normalized leverage is low relative to its historical range."
+        title = "Broad Credit Deleveraging / Low Trend-Adjusted Leverage"
+        detail = "Broker credit is contracting sharply and leverage relative to the trailing 3-year average US public equity market capitalization is low relative to its historical range."
     elif 25 <= growth <= 75 and 25 <= leverage <= 75:
-        title = "Normal Credit / Normal Leverage"
-        detail = "Both broker credit growth and normalized broker leverage are within their normal historical ranges."
+        title = "Normal Credit / Normal Trend-Adjusted Leverage"
+        detail = "Both broker credit growth and leverage relative to the trailing 3-year average US public equity market capitalization are within their normal historical ranges."
     else:
         title = f"{classify_credit_growth(growth)} / {classify_normalized_leverage(leverage)} Leverage"
         detail = (
