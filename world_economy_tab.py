@@ -58,6 +58,11 @@ def render_world_economy_tab() -> None:
         right.write(f"**BIS series:** {diagnostics.get('bis_series_definition')}")
         right.write(f"**IMF indicators:** {', '.join(diagnostics.get('imf_indicators', []))}")
         right.write(f"**WEO vintage:** {diagnostics.get('imf_vintage') or 'unknown'}")
+        right.write(
+            f"**World Bank reserves:** {diagnostics.get('world_bank_reserves_countries', 0)} countries · "
+            f"[source]({diagnostics.get('world_bank_reserves_source_url', '')}) · "
+            f"retrieved {diagnostics.get('world_bank_reserves_retrieved_at_utc') or 'unknown'}"
+        )
         right.write(f"**BIS latest quarters:** {diagnostics.get('latest_bis_quarters', {})}")
         unmapped = diagnostics.get("bis_unmapped_economies", [])
         if unmapped:
@@ -215,6 +220,19 @@ def _trajectory_chart_data(selected: pd.DataFrame, reference_year: int) -> pd.Da
     return result
 
 
+def _add_trajectory_average_separator(fig: go.Figure, data: pd.DataFrame) -> None:
+    """Separate annual observations from the trailing-average categories."""
+    periods = data["Period"].tolist()
+    if "5Y Avg" not in periods:
+        return
+    boundary = periods.index("5Y Avg") - 0.5
+    fig.add_shape(
+        type="line", x0=boundary, x1=boundary, y0=0, y1=1,
+        xref="x", yref="paper", layer="above",
+        line={"color": "#7b8798", "width": 1.2, "dash": "dot"},
+    )
+
+
 def _render_growth_fiscal_current_account_plot(data: pd.DataFrame, *, height: int) -> None:
     fig = go.Figure()
     series = (
@@ -229,6 +247,7 @@ def _render_growth_fiscal_current_account_plot(data: pd.DataFrame, *, height: in
             textfont={"size": 9}, cliponaxis=False,
             hovertemplate=f"{name}: %{{y:.2f}}%<extra></extra>",
         ))
+    _add_trajectory_average_separator(fig, data)
     fig.update_layout(
         title={"text": "GDP Growth, Fiscal Balance, Current Account", "x": 0.5},
         height=height, barmode="group", margin={"l": 45, "r": 15, "t": 48, "b": 65},
@@ -261,6 +280,7 @@ def _render_debt_interest_plot(data: pd.DataFrame, *, height: int) -> None:
         name="Total Debt / GDP", mode="lines+markers", line={"color": "#176b8e", "width": 3},
         marker={"size": 6}, hovertemplate="Total Debt / GDP: %{y:.2f}%<extra></extra>",
     ), secondary_y=True)
+    _add_trajectory_average_separator(fig, data)
     fig.update_layout(
         title={"text": "Total Debt / GDP, LT Interest Rate, Interest on Total Debt", "x": 0.5},
         height=height, barmode="group", margin={"l": 48, "r": 48, "t": 48, "b": 65},
@@ -397,6 +417,8 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         "gdp_rank": "GDP Rank", "country_name": "Country", "iso3": "ISO3",
         "nominal_gdp_usd_bn": f"GDP {year}F, USD bn", "gdp_cagr_5y_pct": "Nominal USD GDP CAGR 5Y (%)",
         "gdp_cagr_10y_pct": "Nominal USD GDP CAGR 10Y (%)", "total_debt_gdp_pct": "Latest BIS Total Debt/GDP (%)",
+        "government_debt_gdp_pct": "Government Debt/GDP — GGXWDG_NGDP (%)",
+        "government_debt_coverage_pct": "Government Debt Coverage (%)",
         "bis_observation_quarter": "BIS Quarter", "debt_delta_5y_pp": "Debt/GDP Δ5Y (pp)",
         "debt_delta_10y_pp": "Debt/GDP Δ10Y (pp)", "fiscal_balance_pct": f"Fiscal Balance {year}F (% GDP)",
         "government_expenditure_pct": f"General Government Total Expenditure {year}F (% GDP)",
@@ -423,7 +445,8 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
     avg_growth_label = f"Average Real GDP Growth {year - 3}–{year - 1} (%)"
     display = display[[
         "GDP Rank", "Country", gdp_label, "Nominal USD GDP CAGR 5Y (%)", "Nominal USD GDP CAGR 10Y (%)",
-        avg_growth_label, "Latest BIS Total Debt/GDP (%)", "BIS Quarter", "Debt/GDP Δ5Y (pp)",
+        avg_growth_label, "Latest BIS Total Debt/GDP (%)", "Government Debt/GDP — GGXWDG_NGDP (%)",
+        "Government Debt Coverage (%)", "BIS Quarter", "Debt/GDP Δ5Y (pp)",
         "Debt/GDP Δ10Y (pp)", f"Signed Fiscal Balance {year}F (USD bn)",
         f"Fiscal Balance {year}F (% GDP)", "Fiscal Balance Δ5Y (pp)", "Fiscal Balance Δ10Y (pp)",
         f"General Government Total Expenditure {year}F (% GDP)",
@@ -458,7 +481,11 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
     growth_style = JsCode("""function(params) { if (params.value == null || isNaN(params.value)) return {}; return Number(params.value) < 0 ? {backgroundColor:'#7f1d1d', color:'#f8fafc'} : {}; }""")
     gb.configure_column(f"Average Real GDP Growth {year - 3}–{year - 1} (%)", cellStyle=growth_style)
     gb.configure_grid_options(domLayout="normal", rowHeight=30, suppressMovableColumns=False)
-    st.caption("DSR Δ10Y compares the same quarter 10 years earlier; OECD long-term interest rate changes compare the same month 5/10 years earlier. Rate and balance changes are percentage points.")
+    st.caption(
+        "DSR Δ10Y compares the same quarter 10 years earlier; OECD long-term interest rate changes compare the same month 5/10 years earlier. "
+        "Government debt coverage = World Bank gold and FX reserves / gross government debt, aligned to the latest common year. "
+        "Rate and balance changes are percentage points."
+    )
     response = AgGrid(display, gridOptions=gb.build(), data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
                       update_mode=GridUpdateMode.SORTING_CHANGED | GridUpdateMode.MODEL_CHANGED,
                       fit_columns_on_grid_load=False, allow_unsafe_jscode=True,
@@ -488,9 +515,7 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         st.download_button("Download XLSX", _xlsx_export(sorted_filtered, year, source_metadata), file_name=f"world_economy_{year}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="we_xlsx_download")
 
-    top_gdp_cds = table.nsmallest(10, "gdp_rank").dropna(subset=["cds_5y_bps"]).sort_values(
-        "gdp_rank", ascending=False
-    )
+    top_gdp_cds = _top_gdp_cds_countries(table)
     if not top_gdp_cds.empty:
         st.subheader("Sovereign 5Y CDS — Top 10 GDP Countries")
         fig = go.Figure(go.Bar(
@@ -518,6 +543,15 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
         )
 
 
+def _top_gdp_cds_countries(table: pd.DataFrame, count: int = 10) -> pd.DataFrame:
+    """Return the highest-GDP CDS countries, excluding Russia and filling its slot."""
+    eligible = table.loc[
+        table["iso3"].astype(str).str.upper().ne("RUS")
+        & table["country_name"].astype(str).str.strip().str.casefold().ne("russian federation")
+    ].dropna(subset=["cds_5y_bps"])
+    return eligible.nsmallest(count, "gdp_rank").sort_values("gdp_rank", ascending=False)
+
+
 def _xlsx_export(table: pd.DataFrame, year: int, source_metadata: dict[str, Any]) -> bytes:
     stream = BytesIO()
     metadata = pd.DataFrame([
@@ -525,7 +559,9 @@ def _xlsx_export(table: pd.DataFrame, year: int, source_metadata: dict[str, Any]
         ("BIS DSR source", "BIS Debt Service Ratios — private non-financial sector"),
         ("OECD source", "Financial market — monthly long-term interest rates, percent per annum (IRLT/PA)"),
         ("Sovereign CDS source", "World Government Bonds — 5Y CDS, six-month variation, implied probability of default (40% recovery)"),
-        ("IMF source", "IMF World Economic Outlook — NGDPD, GGXCNL_NGDP, GGX_NGDP, BCA_NGDPD, NGDP_RPCH"),
+        ("IMF source", "IMF World Economic Outlook — NGDPD, GGXCNL_NGDP, GGX_NGDP, BCA_NGDPD, NGDP_RPCH, GGXWDG_NGDP"),
+        ("Government debt source", "IMF WEO GGXWDG_NGDP, gross government debt (% GDP)"),
+        ("Gold & FX reserves source", "World Bank WDI FI.RES.TOTL.CD, total reserves including gold (current US$)"),
         ("GDP unit", "USD billions"), ("5Y/10Y changes", "Percentage points; DSR compares same quarter"),
         ("BIS source URL", source_metadata.get("bis_topic_url", "")),
         ("BIS retrieved at UTC", source_metadata.get("bis_retrieved_at_utc", "")),
@@ -539,6 +575,9 @@ def _xlsx_export(table: pd.DataFrame, year: int, source_metadata: dict[str, Any]
         ("IMF source URL", source_metadata.get("weo_url", "")),
         ("IMF WEO vintage", source_metadata.get("weo_vintage", "")),
         ("IMF retrieved at UTC", source_metadata.get("weo_retrieved_at_utc", "")),
+        ("World Bank reserves source URL", source_metadata.get("world_bank_reserves_url", "")),
+        ("World Bank reserves API URL", source_metadata.get("world_bank_reserves_api_url", "")),
+        ("World Bank reserves retrieved at UTC", source_metadata.get("world_bank_reserves_retrieved_at_utc", "")),
     ], columns=["Field", "Value"])
     with pd.ExcelWriter(stream, engine="xlsxwriter") as writer:
         table.to_excel(writer, index=False, sheet_name="World Economy")
