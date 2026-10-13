@@ -103,6 +103,33 @@ def test_vxx_strategy_enters_next_close_and_takes_gap_profit() -> None:
     assert np.isclose(trade["Capital After ($)"], expected_capital)
 
 
+def test_vxx_strategy_does_not_carry_pre_inception_signal_forward() -> None:
+    dates = pd.bdate_range("2026-01-02", periods=3)
+    vix = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2005-09-27"), *dates],
+            "DailyRapid": [True, True, False, False],
+            "VIX_Close": [12.0, 12.0, 16.0, 16.0],
+            "WeeklyRegime": ["WHITE"] * 4,
+        }
+    )
+    result = backtest_vxx_strategy(
+        vix,
+        _vxx_prices(
+            dates,
+            opens=[10.0, 10.0, 18.0],
+            highs=[10.5, 10.5, 19.0],
+            lows=[9.5, 9.5, 17.5],
+            closes=[10.0, 10.0, 18.5],
+        ),
+    )
+
+    trade = result.trades.iloc[0]
+    assert trade["Entry Signal Date"] == dates[0]
+    assert trade["Entry Date"] == dates[1]
+    assert result.diagnostics["discarded_signals_before_vxx_history"] == 1
+
+
 def test_vxx_strategy_uses_stop_first_when_tp_and_stop_touch_same_bar() -> None:
     dates = pd.bdate_range("2026-01-02", periods=3)
     result = backtest_vxx_strategy(
