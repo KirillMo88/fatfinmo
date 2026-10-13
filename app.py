@@ -89,6 +89,7 @@ from market_cycle_tab import (
     load_spy_macro_outlook_cached,
     render_market_cycle_tab,
 )
+from vix_based_model import render_vix_based_model
 from technical_outlook_simple_v3_tab import render_technical_outlook_simple_v3_tab
 from global_m2_cycle import (
     build_global_m2_cycle_fig,
@@ -7105,6 +7106,7 @@ def main():
         "Portfolio",
         "Technical Outlook",
         "Market Cycle",
+        "VIX Based Model",
         "Commodity Cycle",
         "Liquidity Cycle",
         "Business Cycle",
@@ -7388,6 +7390,10 @@ def main():
         render_market_regime_tab(market_snapshot)
     elif active_view == "Market Cycle":
         render_market_cycle_tab(get_fred_api_key_for_app())
+    elif active_view == "VIX Based Model":
+        render_vix_based_model(
+            current_cycle.daily if current_cycle is not None else pd.DataFrame()
+        )
     elif active_view == "Commodity Cycle":
         render_commodity_cycle_tab(get_fred_api_key_for_app())
     elif active_view == "Business Cycle":
