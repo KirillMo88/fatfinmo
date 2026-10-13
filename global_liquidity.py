@@ -1826,6 +1826,76 @@ def monthly_last(series: pd.Series) -> pd.Series:
     return out.resample("MS").last().dropna()
 
 
+def build_regional_m2_dynamics_frame(
+    raw: pd.DataFrame,
+    monthly: pd.DataFrame,
+    currency_mode: str = "USD",
+    start_date: Any | None = None,
+    end_date: Any | None = None,
+) -> pd.DataFrame:
+    """Build completed-month regional M2 levels in trillions for charting."""
+    output_columns = ["Date", "Series", "Value", "Currency"]
+    if monthly.empty or "date" not in monthly.columns:
+        return pd.DataFrame(columns=output_columns)
+
+    completed_dates = pd.DatetimeIndex(
+        pd.to_datetime(monthly["date"], errors="coerce").dropna().unique()
+    ).sort_values()
+    if completed_dates.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    mode = str(currency_mode).strip().upper()
+    series_specs: list[tuple[str, str, pd.Series, float]] = []
+    if mode == "USD":
+        indexed_monthly = monthly.copy()
+        indexed_monthly["date"] = pd.to_datetime(indexed_monthly["date"], errors="coerce")
+        indexed_monthly = indexed_monthly.dropna(subset=["date"]).drop_duplicates("date", keep="last").set_index("date")
+        for label, column in (
+            ("USM2", "us_m2_usd_bn"),
+            ("EUM2", "ea_m2_usd_bn"),
+            ("CNM2", "china_m2_usd_bn"),
+            ("JPM2", "japan_m2_usd_bn"),
+        ):
+            values = pd.to_numeric(indexed_monthly.get(column, pd.Series(dtype="float64")), errors="coerce")
+            series_specs.append((label, "USD", values, 1_000.0))
+    elif mode in {"LOCAL", "LOCAL CURRENCY"}:
+        series_specs = [
+            ("USM2", "USD", monthly_last(raw_series(raw, "M2SL")), 1_000.0),
+            (
+                "EUM2",
+                "EUR",
+                monthly_last(raw_series(raw, str(GLOBAL_LIQUIDITY_CONFIG["ecb_m2_key"]))),
+                1_000_000.0,
+            ),
+            ("CNM2", "CNY", monthly_last(raw_series(raw, CHINA_M2_SERIES_ID)), 10_000.0),
+            ("JPM2", "JPY", monthly_last(japan_m2_series(raw)), 10_000.0),
+        ]
+    else:
+        raise ValueError(f"Unsupported regional M2 currency mode: {currency_mode}")
+
+    start = pd.to_datetime(start_date, errors="coerce") if start_date is not None else pd.NaT
+    end = pd.to_datetime(end_date, errors="coerce") if end_date is not None else pd.NaT
+    rows: list[dict[str, Any]] = []
+    for label, currency, values, divisor in series_specs:
+        numeric = pd.to_numeric(values, errors="coerce").reindex(completed_dates) / divisor
+        for date, value in numeric.items():
+            if pd.isna(value) or not np.isfinite(value):
+                continue
+            if pd.notna(start) and date < start:
+                continue
+            if pd.notna(end) and date > end:
+                continue
+            rows.append(
+                {
+                    "Date": pd.Timestamp(date),
+                    "Series": label,
+                    "Value": float(value),
+                    "Currency": currency,
+                }
+            )
+    return pd.DataFrame(rows, columns=output_columns)
+
+
 def japan_m2_series(raw: pd.DataFrame) -> pd.Series:
     """Return a linked Japan M2 history, preferring the current series on overlap."""
     db = str(GLOBAL_LIQUIDITY_CONFIG["boj_m2_db"])

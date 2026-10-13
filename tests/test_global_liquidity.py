@@ -250,6 +250,55 @@ def test_monthly_fx_conversion_uses_source_units():
     assert np.isclose(row["global_m2_usd_bn"], 1604.0285714285715)
 
 
+def test_regional_m2_dynamics_supports_usd_local_currency_and_date_range():
+    raw = pd.DataFrame(
+        [
+            raw_row("2020-01-01", "M2SL", 20_000.0, unit="USD billions"),
+            raw_row("2020-01-01", gl.GLOBAL_LIQUIDITY_CONFIG["ecb_m2_key"], 14_000_000.0, region="Euro Area", currency="EUR", unit="EUR millions"),
+            raw_row("2020-01-01", gl.CHINA_M2_SERIES_ID, 2_100_000.0, region="China", currency="CNY", unit="CNY 100 million"),
+            raw_row("2020-01-01", "MD02'MAM1NAM2M2MO", 13_000_000.0, region="Japan", currency="JPY", unit="JPY 100 million"),
+            raw_row("2020-02-01", "M2SL", 21_000.0, unit="USD billions"),
+            raw_row("2020-02-01", gl.GLOBAL_LIQUIDITY_CONFIG["ecb_m2_key"], 15_000_000.0, region="Euro Area", currency="EUR", unit="EUR millions"),
+            raw_row("2020-02-01", gl.CHINA_M2_SERIES_ID, 2_200_000.0, region="China", currency="CNY", unit="CNY 100 million"),
+            raw_row("2020-02-01", "MD02'MAM1NAM2M2MO", 14_000_000.0, region="Japan", currency="JPY", unit="JPY 100 million"),
+        ],
+        columns=gl.RAW_COLUMNS,
+    )
+    monthly = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2020-01-01", "2020-02-01"]),
+            "us_m2_usd_bn": [20_000.0, 21_000.0],
+            "ea_m2_usd_bn": [15_400.0, 16_500.0],
+            "china_m2_usd_bn": [30_000.0, 31_000.0],
+            "japan_m2_usd_bn": [12_000.0, 13_000.0],
+        }
+    )
+
+    usd = gl.build_regional_m2_dynamics_frame(
+        raw,
+        monthly,
+        currency_mode="USD",
+        start_date="2020-02-01",
+        end_date="2020-02-01",
+    )
+    local = gl.build_regional_m2_dynamics_frame(raw, monthly, currency_mode="Local currency")
+
+    assert set(usd["Series"]) == {"USM2", "EUM2", "CNM2", "JPM2"}
+    assert usd["Date"].dt.strftime("%Y-%m-%d").unique().tolist() == ["2020-02-01"]
+    assert np.isclose(usd.loc[usd["Series"].eq("EUM2"), "Value"].iloc[0], 16.5)
+    latest_local = local[local["Date"].eq(pd.Timestamp("2020-02-01"))].set_index("Series")
+    assert np.isclose(latest_local.loc["USM2", "Value"], 21.0)
+    assert np.isclose(latest_local.loc["EUM2", "Value"], 15.0)
+    assert np.isclose(latest_local.loc["CNM2", "Value"], 220.0)
+    assert np.isclose(latest_local.loc["JPM2", "Value"], 1_400.0)
+    assert latest_local["Currency"].to_dict() == {
+        "USM2": "USD",
+        "EUM2": "EUR",
+        "CNM2": "CNY",
+        "JPM2": "JPY",
+    }
+
+
 def test_monthly_global_cb_assets_uses_all_official_components_and_fx():
     raw = pd.DataFrame(
         [
