@@ -98,6 +98,7 @@ from global_m2_cycle import (
 )
 from global_liquidity import (
     GLOBAL_LIQUIDITY_STORAGE_DIR,
+    build_regional_m2_dynamics_frame,
     freshness as global_liquidity_freshness,
     global_liquidity_update_in_progress,
     read_global_liquidity,
@@ -2214,6 +2215,7 @@ def render_global_liquidity_dashboard_tab() -> None:
     _render_liquidity_impulse_percentile_chart(chart_frame, "US Net Liquidity", "usnl")
 
     _render_global_liquidity_components_chart(chart_frame)
+    _render_global_m2_regional_dynamics(raw, monthly, chart_frame)
     _render_liquidity_contribution_chart(chart_frame, "m2")
     _render_liquidity_contribution_chart(chart_frame, "cb")
     _render_us_net_liquidity_chart(chart_frame)
@@ -2948,6 +2950,103 @@ def _render_global_liquidity_components_chart(frame: pd.DataFrame) -> None:
         fig.add_hline(y=level, line={"color": "#94a3b8", "dash": "dot", "width": 1}, opacity=0.55)
     fig.update_layout(yaxis={"title": "Score", "range": [0, 100]})
     st.plotly_chart(_style_liquidity_plotly(fig, 320, "Global Liquidity Score - Components"), use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+
+
+def _render_global_m2_regional_dynamics(
+    raw: pd.DataFrame,
+    monthly: pd.DataFrame,
+    visible_frame: pd.DataFrame,
+) -> None:
+    display_mode = st.radio(
+        "Global M2 currency",
+        ["USD", "Local currency"],
+        index=0,
+        horizontal=True,
+        key="global_m2_regional_dynamics_currency",
+    )
+    visible_dates = (
+        pd.to_datetime(visible_frame.get("date", pd.Series(dtype="datetime64[ns]")), errors="coerce")
+        .dropna()
+    )
+    start_date = visible_dates.min() if not visible_dates.empty else None
+    end_date = visible_dates.max() if not visible_dates.empty else None
+    chart_df = build_regional_m2_dynamics_frame(
+        raw,
+        monthly,
+        currency_mode=display_mode,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if chart_df.empty:
+        st.info("No data for Global M2 - Regional Dynamics.")
+        return
+
+    colors = {
+        "USM2": "#38bdf8",
+        "EUM2": "#a78bfa",
+        "CNM2": "#f97316",
+        "JPM2": "#22c55e",
+    }
+    if display_mode == "USD":
+        fig = go.Figure()
+        for label in ("USM2", "EUM2", "CNM2", "JPM2"):
+            series = chart_df[chart_df["Series"].eq(label)]
+            if series.empty:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=series["Date"],
+                    y=series["Value"],
+                    mode="lines",
+                    name=label,
+                    line={"color": colors[label], "width": 2.0},
+                    hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{label}: %{{y:,.2f}}T USD<extra></extra>",
+                )
+            )
+        fig.update_layout(yaxis={"title": "USD trillions"})
+        height = 350
+    else:
+        positions = {
+            "USM2": (1, 1),
+            "EUM2": (1, 2),
+            "CNM2": (2, 1),
+            "JPM2": (2, 2),
+        }
+        fig = make_subplots(
+            rows=2,
+            cols=2,
+            shared_xaxes=True,
+            horizontal_spacing=0.10,
+            vertical_spacing=0.18,
+            subplot_titles=("USM2 · USD", "EUM2 · EUR", "CNM2 · CNY", "JPM2 · JPY"),
+        )
+        for label, (row, column) in positions.items():
+            series = chart_df[chart_df["Series"].eq(label)]
+            if series.empty:
+                continue
+            currency = str(series["Currency"].iloc[0])
+            fig.add_trace(
+                go.Scatter(
+                    x=series["Date"],
+                    y=series["Value"],
+                    mode="lines",
+                    name=label,
+                    showlegend=False,
+                    line={"color": colors[label], "width": 2.0},
+                    hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{label}: %{{y:,.2f}}T {currency}<extra></extra>",
+                ),
+                row=row,
+                col=column,
+            )
+            fig.update_yaxes(title_text=f"{currency} tn", row=row, col=column)
+        height = 520
+
+    styled = _style_liquidity_plotly(fig, height, "Global M2 - Regional Dynamics")
+    if display_mode != "USD":
+        styled.update_annotations(font={"color": "#e5e7eb", "size": 11})
+    st.plotly_chart(styled, use_container_width=True, config=LIQUIDITY_PLOTLY_CONFIG)
+    if display_mode != "USD":
+        st.caption("Local-currency panels use separate vertical scales; all values are shown in trillions of the indicated currency.")
 
 
 def _render_liquidity_contribution_chart(frame: pd.DataFrame, block: str) -> None:

@@ -28,6 +28,7 @@ from portfolio_prioritization import (
     completed_weekly_ratio,
     reconcile_btc_gold_signals,
 )
+from vix_based_model import build_vix_model_data, load_vxx_ohlc, vxx_strategy_positioning
 
 
 PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True, "scrollZoom": False}
@@ -77,11 +78,24 @@ def load_portfolio_positioning_model(btc_gold_history: pd.DataFrame) -> dict[str
     diagnostics: dict[str, str] = {}
     spx_history = pd.DataFrame()
     gold_regime = "DATA_INCOMPLETE"
+    vix_positioning: dict[str, Any] = {
+        "position_pct": np.nan,
+        "current_position": "DATA_INCOMPLETE",
+        "weekly_regime": "N/A",
+        "status": "DATA_INCOMPLETE",
+    }
     try:
         market_cycle = load_market_cycle_snapshot_cached()
         spx_history = build_spx_positioning_history(market_cycle.daily, market_cycle.correction_daily)
         diagnostics["spx_current_risk"] = str(market_cycle.current.get("CurrentRiskSignalClass", "N/A"))
         diagnostics["spx_correction_status"] = str(market_cycle.current.get("CorrectionStatus", "N/A"))
+        try:
+            vix_model = build_vix_model_data(market_cycle.daily)
+            vix_positioning = vxx_strategy_positioning(vix_model.frame, load_vxx_ohlc())
+            if vix_model.diagnostics.get("status") != "ok":
+                diagnostics["vix_error"] = str(vix_model.diagnostics.get("message", "VIX model is unavailable."))
+        except Exception as exc:
+            diagnostics["vix_error"] = str(exc)
     except Exception as exc:
         diagnostics["spx_error"] = str(exc)
     try:
@@ -89,8 +103,10 @@ def load_portfolio_positioning_model(btc_gold_history: pd.DataFrame) -> dict[str
     except Exception as exc:
         diagnostics["gold_error"] = str(exc)
     btc_history = build_btc_positioning_history(btc_gold_history)
+    current = positioning_snapshot(spx_history, gold_regime, btc_history)
+    current["VIX"] = vix_positioning
     return {
-        "current": positioning_snapshot(spx_history, gold_regime, btc_history),
+        "current": current,
         "spx_history": spx_history,
         "btc_history": btc_history,
         "diagnostics": diagnostics,
@@ -356,16 +372,17 @@ def render_portfolio_tab() -> None:
     try:
         positioning = load_portfolio_positioning_model(snapshot["btc_gold"])
     except Exception as exc:
-        positioning = {"current": {"SPX": {}, "GOLD": {}, "BTC": {}}, "diagnostics": {"load_error": str(exc)}}
+        positioning = {"current": {"SPX": {}, "GOLD": {}, "BTC": {}, "VIX": {}}, "diagnostics": {"load_error": str(exc)}}
     positioning_current = positioning.get("current", {})
     positioning_diagnostics = positioning.get("diagnostics", {})
     spx_positioning = positioning_current.get("SPX", {})
     gold_positioning_current = positioning_current.get("GOLD", {})
     btc_positioning = positioning_current.get("BTC", {})
+    vix_positioning = positioning_current.get("VIX", {})
 
     st.markdown("### Positioning")
     st.caption("Independent exposure state machines; these values do not change the Asset Priority Ranking.")
-    position_cols = st.columns(3)
+    position_cols = st.columns(4)
     with position_cols[0]:
         _positioning_card(
             "SPX",
@@ -400,6 +417,17 @@ def render_portfolio_tab() -> None:
                 ("Signal Date", _date(btc_positioning.get("last_signal_date"))),
             ],
             "#fb923c",
+        )
+    with position_cols[3]:
+        _positioning_card(
+            "VIX",
+            _position_label(vix_positioning),
+            [
+                ("Strategy", "VXX Trading Strategy V1.0"),
+                ("Current Position", str(vix_positioning.get("current_position", "DATA_INCOMPLETE"))),
+                ("Weekly Regime", str(vix_positioning.get("weekly_regime", "N/A"))),
+            ],
+            "#e879f9",
         )
 
     st.markdown("### Structural Confirmation")
