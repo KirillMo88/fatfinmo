@@ -9,9 +9,17 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from finance_core import download_completed_ohlcv
+
 
 VIX_MODEL_START = pd.Timestamp("2003-08-01")
 VIX_MODEL_CHART_START = pd.Timestamp("2003-08-01")
+VXX_TICKER = "VXX"
+VXX_INITIAL_CAPITAL = 1_000.0
+VXX_TRANSACTION_COST = 0.0005
+VXX_TAKE_PROFIT_MULTIPLE = 1.70
+VXX_TRAILING_STOP_MULTIPLE = 0.80
+VXX_MAX_HOLDING_SESSIONS = 40
 VIX_MODEL_COLORS = {
     "spx": "#ff9800",
     "vix": "#2786d8",
@@ -32,6 +40,14 @@ VIX_MODEL_COLORS = {
 class VIXModelData:
     frame: pd.DataFrame
     events: pd.DataFrame
+    diagnostics: dict[str, Any]
+
+
+@dataclass
+class VXXStrategyResult:
+    daily: pd.DataFrame
+    trades: pd.DataFrame
+    metrics: dict[str, float]
     diagnostics: dict[str, Any]
 
 
@@ -476,6 +492,372 @@ def _count_episodes(values: pd.Series) -> int:
     return int(np.sum(active & ~np.r_[False, active[:-1]]))
 
 
+@st.cache_data(show_spinner=False, ttl=3_600)
+def load_vxx_ohlc() -> pd.DataFrame:
+    """Load completed, split-adjusted VXX daily bars from Yahoo Finance."""
+    return download_completed_ohlcv(VXX_TICKER, period="max")
+
+
+def _normalize_vxx_ohlc(source: pd.DataFrame) -> pd.DataFrame:
+    columns = ["Date", "Open", "High", "Low", "Close"]
+    if source is None or source.empty:
+        return pd.DataFrame(columns=columns)
+    frame = source.copy()
+    if "Date" in frame.columns:
+        dates = pd.to_datetime(frame["Date"], errors="coerce")
+    else:
+        dates = pd.to_datetime(frame.index, errors="coerce")
+    out = pd.DataFrame({"Date": np.asarray(dates)})
+    for column in columns[1:]:
+        if column not in frame.columns:
+            return pd.DataFrame(columns=columns)
+        out[column] = pd.to_numeric(frame[column], errors="coerce").to_numpy()
+    out = (
+        out.dropna(subset=columns)
+        .loc[lambda values: (values[["Open", "High", "Low", "Close"]] > 0).all(axis=1)]
+        .sort_values("Date")
+        .drop_duplicates("Date", keep="last")
+        .reset_index(drop=True)
+    )
+    return out
+
+
+def backtest_vxx_strategy(
+    vix_frame: pd.DataFrame,
+    vxx_ohlc: pd.DataFrame,
+    initial_capital: float = VXX_INITIAL_CAPITAL,
+) -> VXXStrategyResult:
+    """Run the independent, close-signal/next-close VXX strategy state machine."""
+    empty_daily = pd.DataFrame(
+        columns=[
+            "Date", "VXX_Open", "VXX_High", "VXX_Low", "VXX_Close", "NAV",
+            "DrawdownPct", "Position", "EligibleEntrySignal", "EntryExecuted",
+            "ExitExecuted", "ExitReason",
+        ]
+    )
+    empty_trades = pd.DataFrame(
+        columns=[
+            "Entry Date", "Entry Signal Date", "Entry Price", "Exit Date", "Exit Price",
+            "Exit Reason", "Holding Sessions", "Gross Return (%)", "Net Return (%)",
+            "Entry Cost ($)", "Exit Cost ($)", "Capital Before ($)", "Capital After ($)",
+        ]
+    )
+    required_signal_columns = {"Date", "DailyRapid", "VIX_Close", "WeeklyRegime"}
+    if vix_frame is None or vix_frame.empty or not required_signal_columns.issubset(vix_frame.columns):
+        return VXXStrategyResult(
+            empty_daily,
+            empty_trades,
+            {},
+            {"status": "missing", "message": "VIX signal history is unavailable."},
+        )
+    prices = _normalize_vxx_ohlc(vxx_ohlc)
+    if prices.empty:
+        return VXXStrategyResult(
+            empty_daily,
+            empty_trades,
+            {},
+            {"status": "missing", "message": "Completed VXX OHLC history is unavailable from Yahoo Finance."},
+        )
+
+    signals = vix_frame[["Date", "DailyRapid", "VIX_Close", "WeeklyRegime"]].copy()
+    signals["Date"] = pd.to_datetime(signals["Date"], errors="coerce")
+    signals["VIX_Close"] = pd.to_numeric(signals["VIX_Close"], errors="coerce")
+    signals["DailyRapid"] = signals["DailyRapid"].fillna(False).astype(bool)
+    signals = signals.dropna(subset=["Date"]).sort_values("Date").drop_duplicates("Date", keep="last")
+    signals["EligibleEntrySignal"] = (
+        signals["DailyRapid"]
+        & signals["VIX_Close"].lt(13.0)
+        & signals["WeeklyRegime"].eq("WHITE")
+    )
+    eligible = signals.loc[signals["EligibleEntrySignal"]].copy()
+
+    price_dates = pd.DatetimeIndex(prices["Date"])
+    executions: dict[int, list[pd.Timestamp]] = {}
+    pending_after_history: list[pd.Timestamp] = []
+    for signal_date in eligible["Date"]:
+        execution_index = int(price_dates.searchsorted(pd.Timestamp(signal_date), side="right"))
+        if execution_index >= len(prices):
+            pending_after_history.append(pd.Timestamp(signal_date))
+        else:
+            executions.setdefault(execution_index, []).append(pd.Timestamp(signal_date))
+
+    signal_lookup = signals.set_index("Date").to_dict("index")
+    capital = float(initial_capital)
+    shares = 0.0
+    entry_date: pd.Timestamp | None = None
+    entry_signal_date: pd.Timestamp | None = None
+    entry_price = np.nan
+    capital_before_entry = np.nan
+    entry_cost = np.nan
+    take_profit = np.nan
+    highest_high = np.nan
+    holding_sessions = 0
+    trade_rows: list[dict[str, Any]] = []
+    daily_rows: list[dict[str, Any]] = []
+    skipped_signals_in_position = 0
+
+    for index, row in prices.iterrows():
+        date = pd.Timestamp(row["Date"])
+        open_price = float(row["Open"])
+        high_price = float(row["High"])
+        low_price = float(row["Low"])
+        close_price = float(row["Close"])
+        was_in_position = shares > 0.0
+        entry_executed = False
+        exit_executed = False
+        exit_reason = ""
+
+        if was_in_position:
+            holding_sessions += 1
+            active_stop = VXX_TRAILING_STOP_MULTIPLE * float(highest_high)
+            exit_price = np.nan
+            if open_price < active_stop:
+                exit_price = open_price
+                exit_reason = "TRAILING STOP — GAP"
+            elif open_price > take_profit:
+                exit_price = open_price
+                exit_reason = "TAKE PROFIT — GAP"
+            else:
+                stop_touched = low_price <= active_stop
+                target_touched = high_price >= take_profit
+                if stop_touched:
+                    # Stop-first is the conservative rule when both levels are
+                    # reachable and intraday event order is unknown.
+                    exit_price = active_stop
+                    exit_reason = "TRAILING STOP"
+                elif target_touched:
+                    exit_price = take_profit
+                    exit_reason = "TAKE PROFIT"
+                elif holding_sessions >= VXX_MAX_HOLDING_SESSIONS:
+                    exit_price = close_price
+                    exit_reason = "TIME EXIT"
+
+            if np.isfinite(exit_price):
+                gross_proceeds = shares * float(exit_price)
+                exit_cost = gross_proceeds * VXX_TRANSACTION_COST
+                capital = gross_proceeds - exit_cost
+                gross_return = float(exit_price) / float(entry_price) - 1.0
+                net_return = capital / float(capital_before_entry) - 1.0
+                trade_rows.append(
+                    {
+                        "Entry Date": entry_date,
+                        "Entry Signal Date": entry_signal_date,
+                        "Entry Price": float(entry_price),
+                        "Exit Date": date,
+                        "Exit Price": float(exit_price),
+                        "Exit Reason": exit_reason,
+                        "Holding Sessions": int(holding_sessions),
+                        "Gross Return (%)": gross_return * 100.0,
+                        "Net Return (%)": net_return * 100.0,
+                        "Entry Cost ($)": float(entry_cost),
+                        "Exit Cost ($)": float(exit_cost),
+                        "Capital Before ($)": float(capital_before_entry),
+                        "Capital After ($)": float(capital),
+                    }
+                )
+                shares = 0.0
+                entry_date = None
+                entry_signal_date = None
+                entry_price = np.nan
+                capital_before_entry = np.nan
+                entry_cost = np.nan
+                take_profit = np.nan
+                highest_high = np.nan
+                holding_sessions = 0
+                exit_executed = True
+            else:
+                highest_high = max(float(highest_high), high_price)
+
+        candidate_signals = executions.get(index, [])
+        if candidate_signals:
+            if was_in_position:
+                skipped_signals_in_position += len(candidate_signals)
+            elif shares <= 0.0:
+                entry_signal_date = candidate_signals[0]
+                capital_before_entry = float(capital)
+                entry_cost = capital_before_entry * VXX_TRANSACTION_COST
+                investable_capital = capital_before_entry - entry_cost
+                entry_price = close_price
+                shares = investable_capital / entry_price
+                capital = 0.0
+                entry_date = date
+                take_profit = entry_price * VXX_TAKE_PROFIT_MULTIPLE
+                # The entry is executed at the close; the day's earlier high is
+                # not part of the post-entry trailing history.
+                highest_high = entry_price
+                holding_sessions = 0
+                entry_executed = True
+
+        signal_row = signal_lookup.get(date, {})
+        nav = shares * close_price if shares > 0.0 else capital
+        daily_rows.append(
+            {
+                "Date": date,
+                "VXX_Open": open_price,
+                "VXX_High": high_price,
+                "VXX_Low": low_price,
+                "VXX_Close": close_price,
+                "NAV": float(nav),
+                "Position": "VXX" if shares > 0.0 else "CASH",
+                "EligibleEntrySignal": bool(signal_row.get("EligibleEntrySignal", False)),
+                "EntryExecuted": entry_executed,
+                "ExitExecuted": exit_executed,
+                "ExitReason": exit_reason,
+            }
+        )
+
+    daily = pd.DataFrame(daily_rows)
+    daily["DrawdownPct"] = (daily["NAV"] / daily["NAV"].cummax() - 1.0) * 100.0
+    trades = pd.DataFrame(trade_rows, columns=empty_trades.columns)
+    daily_returns = pd.to_numeric(daily["NAV"], errors="coerce").pct_change(fill_method=None).fillna(0.0)
+    daily_std = float(daily_returns.std(ddof=1))
+    elapsed_years = max((len(daily) - 1) / 252.0, 0.0)
+    final_nav = float(daily["NAV"].iloc[-1])
+    cagr = (
+        (final_nav / float(initial_capital)) ** (1.0 / elapsed_years) - 1.0
+        if elapsed_years > 0 and final_nav > 0 and initial_capital > 0
+        else np.nan
+    )
+    trade_returns = pd.to_numeric(trades.get("Net Return (%)", pd.Series(dtype="float64")), errors="coerce")
+    metrics = {
+        "Total Trades": float(len(trades)),
+        "Winning Trades": float((trade_returns > 0.0).sum()),
+        "Losing Trades": float((trade_returns <= 0.0).sum()),
+        "Average Trade Return (%)": float(trade_returns.mean()) if not trade_returns.empty else np.nan,
+        "Median Trade Return (%)": float(trade_returns.median()) if not trade_returns.empty else np.nan,
+        "CAGR (%)": float(cagr * 100.0) if np.isfinite(cagr) else np.nan,
+        "Maximum Drawdown (%)": float(daily["DrawdownPct"].min()),
+        "Sharpe Ratio": (
+            float(daily_returns.mean() / daily_std * np.sqrt(252.0))
+            if daily_std > 0.0
+            else np.nan
+        ),
+        "Final Portfolio Capital ($)": final_nav,
+    }
+    current_position = "VXX" if shares > 0.0 else "CASH"
+    diagnostics: dict[str, Any] = {
+        "status": "ok",
+        "source": "Yahoo Finance VXX, auto-adjusted completed daily OHLC",
+        "first_date": daily["Date"].min(),
+        "last_date": daily["Date"].max(),
+        "raw_rapid_signals": int(signals["DailyRapid"].sum()),
+        "eligible_entry_signals": int(signals["EligibleEntrySignal"].sum()),
+        "skipped_signals_in_position": int(skipped_signals_in_position),
+        "current_position": current_position,
+        "pending_signal_date": pending_after_history[-1] if pending_after_history and shares <= 0.0 else None,
+        "entry_date": entry_date,
+        "entry_price": float(entry_price) if np.isfinite(entry_price) else np.nan,
+        "take_profit": float(take_profit) if np.isfinite(take_profit) else np.nan,
+        "active_trailing_stop": (
+            float(VXX_TRAILING_STOP_MULTIPLE * highest_high)
+            if shares > 0.0 and np.isfinite(highest_high)
+            else np.nan
+        ),
+        "holding_sessions": int(holding_sessions),
+    }
+    return VXXStrategyResult(daily, trades, metrics, diagnostics)
+
+
+def _render_vxx_strategy(vix_frame: pd.DataFrame) -> None:
+    st.markdown("### VXX Trading Strategy V1.0")
+    with st.spinner("Loading completed VXX daily bars from Yahoo Finance..."):
+        vxx_ohlc = load_vxx_ohlc()
+    result = backtest_vxx_strategy(vix_frame, vxx_ohlc)
+    if result.diagnostics.get("status") != "ok" or result.daily.empty:
+        st.warning(result.diagnostics.get("message", "VXX strategy history is unavailable."))
+        return
+
+    metrics = result.metrics
+    position = str(result.diagnostics.get("current_position", "CASH"))
+    final_capital = float(metrics.get("Final Portfolio Capital ($)", np.nan))
+    summary = (
+        f"VXX Strategy · {position} · {int(metrics.get('Total Trades', 0))} closed trades · "
+        f"Final capital ${final_capital:,.2f}"
+    )
+    with st.expander(summary, expanded=False):
+        metric_rows = [
+            ("Current Position", position),
+            ("Total Trades", f"{int(metrics.get('Total Trades', 0))}"),
+            ("Wins / Losses", f"{int(metrics.get('Winning Trades', 0))} / {int(metrics.get('Losing Trades', 0))}"),
+            ("Final Capital", f"${final_capital:,.2f}"),
+            ("CAGR", f"{metrics.get('CAGR (%)', np.nan):.2f}%"),
+            ("Maximum Drawdown", f"{metrics.get('Maximum Drawdown (%)', np.nan):.2f}%"),
+            ("Sharpe Ratio", f"{metrics.get('Sharpe Ratio', np.nan):.2f}"),
+            ("Average / Median Trade", f"{metrics.get('Average Trade Return (%)', np.nan):.2f}% / {metrics.get('Median Trade Return (%)', np.nan):.2f}%"),
+        ]
+        columns = st.columns(4)
+        for index, (label, value) in enumerate(metric_rows):
+            with columns[index % len(columns)]:
+                st.metric(label, value)
+
+        if position == "VXX":
+            st.write(
+                {
+                    "Entry Date": pd.Timestamp(result.diagnostics["entry_date"]).strftime("%Y-%m-%d"),
+                    "Entry Price": f"${result.diagnostics['entry_price']:,.4f}",
+                    "Take Profit": f"${result.diagnostics['take_profit']:,.4f}",
+                    "Active Trailing Stop": f"${result.diagnostics['active_trailing_stop']:,.4f}",
+                    "Completed Holding Sessions": result.diagnostics["holding_sessions"],
+                }
+            )
+        elif result.diagnostics.get("pending_signal_date") is not None:
+            st.info(
+                "Eligible signal after the latest completed VXX bar; entry is pending at the next completed VXX close."
+            )
+
+        nav_col, drawdown_col = st.columns(2)
+        with nav_col:
+            nav_fig = go.Figure()
+            nav_fig.add_trace(
+                go.Scatter(
+                    x=result.daily["Date"],
+                    y=result.daily["NAV"],
+                    mode="lines",
+                    name="VXX strategy NAV",
+                    line={"color": "#38bdf8", "width": 1.8},
+                )
+            )
+            _style_model_chart(nav_fig, "VXX Strategy Portfolio NAV", height=340)
+            nav_fig.update_yaxes(title_text="Portfolio value, $")
+            st.plotly_chart(nav_fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+        with drawdown_col:
+            drawdown_fig = go.Figure()
+            drawdown_fig.add_trace(
+                go.Scatter(
+                    x=result.daily["Date"],
+                    y=result.daily["DrawdownPct"],
+                    mode="lines",
+                    name="Drawdown",
+                    line={"color": "#ef4444", "width": 1.6},
+                    fill="tozeroy",
+                    fillcolor="rgba(239, 68, 68, 0.12)",
+                )
+            )
+            _style_model_chart(drawdown_fig, "VXX Strategy Drawdown", height=340)
+            drawdown_fig.update_yaxes(title_text="Drawdown, %")
+            st.plotly_chart(drawdown_fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+
+        st.markdown("#### VXX Trade History")
+        if result.trades.empty:
+            st.info("No completed VXX trades in the available Yahoo Finance history.")
+        else:
+            display_trades = result.trades.sort_values("Entry Date", ascending=False).copy()
+            st.dataframe(display_trades, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Export VXX trade history CSV",
+                display_trades.to_csv(index=False).encode("utf-8"),
+                file_name="vxx_trading_strategy_v1_trade_history.csv",
+                mime="text/csv",
+                key="vxx_strategy_trade_history_download",
+            )
+        st.caption(
+            f"Single full-history backtest: {pd.Timestamp(result.diagnostics['first_date']).date()}–"
+            f"{pd.Timestamp(result.diagnostics['last_date']).date()}. Yahoo Finance auto-adjusted completed VXX OHLC; "
+            "$1,000 initial capital; 5 bp on entry and 5 bp on exit; 0% cash return. "
+            "Signals execute at the next VXX close. Intraday exits use stop-first ordering when TP and stop are both reachable."
+        )
+
+
 def _render_performance(frame: pd.DataFrame) -> None:
     strategies = [
         ("SPX Buy & Hold", np.ones(len(frame), dtype=float)),
@@ -563,6 +945,8 @@ def render_vix_based_model(daily_source: pd.DataFrame) -> None:
         config={"displayModeBar": True, "displaylogo": False, "responsive": True, "scrollZoom": False},
     )
     st.caption("Weekly indicators use only completed exchange weeks; the final available session sets the week close, including shortened holiday weeks. Red shading is structural; green lines are daily upward crossovers. Rapid-approach markers are informational only.")
+
+    _render_vxx_strategy(full)
 
     with st.expander(compact, expanded=False):
         forced_enabled = st.toggle(
