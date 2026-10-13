@@ -3,6 +3,7 @@ import pandas as pd
 
 from vix_based_model import (
     _deduplicated_signal,
+    _deduplicated_signal_by_calendar_days,
     _market_weekly_vix,
     backtest_vxx_strategy,
     build_vix_model_data,
@@ -196,3 +197,16 @@ def test_rapid_signal_cooldown_applies_before_vxx_filters() -> None:
     assert deduplicated.iloc[0]
     assert not deduplicated.iloc[10]
     assert deduplicated.iloc[63]
+
+
+def test_vxx_calendar_cooldown_allows_june_2024_control_signal() -> None:
+    dates = pd.Series(
+        pd.to_datetime(["2023-10-09", "2023-11-22", "2024-03-15", "2024-06-11"])
+    )
+    raw_rapid = pd.Series([True, True, True, True])
+
+    generated = _deduplicated_signal_by_calendar_days(raw_rapid, dates, minimum_days=63)
+
+    assert generated.tolist() == [True, False, True, True]
+    assert dates.loc[generated].iloc[-1] == pd.Timestamp("2024-06-11")
+    assert dates.loc[generated].iloc[-1] + pd.offsets.BDay(1) == pd.Timestamp("2024-06-12")

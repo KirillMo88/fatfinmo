@@ -116,6 +116,27 @@ def _deduplicated_signal(mask: pd.Series, minimum_gap: int) -> pd.Series:
     return result
 
 
+def _deduplicated_signal_by_calendar_days(
+    mask: pd.Series,
+    dates: pd.Series,
+    minimum_days: int,
+) -> pd.Series:
+    """Keep active signals separated by a minimum number of calendar days."""
+    result = pd.Series(False, index=mask.index)
+    normalized_dates = pd.to_datetime(dates, errors="coerce")
+    last_date: pd.Timestamp | None = None
+    for position, (date, active) in enumerate(
+        zip(normalized_dates, mask.fillna(False).to_numpy(dtype=bool))
+    ):
+        if not active or pd.isna(date):
+            continue
+        current_date = pd.Timestamp(date).normalize()
+        if last_date is None or (current_date - last_date).days >= minimum_days:
+            result.iloc[position] = True
+            last_date = current_date
+    return result
+
+
 def _compute_state_machine(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     out = frame.copy().reset_index(drop=True)
     out["WeeklyRegime"] = ""
@@ -559,13 +580,37 @@ def backtest_vxx_strategy(
             {"status": "missing", "message": "Completed VXX OHLC history is unavailable from Yahoo Finance."},
         )
 
-    signals = vix_frame[["Date", "DailyRapid", "VIX_Close", "WeeklyRegime"]].copy()
+    signal_columns = ["Date", "DailyRapid", "VIX_Close", "WeeklyRegime"]
+    if "DailySpread" in vix_frame.columns:
+        signal_columns.append("DailySpread")
+    signals = vix_frame[signal_columns].copy()
     signals["Date"] = pd.to_datetime(signals["Date"], errors="coerce")
     signals["VIX_Close"] = pd.to_numeric(signals["VIX_Close"], errors="coerce")
     signals["DailyRapid"] = signals["DailyRapid"].fillna(False).astype(bool)
     signals = signals.dropna(subset=["Date"]).sort_values("Date").drop_duplicates("Date", keep="last")
+    if "DailySpread" in signals.columns:
+        daily_spread = pd.to_numeric(signals["DailySpread"], errors="coerce")
+        rapid_condition = (
+            daily_spread.between(-10.0, 0.0)
+            & (daily_spread - daily_spread.shift(50)).ge(3.0)
+            & (daily_spread - daily_spread.shift(15)).gt(0.0)
+        )
+        signals["VXXRapid"] = _deduplicated_signal_by_calendar_days(
+            rapid_condition,
+            signals["Date"],
+            63,
+        )
+        vxx_rapid_candidates = int(rapid_condition.sum())
+        vxx_signal_source = "DailySpread conditions with 63-calendar-day cooldown"
+    else:
+        # Backward-compatible path for compact synthetic test fixtures. The
+        # production VIX model always supplies DailySpread.
+        signals["VXXRapid"] = signals["DailyRapid"]
+        vxx_rapid_candidates = int(signals["DailyRapid"].sum())
+        vxx_signal_source = "precomputed DailyRapid fallback"
+
     signals["EligibleEntrySignal"] = (
-        signals["DailyRapid"]
+        signals["VXXRapid"]
         & signals["VIX_Close"].lt(13.0)
         & signals["WeeklyRegime"].eq("WHITE")
     )
@@ -747,7 +792,10 @@ def backtest_vxx_strategy(
         "source": "Yahoo Finance VXX, auto-adjusted completed daily OHLC",
         "first_date": daily["Date"].min(),
         "last_date": daily["Date"].max(),
-        "raw_rapid_signals": int(signals["DailyRapid"].sum()),
+        "raw_rapid_candidates": vxx_rapid_candidates,
+        "raw_rapid_signals": int(signals["VXXRapid"].sum()),
+        "vxx_signal_source": vxx_signal_source,
+        "cooldown_days": 63,
         "eligible_entry_signals": int(len(eligible)),
         "discarded_signals_before_vxx_history": discarded_signals_before_vxx_history,
         "skipped_signals_in_position": int(skipped_signals_in_position),
