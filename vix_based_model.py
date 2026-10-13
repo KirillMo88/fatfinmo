@@ -569,7 +569,14 @@ def backtest_vxx_strategy(
         & signals["VIX_Close"].lt(13.0)
         & signals["WeeklyRegime"].eq("WHITE")
     )
-    eligible = signals.loc[signals["EligibleEntrySignal"]].copy()
+    eligible_all = signals.loc[signals["EligibleEntrySignal"]].copy()
+
+    # A signal is actionable only when VXX itself already has a completed
+    # history.  Otherwise ``searchsorted`` would carry an old VIX signal
+    # forward—potentially for years—to the first available Yahoo VXX bar.
+    first_price_date = pd.Timestamp(prices["Date"].iloc[0])
+    eligible = eligible_all.loc[eligible_all["Date"].ge(first_price_date)].copy()
+    discarded_signals_before_vxx_history = int(len(eligible_all) - len(eligible))
 
     price_dates = pd.DatetimeIndex(prices["Date"])
     executions: dict[int, list[pd.Timestamp]] = {}
@@ -741,7 +748,8 @@ def backtest_vxx_strategy(
         "first_date": daily["Date"].min(),
         "last_date": daily["Date"].max(),
         "raw_rapid_signals": int(signals["DailyRapid"].sum()),
-        "eligible_entry_signals": int(signals["EligibleEntrySignal"].sum()),
+        "eligible_entry_signals": int(len(eligible)),
+        "discarded_signals_before_vxx_history": discarded_signals_before_vxx_history,
         "skipped_signals_in_position": int(skipped_signals_in_position),
         "current_position": current_position,
         "pending_signal_date": pending_after_history[-1] if pending_after_history and shares <= 0.0 else None,
