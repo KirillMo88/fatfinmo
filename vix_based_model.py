@@ -814,6 +814,35 @@ def backtest_vxx_strategy(
     return VXXStrategyResult(daily, trades, metrics, diagnostics)
 
 
+def vxx_strategy_positioning(vix_frame: pd.DataFrame, vxx_ohlc: pd.DataFrame) -> dict[str, Any]:
+    """Return the VXX V1.0 exposure and completed-week regime for Portfolio."""
+    weekly_regime = "N/A"
+    if vix_frame is not None and not vix_frame.empty and "WeeklyRegime" in vix_frame.columns:
+        regimes = vix_frame["WeeklyRegime"].astype(str).str.upper()
+        regimes = regimes[regimes.isin(["RED", "WHITE"])]
+        if not regimes.empty:
+            weekly_regime = str(regimes.iloc[-1])
+
+    result = backtest_vxx_strategy(vix_frame, vxx_ohlc)
+    if result.diagnostics.get("status") != "ok" or result.daily.empty:
+        return {
+            "position_pct": np.nan,
+            "current_position": "DATA_INCOMPLETE",
+            "weekly_regime": weekly_regime,
+            "status": "DATA_INCOMPLETE",
+            "message": str(result.diagnostics.get("message", "VXX strategy history is unavailable.")),
+        }
+
+    current_position = str(result.diagnostics.get("current_position", "CASH")).strip().upper()
+    return {
+        "position_pct": 0.0 if current_position == "CASH" else 100.0,
+        "current_position": current_position,
+        "weekly_regime": weekly_regime,
+        "status": "READY",
+        "signal_date": result.diagnostics.get("last_date"),
+    }
+
+
 def _render_vxx_strategy(vix_frame: pd.DataFrame) -> None:
     st.markdown("### VXX Trading Strategy V1.0")
     with st.spinner("Loading completed VXX daily bars from Yahoo Finance..."):

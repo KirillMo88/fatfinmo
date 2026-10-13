@@ -7,6 +7,7 @@ from vix_based_model import (
     _market_weekly_vix,
     backtest_vxx_strategy,
     build_vix_model_data,
+    vxx_strategy_positioning,
 )
 
 
@@ -167,6 +168,31 @@ def test_vxx_strategy_updates_trailing_high_after_completed_bar() -> None:
     assert trade["Exit Reason"] == "TRAILING STOP"
     assert trade["Exit Price"] == 12.0
     assert trade["Holding Sessions"] == 2
+
+
+def test_vxx_portfolio_positioning_maps_cash_to_zero_and_open_position_to_full_exposure() -> None:
+    dates = pd.bdate_range("2026-01-02", periods=2)
+    prices = _vxx_prices(
+        dates,
+        opens=[10.0, 10.0],
+        highs=[10.5, 10.5],
+        lows=[9.5, 9.5],
+        closes=[10.0, 10.0],
+    )
+    cash_signals = _vix_signals(dates, dates[0])
+    cash_signals["DailyRapid"] = False
+    cash_signals["WeeklyRegime"] = ["RED", "WHITE"]
+    invested_signals = _vix_signals(dates, dates[0])
+
+    cash = vxx_strategy_positioning(cash_signals, prices)
+    invested = vxx_strategy_positioning(invested_signals, prices)
+
+    assert cash["current_position"] == "CASH"
+    assert cash["position_pct"] == 0.0
+    assert cash["weekly_regime"] == "WHITE"
+    assert invested["current_position"] == "VXX"
+    assert invested["position_pct"] == 100.0
+    assert invested["weekly_regime"] == "WHITE"
 
 
 def test_vxx_strategy_exits_at_close_of_40th_full_holding_session() -> None:
