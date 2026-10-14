@@ -8,11 +8,14 @@ import pytest
 
 from world_gdp import WorldGDPService
 from world_gdp_tab import (
+    _build_top10_share_change_figure,
     _focused_additive_history,
     _format_change,
     _format_number,
     _gdp_display_scale,
+    _render_per_capita_chart,
     _top10_display_table,
+    _top10_world_share_change,
 )
 
 
@@ -127,6 +130,22 @@ def test_per_capita_selected_view_contains_only_country_and_world() -> None:
     assert (history.loc[history["iso3"].eq("WLD"), "relative_world_pct"] == 100.0).all()
 
 
+def test_per_capita_hover_shows_only_the_closest_series(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr("world_gdp_tab.st.markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "world_gdp_tab.st.plotly_chart",
+        lambda figure, **kwargs: captured.setdefault("figure", figure),
+    )
+    history = WorldGDPService.build_per_capita_history(
+        _frame([1960, 1970, 2024]), reference_year=2024
+    )
+
+    _render_per_capita_chart(history, display_mode="Absolute", selected_iso3=None)
+
+    assert captured["figure"].layout.hovermode == "closest"
+
+
 def test_table_value_formatting_uses_units_signs_and_na() -> None:
     assert _format_number(30.7697, "${:,.2f}T") == "$30.77T"
     assert _format_number(41.259824, "${:,.2f}T") == "$41.26T"
@@ -151,6 +170,30 @@ def test_top10_display_groups_all_change_columns_on_the_right() -> None:
         "GDP PPP 10Y Change",
         "GDP per capita 10Y Change",
     ]
+
+
+def test_top10_world_share_change_uses_the_current_top10_and_exact_20_year_window() -> None:
+    frame = _frame([2004, 2024])
+    current_country = frame["year"].eq(2024) & frame["iso3"].eq("C00")
+    frame.loc[current_country, "nominal_gdp_usd"] *= 1.5
+    current_countries = frame["year"].eq(2024) & frame["is_country"]
+    frame.loc[frame["year"].eq(2024) & frame["iso3"].eq("WLD"), "nominal_gdp_usd"] = (
+        frame.loc[current_countries, "nominal_gdp_usd"].sum() * 1.1
+    )
+    table = WorldGDPService.build_top10_table(frame, reference_year=2024)
+
+    change = _top10_world_share_change(frame, table, 2024)
+
+    assert len(change) == 10
+    assert set(change["iso3"]) == set(table["iso3"])
+    c00 = change.loc[change["iso3"].eq("C00")].iloc[0]
+    assert c00["current_share_pct"] > c00["base_share_pct"]
+    assert c00["share_change_pp"] == pytest.approx(
+        c00["current_share_pct"] - c00["base_share_pct"]
+    )
+    figure = _build_top10_share_change_figure(change, 2024)
+    assert figure.layout.hovermode == "closest"
+    assert list(figure.data[0].y) == change["country_name"].tolist()
 
 
 def test_latest_common_year_applies_150_economy_coverage() -> None:

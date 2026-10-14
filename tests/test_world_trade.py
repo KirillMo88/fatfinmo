@@ -8,7 +8,13 @@ import pandas as pd
 import pytest
 
 from world_trade import ChinaExportGeographyService, GlobalTradeService, REGION_ORDER, TradeBalanceService
-from world_trade_tab import CHINA_REGION_COLORS, _ranked_region_order, _render_china_stacked_columns
+from world_trade_tab import (
+    CHINA_REGION_COLORS,
+    _build_current_account_balance_data,
+    _ranked_region_order,
+    _render_china_stacked_columns,
+    _top_current_account_balances,
+)
 
 
 class _Response:
@@ -111,6 +117,53 @@ def test_trade_balance_validation_and_period_selection(tmp_path):
     assert "World" not in set(validated["economy"])
     assert validated["trade_balance_usd_bn"].iloc[0] == pytest.approx(0.001)
     json.dumps(metadata)
+
+
+def test_current_account_balances_reuse_macro_trajectory_series_and_completed_years():
+    rows = []
+    for year in (2015, 2025, 2026):
+        for index in range(12):
+            rows.append({
+                "year": year,
+                "iso3": f"C{index:02d}",
+                "country_name": f"Country {index:02d}",
+                "current_account_pct": float(index - 6),
+                "nominal_gdp_usd_bn": float(100 + index * 10),
+                "is_provisional": False,
+            })
+    snapshot = {
+        "history": pd.DataFrame(rows),
+        "metadata": {"weo_vintage": "October 2026"},
+    }
+
+    frame, metadata = _build_current_account_balance_data(snapshot, completed_year=2025)
+
+    assert set(frame["year"]) == {2015, 2025}
+    assert metadata == {
+        "latest_valid_year": 2025,
+        "ten_year_comparison_year": 2015,
+        "weo_vintage": "October 2026",
+    }
+    country = frame.loc[frame["year"].eq(2025) & frame["iso3"].eq("C11")].iloc[0]
+    assert country["current_account_usd_bn"] == pytest.approx(210.0 * 5.0 / 100.0)
+
+
+def test_current_account_ranking_keeps_five_surpluses_and_five_deficits():
+    frame = pd.DataFrame({
+        "year": [2025] * 12,
+        "iso3": [f"C{index:02d}" for index in range(12)],
+        "economy": [f"Country {index:02d}" for index in range(12)],
+        "current_account_pct": [float(index - 6) for index in range(12)],
+        "nominal_gdp_usd_bn": [100.0] * 12,
+        "current_account_usd_bn": [float(index - 6) for index in range(12)],
+    })
+
+    top = _top_current_account_balances(frame, 2025)
+
+    assert len(top) == 10
+    assert (top["current_account_usd_bn"] > 0).sum() == 5
+    assert (top["current_account_usd_bn"] < 0).sum() == 5
+    assert top["current_account_usd_bn"].is_monotonic_increasing
 
 
 def test_trade_balance_api_uses_official_data_endpoint_and_total_merchandise(tmp_path, monkeypatch):
