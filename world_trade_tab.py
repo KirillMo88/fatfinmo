@@ -13,7 +13,7 @@ from world_trade import REGION_ORDER, TradeBalanceService, load_world_trade_modu
 
 CHINA_REGION_COLORS = dict(zip(
     REGION_ORDER,
-    ["#38bdf8", "#818cf8", "#f97316", "#f59e0b", "#a78bfa", "#ec4899", "#22c55e", "#94a3b8", "#14b8a6"],
+    ["#5f8fae", "#7c86aa", "#b77a62", "#b9955a", "#8c7fa8", "#a8738e", "#70927d", "#8b96a6", "#5f9691"],
 ))
 
 
@@ -121,7 +121,8 @@ def _render_global_trade(result: dict[str, Any]) -> None:
 
 
 def _render_trade_balances(result: dict[str, Any]) -> None:
-    st.subheader("Top 5 Net Exporters and Net Importers")
+    st.subheader("Top 5 Net Exporting and Net Importing Countries")
+    st.caption("Individual WTO reporting economies only; economic groups and regional aggregates are excluded.")
     metadata = result.get("metadata", {})
     frame = result.get("data", pd.DataFrame()).copy()
     comparison = st.segmented_control(
@@ -163,7 +164,8 @@ def _render_trade_balances(result: dict[str, Any]) -> None:
         f"Source: {metadata.get('source', 'WTO')} · Validated year: {year} · "
         f"Economies: {validation.get('economies', 'n/a')} · "
         f"Export coverage: {_fmt_pct(validation.get('export_coverage_pct'))} · "
-        f"Import coverage: {_fmt_pct(validation.get('import_coverage_pct'))}."
+        f"Import coverage: {_fmt_pct(validation.get('import_coverage_pct'))} · "
+        f"Classification: {metadata.get('economy_classification', 'individual economies only')}."
     )
     if result.get("warning"):
         st.warning(result["warning"])
@@ -190,41 +192,12 @@ def _render_china_exports(result: dict[str, Any]) -> None:
     with period_col:
         period = st.segmented_control("Period", period_options, default="Previous Year", key="china_export_period")
     selected_year = int(latest) if period == "Previous Year" and latest else int(period) if period != "Previous Year" else None
-    if selected_year is None:
-        st.info("Previous Year is unavailable until a completed GACC year passes validation. Historical comparisons remain available below.")
-    else:
-        selected = frame.loc[pd.to_numeric(frame["year"], errors="coerce").eq(selected_year)].copy()
-        if selected.empty:
-            st.info(f"No validated China export geography is available for {selected_year}.")
-        else:
-            selected["region"] = pd.Categorical(selected["region"], categories=REGION_ORDER, ordered=True)
-            selected = selected.sort_values("region")
-            value_col = "exports_usd_bn" if metric == "USD bn" else "share_pct"
-            suffix = "" if metric == "USD bn" else "%"
-            prefix = "$" if metric == "USD bn" else ""
-            custom = selected[["exports_usd_bn", "share_pct", "source"]].to_numpy()
-            fig = go.Figure(go.Bar(
-                y=selected["region"], x=selected[value_col], orientation="h",
-                marker_color=[CHINA_REGION_COLORS[str(region)] for region in selected["region"]],
-                text=selected[value_col], texttemplate=("$%{text:,.1f}" if metric == "USD bn" else "%{text:.1f}%"),
-                textposition="outside", cliponaxis=False,
-                customdata=custom,
-                hovertemplate=("<b>%{y}</b>"
-                               f"<br>Year: {selected_year}"
-                               "<br>Exports: $%{customdata[0]:,.1f}bn"
-                               "<br>Share: %{customdata[1]:.2f}%"
-                               "<br>Source: %{customdata[2]}"
-                               f"<br>Status: {status_labels.get(result.get('status'), result.get('status', 'unknown'))}<extra></extra>"),
-            ))
-            fig.update_layout(
-                title={"text": f"China exports by region | {selected_year}", "x": 0.5}, height=470,
-                margin={"l": 120, "r": 55, "t": 52, "b": 48}, showlegend=False,
-                xaxis={"title": metric, "ticksuffix": suffix, "tickprefix": prefix, "gridcolor": "#293241"},
-                yaxis={"title": None, "categoryorder": "array", "categoryarray": REGION_ORDER, "autorange": "reversed"},
-            )
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+    current_col, history_col = st.columns(2, gap="medium")
+    with current_col:
+        _render_china_current_period(frame, selected_year, metric, result, status_labels)
+    with history_col:
+        _render_china_stacked_columns(frame, latest, selected_year, metric)
 
-    _render_china_stacked_columns(frame, latest, selected_year, metric)
     _render_china_comparison_table(frame, latest, selected_year, metric)
     if result.get("warning"):
         st.warning(result["warning"])
@@ -238,6 +211,49 @@ def _render_china_exports(result: dict[str, Any]) -> None:
         )
 
 
+def _render_china_current_period(
+    frame: pd.DataFrame,
+    selected_year: int | None,
+    metric: str,
+    result: dict[str, Any],
+    status_labels: dict[str, str],
+) -> None:
+    if selected_year is None:
+        st.info("Previous Year is unavailable until a completed GACC year passes validation. Historical comparisons remain available below.")
+        return
+    selected = frame.loc[pd.to_numeric(frame["year"], errors="coerce").eq(selected_year)].copy()
+    if selected.empty:
+        st.info(f"No validated China export geography is available for {selected_year}.")
+        return
+    value_col = "exports_usd_bn" if metric == "USD bn" else "share_pct"
+    selected[value_col] = pd.to_numeric(selected[value_col], errors="coerce")
+    selected = selected.sort_values(value_col, ascending=False, na_position="last", kind="stable")
+    ordered_regions = selected["region"].astype(str).tolist()
+    suffix = "" if metric == "USD bn" else "%"
+    prefix = "$" if metric == "USD bn" else ""
+    custom = selected[["exports_usd_bn", "share_pct", "source"]].to_numpy()
+    fig = go.Figure(go.Bar(
+        y=selected["region"], x=selected[value_col], orientation="h",
+        marker_color=[CHINA_REGION_COLORS[str(region)] for region in selected["region"]],
+        text=selected[value_col], texttemplate=("$%{text:,.1f}" if metric == "USD bn" else "%{text:.1f}%"),
+        textposition="outside", cliponaxis=False,
+        customdata=custom,
+        hovertemplate=("<b>%{y}</b>"
+                       f"<br>Year: {selected_year}"
+                       "<br>Exports: $%{customdata[0]:,.1f}bn"
+                       "<br>Share: %{customdata[1]:.2f}%"
+                       "<br>Source: %{customdata[2]}"
+                       f"<br>Status: {status_labels.get(result.get('status'), result.get('status', 'unknown'))}<extra></extra>"),
+    ))
+    fig.update_layout(
+        title={"text": f"China exports by region | {selected_year}", "x": 0.5}, height=500,
+        margin={"l": 105, "r": 42, "t": 58, "b": 68}, showlegend=False,
+        xaxis={"title": metric, "ticksuffix": suffix, "tickprefix": prefix, "gridcolor": "#293241"},
+        yaxis={"title": None, "categoryorder": "array", "categoryarray": ordered_regions, "autorange": "reversed"},
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+
+
 def _render_china_stacked_columns(
     frame: pd.DataFrame, latest: int | None, selected_year: int | None, metric: str,
 ) -> None:
@@ -247,8 +263,9 @@ def _render_china_stacked_columns(
     visible = frame.loc[pd.to_numeric(frame["year"], errors="coerce").isin(years)].copy()
     value_column = "exports_usd_bn" if metric == "USD bn" else "share_pct"
     values = visible.pivot_table(index="region", columns="year", values=value_column, aggfunc="first").reindex(REGION_ORDER)
+    ordered_regions = _ranked_region_order(visible, selected_year or max(years), value_column)
     fig = go.Figure()
-    for region in REGION_ORDER:
+    for region in ordered_regions:
         region_values = [values.at[region, year] if year in values.columns else np.nan for year in years]
         fig.add_trace(go.Bar(
             x=[str(year) for year in years], y=region_values, name=region,
@@ -268,7 +285,7 @@ def _render_china_stacked_columns(
         yaxis["range"] = [0, 105]
     fig.update_layout(
         title={"text": "China Export Geography | Historical Comparison", "x": 0.5},
-        barmode="stack", height=540, margin={"l": 58, "r": 25, "t": 58, "b": 90},
+        barmode="stack", height=500, margin={"l": 58, "r": 25, "t": 58, "b": 110},
         xaxis={"title": None, "type": "category"}, yaxis=yaxis,
         legend={"orientation": "h", "yanchor": "top", "y": -0.12, "xanchor": "center", "x": 0.5},
         hovermode="x unified",
@@ -285,7 +302,9 @@ def _render_china_comparison_table(frame: pd.DataFrame, latest: int | None, sele
     visible = frame.loc[pd.to_numeric(frame["year"], errors="coerce").isin(years)].copy()
     value_column = "exports_usd_bn" if metric == "USD bn" else "share_pct"
     values = visible.pivot_table(index="region", columns="year", values=value_column, aggfunc="first").reindex(REGION_ORDER)
-    table = pd.DataFrame({"Region": REGION_ORDER})
+    ordered_regions = _ranked_region_order(visible, selected_year or (max(years) if years else None), value_column)
+    values = values.reindex(ordered_regions)
+    table = pd.DataFrame({"Region": ordered_regions})
     for year in years:
         table[str(year)] = values[year].to_numpy() if year in values else np.nan
     total = {"Region": "Total"}
@@ -301,6 +320,23 @@ def _render_china_comparison_table(frame: pd.DataFrame, latest: int | None, sele
     formats = {column: ("{:,.1f}" if metric == "USD bn" else "{:.1f}%") for column in table.columns if column != "Region"}
     styled = table.style.format(formats, na_rep="—").apply(highlight, axis=0)
     st.dataframe(styled, use_container_width=True, hide_index=True, height=390)
+
+
+def _ranked_region_order(frame: pd.DataFrame, year: int | None, value_column: str) -> list[str]:
+    """Rank regions by the selected period while retaining absent regions at the end."""
+    if frame.empty or year is None or value_column not in frame:
+        return list(REGION_ORDER)
+    annual = frame.loc[pd.to_numeric(frame["year"], errors="coerce").eq(int(year))].copy()
+    annual[value_column] = pd.to_numeric(annual[value_column], errors="coerce")
+    scores = annual.drop_duplicates("region", keep="last").set_index("region")[value_column]
+    return sorted(
+        REGION_ORDER,
+        key=lambda region: (
+            pd.isna(scores.get(region, np.nan)),
+            -float(scores.get(region)) if pd.notna(scores.get(region, np.nan)) else 0.0,
+            REGION_ORDER.index(region),
+        ),
+    )
 
 
 def _fmt_pct(value: object) -> str:

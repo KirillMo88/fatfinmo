@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from world_economy_tab import (
     _add_trajectory_average_separator,
+    _build_sovereign_cds_figures,
     _country_trajectory_table,
     _top_gdp_cds_countries,
     _trajectory_chart_data,
@@ -67,6 +69,25 @@ def test_top_gdp_cds_excludes_russia_and_replaces_it_with_next_country() -> None
     assert "RUS" not in selected["iso3"].tolist()
     assert "CAN" in selected["iso3"].tolist()
     assert selected.iloc[0]["gdp_rank"] == 11
+
+
+def test_sovereign_cds_figures_share_country_order_and_show_six_month_variation() -> None:
+    countries = pd.DataFrame({
+        "country_name": ["Canada", "China", "United States"],
+        "cds_5y_bps": [39.6, 36.41, 37.36],
+        "cds_var_6m_pct": [0.0, -14.55, 0.05],
+        "cds_pd_pct": [0.66, 0.61, 0.62],
+    })
+
+    level, variation = _build_sovereign_cds_figures(countries)
+
+    expected_order = ["Canada", "China", "United States"]
+    assert list(level.layout.yaxis.categoryarray) == expected_order
+    assert list(variation.layout.yaxis.categoryarray) == expected_order
+    assert list(variation.data[0].x) == [0.0, -14.55, 0.05]
+    assert list(variation.data[0].marker.color) == ["#8b96a6", "#70927d", "#b77a62"]
+    assert variation.layout.yaxis.showticklabels is False
+    assert variation.layout.xaxis.range[0] == pytest.approx(-variation.layout.xaxis.range[1])
 
 
 def test_country_trajectory_table_places_government_debt_rows_after_total_debt() -> None:

@@ -227,6 +227,15 @@ class TradeBalanceService:
         "world", "total", "all economies", "european union", "eu", "asean",
         "africa", "asia", "europe", "middle east", "north america", "south america",
     }
+    AGGREGATE_NAME_PATTERN = re.compile(
+        r"(?:\bmembers?\b|\bgroup of\b|\bg[- ]?\d+\b|\bbrics?\b|\bopec\b|"
+        r"\borganization of\b|\bcooperation council\b|\bassociation for\b|"
+        r"\bagreement\b|\bcustoms union\b|\bcommon market\b|\beconomic community\b|"
+        r"\bdeveloped economies\b|\bdeveloping economies\b|\bleast[- ]developed\b|"
+        r"\bgeographical region\b)",
+        flags=re.IGNORECASE,
+    )
+    DATASET_VERSION = 2
 
     def __init__(self, storage_dir: Path | None = None, client: httpx.Client | None = None) -> None:
         self.storage_dir = Path(storage_dir or WORLD_ECONOMY_STORAGE_DIR) / "trade_balances"
@@ -234,11 +243,15 @@ class TradeBalanceService:
         self.processed = self.storage_dir / "processed"
         self.data_path = self.processed / "trade_balances.csv"
         self.metadata_path = self.processed / "metadata.json"
+        self.reporters_path = self.processed / "individual_reporters.json"
         self.client = client
+        self._individual_reporters: dict[str, dict[str, str]] | None = None
 
     def load(self, force_refresh: bool = False) -> dict[str, Any]:
         if not force_refresh and _is_fresh(self.data_path) and self.metadata_path.exists():
-            return self._result("cached")
+            metadata = _read_json(self.metadata_path)
+            if int(metadata.get("dataset_version", 0)) >= self.DATASET_VERSION:
+                return self._result("cached")
         errors: list[str] = []
         candidates: list[tuple[pd.DataFrame, str, dict[str, Any]]] = []
         if os.environ.get("WTO_API_KEY"):
@@ -292,6 +305,9 @@ class TradeBalanceService:
         frames = []
         last_completed_year = _utc_now().year - 1
         try:
+            headers = {"Ocp-Apim-Subscription-Key": key}
+            individual_reporters = self._download_individual_reporters(client, headers)
+            individual_codes = set(individual_reporters)
             for code, field in ((self.EXPORT_CODE, "exports_usd_mn"), (self.IMPORT_CODE, "imports_usd_mn")):
                 response = client.get(
                     f"{WTO_API_BASE_URL.rstrip('/')}/data",
@@ -309,7 +325,7 @@ class TradeBalanceService:
                         "off": 0,
                         "max": self.API_MAX_RECORDS,
                     },
-                    headers={"Ocp-Apim-Subscription-Key": key},
+                    headers=headers,
                 )
                 response.raise_for_status()
                 try:
@@ -341,11 +357,76 @@ class TradeBalanceService:
                     "economy_code": part[code_col].astype(str).str.strip() if code_col is not None else "",
                     field: pd.to_numeric(part[value_col], errors="coerce"),
                 })
+                normal["economy_code"] = normal["economy_code"].map(self._normalise_economy_code)
+                normal = normal.loc[normal["economy_code"].isin(individual_codes | {"0"})].copy()
                 frames.append(normal)
         finally:
             if own_client:
                 client.close()
-        return frames[0].merge(frames[1], on=["year", "economy", "economy_code"], how="outer")
+        merged = frames[0].merge(frames[1], on=["year", "economy", "economy_code"], how="outer")
+        merged["is_individual_economy"] = merged["economy_code"].isin(individual_codes)
+        return merged
+
+    def _download_individual_reporters(
+        self, client: httpx.Client, headers: dict[str, str]
+    ) -> dict[str, dict[str, str]]:
+        response = client.get(
+            f"{WTO_API_BASE_URL.rstrip('/')}/reporters",
+            params={"ig": "individual", "lang": 1},
+            headers=headers,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except UnicodeDecodeError:
+            payload = json.loads(response.content.decode("cp1252"))
+        records = payload if isinstance(payload, list) else payload.get("data", []) if isinstance(payload, dict) else []
+        reporters: dict[str, dict[str, str]] = {}
+        for item in records:
+            code = self._normalise_economy_code(item.get("code"))
+            if not code:
+                continue
+            reporters[code] = {
+                "iso3": str(item.get("iso3A") or "").strip().upper(),
+                "name": str(item.get("name") or "").strip(),
+            }
+        if len(reporters) < 150:
+            raise ValueError(f"WTO individual-reporter reference contains only {len(reporters)} economies")
+        self._individual_reporters = reporters
+        _write_json(self.reporters_path, {
+            "retrieved_at_utc": _utc_now().isoformat(),
+            "source": f"{WTO_API_BASE_URL.rstrip('/')}/reporters?ig=individual",
+            "reporters": reporters,
+        })
+        return reporters
+
+    @staticmethod
+    def _normalise_economy_code(value: object) -> str:
+        text = str(value or "").strip().upper()
+        if re.fullmatch(r"\d+(?:\.0+)?", text):
+            return str(int(float(text)))
+        return text
+
+    def _load_individual_reporter_codes(self) -> set[str]:
+        if self._individual_reporters is not None:
+            return set(self._individual_reporters)
+        if not self.reporters_path.exists():
+            return set()
+        payload = _read_json(self.reporters_path)
+        reporters = payload.get("reporters", {})
+        if not isinstance(reporters, dict):
+            return set()
+        self._individual_reporters = {
+            self._normalise_economy_code(code): value for code, value in reporters.items()
+        }
+        return set(self._individual_reporters)
+
+    @classmethod
+    def _aggregate_name_mask(cls, names: pd.Series) -> pd.Series:
+        normalized = names.astype(str).str.strip().str.lower()
+        return normalized.isin(cls.AGGREGATE_NAMES) | normalized.str.contains(
+            cls.AGGREGATE_NAME_PATTERN, na=False
+        )
 
     def _normalise_official_table(self, frame: pd.DataFrame) -> pd.DataFrame:
         year_col = _find_column(frame.columns, ["year", "period", "period_year"])
@@ -387,13 +468,26 @@ class TradeBalanceService:
         clean["economy"] = clean["economy"].astype(str).str.strip()
         if "economy_code" not in clean:
             clean["economy_code"] = ""
-        clean["economy_code"] = clean["economy_code"].astype(str).str.strip()
+        clean["economy_code"] = clean["economy_code"].map(self._normalise_economy_code)
         clean = clean.dropna(subset=["year", "exports_usd_mn", "imports_usd_mn"])
         clean = clean.loc[clean["year"].le(_utc_now().year - 1)]
         lower_name = clean["economy"].str.lower()
         world = clean.loc[lower_name.isin({"world", "total", "all economies"}) | clean["economy_code"].isin({"000", "0"})].copy()
         economies = clean.loc[~clean.index.isin(world.index)].copy()
-        economies = economies.loc[~economies["economy"].str.lower().isin(self.AGGREGATE_NAMES)]
+        classification_source = "aggregate-label fallback"
+        if "is_individual_economy" in economies:
+            marker = economies["is_individual_economy"]
+            if marker.dtype != bool:
+                marker = marker.astype(str).str.lower().isin({"true", "1", "yes"})
+            economies = economies.loc[marker].copy()
+            classification_source = "WTO /reporters?ig=individual"
+        else:
+            individual_codes = self._load_individual_reporter_codes()
+            coded = economies["economy_code"].ne("")
+            if individual_codes and coded.any():
+                economies = economies.loc[~coded | economies["economy_code"].isin(individual_codes)].copy()
+                classification_source = "cached WTO /reporters?ig=individual"
+            economies = economies.loc[~self._aggregate_name_mask(economies["economy"])].copy()
         key = np.where(economies["economy_code"].ne(""), economies["economy_code"], economies["economy"].str.lower())
         economies["_key"] = key
         if economies.duplicated(["year", "_key"]).any():
@@ -440,13 +534,20 @@ class TradeBalanceService:
             "definition": "Merchandise exports minus merchandise imports, USD billions",
             "unit": "USD million (source); USD billion (derived balance)", "currency": "USD",
             "observation_period": f"{int(output['year'].min())}-{int(output['year'].max())}",
-            "validation_status": "valid", "dataset_version": 1,
+            "economy_classification": classification_source,
+            "validation_status": "valid", "dataset_version": self.DATASET_VERSION,
         }
         return output.reset_index(drop=True), metadata
 
     @staticmethod
     def top_balances(frame: pd.DataFrame, year: int) -> pd.DataFrame:
         selected = frame.loc[pd.to_numeric(frame["year"], errors="coerce").eq(year)].copy()
+        selected = selected.loc[~TradeBalanceService._aggregate_name_mask(selected["economy"])].copy()
+        if "is_individual_economy" in selected:
+            marker = selected["is_individual_economy"]
+            if marker.dtype != bool:
+                marker = marker.astype(str).str.lower().isin({"true", "1", "yes"})
+            selected = selected.loc[marker].copy()
         selected["trade_balance_usd_bn"] = pd.to_numeric(selected["trade_balance_usd_bn"], errors="coerce")
         positive = selected.loc[selected["trade_balance_usd_bn"].gt(0)].nlargest(5, "trade_balance_usd_bn")
         negative = selected.loc[selected["trade_balance_usd_bn"].lt(0)].nsmallest(5, "trade_balance_usd_bn")
