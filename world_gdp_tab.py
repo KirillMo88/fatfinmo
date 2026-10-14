@@ -71,20 +71,11 @@ def render_world_gdp_module(snapshot: dict[str, Any]) -> None:
 def _render_top10_table(table: pd.DataFrame, reference_year: int) -> None:
     st.subheader("Top 10 Economies by Nominal GDP")
     st.caption(f"{reference_year} values; cumulative 10-year changes compare {reference_year} with {reference_year - 10}.")
-    display = table.drop(columns="iso3").rename(columns={
-        "rank": "Rank",
-        "country_name": "Country",
-        "nominal_gdp_usd_trn": "Nominal GDP, $T",
-        "nominal_gdp_usd_change_10y_pct": "Nominal GDP 10Y Change",
-        "gdp_ppp_intl_usd_trn": "GDP PPP, Intl$T",
-        "gdp_ppp_intl_usd_change_10y_pct": "GDP PPP 10Y Change",
-        "gdp_per_capita_usd": "GDP per capita, $",
-        "gdp_per_capita_usd_change_10y_pct": "GDP per capita 10Y Change",
-    })
+    display = _top10_display_table(table)
     change_columns = [column for column in display if "Change" in column]
     styler = display.style.format({
         "Nominal GDP, $T": lambda value: _format_number(value, "${:,.2f}T"),
-        "GDP PPP, Intl$T": lambda value: _format_number(value, "Intl${:,.2f}T"),
+        "GDP PPP, Intl$T": lambda value: _format_number(value, "${:,.2f}T"),
         "GDP per capita, $": lambda value: _format_number(value, "${:,.0f}"),
         **{column: _format_change for column in change_columns},
     }, na_rep="N/A")
@@ -107,6 +98,29 @@ def _render_top10_table(table: pd.DataFrame, reference_year: int) -> None:
         if selected_iso3 is not None and st.session_state.get("world_gdp_country_focus") != selected_iso3:
             st.session_state["world_gdp_country_focus"] = selected_iso3
             st.rerun()
+
+
+def _top10_display_table(table: pd.DataFrame) -> pd.DataFrame:
+    display = table.drop(columns="iso3").rename(columns={
+        "rank": "Rank",
+        "country_name": "Country",
+        "nominal_gdp_usd_trn": "Nominal GDP, $T",
+        "nominal_gdp_usd_change_10y_pct": "Nominal GDP 10Y Change",
+        "gdp_ppp_intl_usd_trn": "GDP PPP, Intl$T",
+        "gdp_ppp_intl_usd_change_10y_pct": "GDP PPP 10Y Change",
+        "gdp_per_capita_usd": "GDP per capita, $",
+        "gdp_per_capita_usd_change_10y_pct": "GDP per capita 10Y Change",
+    })
+    return display[[
+        "Rank",
+        "Country",
+        "Nominal GDP, $T",
+        "GDP PPP, Intl$T",
+        "GDP per capita, $",
+        "Nominal GDP 10Y Change",
+        "GDP PPP 10Y Change",
+        "GDP per capita 10Y Change",
+    ]]
 
 
 def _selected_rows(event: Any) -> list[int]:
@@ -157,7 +171,10 @@ def _render_world_gdp_history(frame: pd.DataFrame, reference_year: int) -> None:
     metric_label = metric_label or "Nominal GDP"
     display_mode = display_mode or "Share"
     if metric_label in {"Nominal GDP", "GDP PPP"}:
-        st.caption("Top 10 economies recomputed independently for each year; all others grouped in Other.")
+        if selected_iso3:
+            st.caption("The chart shows only the selected country's history and its share of the corresponding world GDP measure.")
+        else:
+            st.caption("Top 10 economies recomputed independently for each year; all others grouped in Other.")
         metric = "nominal" if metric_label == "Nominal GDP" else "ppp"
         history = WorldGDPService.build_additive_history(
             frame, metric=metric, reference_year=reference_year, selected_iso3=selected_iso3
@@ -195,13 +212,29 @@ def _render_additive_chart(
     share_mode = display_mode == "Share"
     title_metric = "NOMINAL GDP" if metric == "nominal" else "GDP PPP"
     value_label = "Current US dollars" if metric == "nominal" else "Current international dollars"
-    title = f"WORLD {title_metric} | Changing share of the 10 largest economies"
+    if selected_iso3:
+        history = _focused_additive_history(history, selected_iso3)
+        if history.empty:
+            st.info(f"No {title_metric} history is available for the selected country.")
+            return
+        focus_name = str(history["country_name"].iloc[-1])
+        title = f"{focus_name.upper()} | {title_metric} Historical Dynamics"
+    else:
+        focus_name = None
+        title = f"WORLD {title_metric} | Changing share of the 10 largest economies"
     years = sorted(history["year"].unique())
     latest_year = int(max(years))
     latest = history.loc[history["year"].eq(latest_year)]
-    _additive_latest_summary(latest, metric=metric, latest_year=latest_year)
+    if selected_iso3:
+        _country_additive_latest_summary(latest, metric=metric, latest_year=latest_year)
+    else:
+        _additive_latest_summary(latest, metric=metric, latest_year=latest_year)
 
-    codes = [code for code in history["iso3"].drop_duplicates() if code != "OTHER"] + ["OTHER"]
+    codes = (
+        history["iso3"].drop_duplicates().tolist()
+        if selected_iso3
+        else [code for code in history["iso3"].drop_duplicates() if code != "OTHER"] + ["OTHER"]
+    )
     fig = go.Figure()
     for code in codes:
         subset = history.loc[history["iso3"].eq(code)].sort_values("year")
@@ -213,39 +246,75 @@ def _render_additive_chart(
         notes = subset["selected_outside_top10"].map(
             lambda value: "Selected separately; outside annual top 10" if value else "Annual top 10" if code != "OTHER" else "Residual to WLD total"
         )
-        custom = np.column_stack((subset["value"] / 1e12, subset["share_pct"], ranks, notes))
+        value_scale, value_unit = _gdp_display_scale(subset["value"]) if selected_iso3 else (1e12, "T")
+        custom = np.column_stack((subset["value"] / value_scale, subset["share_pct"], ranks, notes))
         opacity = _trace_opacity(code, selected_iso3)
-        fig.add_trace(go.Bar(
-            x=subset["year"],
-            y=y,
-            name=name,
-            marker={"color": _country_color(code), "line": {"color": "rgba(255,255,255,0.55)", "width": 0.45}},
-            opacity=opacity,
-            customdata=custom,
-            hovertemplate=(
-                f"<b>{name}</b><br>Year: %{{x}}<br>{title_metric}: %{{customdata[0]:.3f}}T"
-                "<br>World share: %{customdata[1]:.2f}%<br>Annual rank: %{customdata[2]}"
-                "<br>%{customdata[3]}<br>Source: World Bank WDI<extra></extra>"
-            ),
-        ))
-    subtitle = f"{min(years)}–{latest_year} · {value_label} · Top 10 recomputed independently each year"
+        hovertemplate = (
+            f"<b>{name}</b><br>Year: %{{x}}<br>{title_metric}: $%{{customdata[0]:,.2f}}{value_unit}"
+            "<br>World share: %{customdata[1]:.2f}%<br>Annual rank: %{customdata[2]}"
+            "<br>%{customdata[3]}<br>Source: World Bank WDI<extra></extra>"
+        )
+        if selected_iso3:
+            y = subset["share_pct"] if share_mode else subset["value"] / value_scale
+            fig.add_trace(go.Scatter(
+                x=subset["year"], y=y, name=name, mode="lines+markers",
+                line={"color": _country_color(code), "width": 2.8},
+                marker={"color": _country_color(code), "size": 6},
+                customdata=custom, hovertemplate=hovertemplate,
+            ))
+        else:
+            fig.add_trace(go.Bar(
+                x=subset["year"], y=y, name=name,
+                marker={"color": _country_color(code), "line": {"color": "rgba(255,255,255,0.55)", "width": 0.45}},
+                opacity=opacity, customdata=custom, hovertemplate=hovertemplate,
+            ))
+    if selected_iso3:
+        subtitle = f"{min(years)}–{latest_year} · {value_label} · Selected country only"
+    else:
+        subtitle = f"{min(years)}–{latest_year} · {value_label} · Top 10 recomputed independently each year"
+    absolute_axis_title = (
+        f"{title_metric.title()} ({'billions' if value_unit == 'B' else 'trillions'})"
+        if selected_iso3 else f"{title_metric.title()} (trillions)"
+    )
     fig.update_layout(
         title={"text": f"<b>{title}</b><br><sup>{subtitle}</sup>", "x": 0.01, "xanchor": "left"},
-        barmode="stack",
-        height=720,
+        barmode="stack" if not selected_iso3 else "relative",
+        height=620 if selected_iso3 else 720,
         margin={"l": 65, "r": 20, "t": 85, "b": 145},
         bargap=0.05,
         legend={"orientation": "h", "yanchor": "top", "y": -0.17, "x": 0.5, "xanchor": "center"},
+        showlegend=not bool(selected_iso3),
         xaxis={"title": "Year", "dtick": 5, "tick0": min(years), "showgrid": False},
         yaxis={
-            "title": f"Share of World {title_metric.title()} (%)" if share_mode else f"{title_metric.title()} (trillions)",
-            "range": [0, 100] if share_mode else None,
+            "title": f"Share of World {title_metric.title()} (%)" if share_mode else absolute_axis_title,
+            "range": [0, 100] if share_mode and not selected_iso3 else None,
             "ticksuffix": "%" if share_mode else "",
             "gridcolor": "rgba(148,163,184,0.20)",
         },
-        hovermode="x unified" if selected_iso3 is None else "closest",
+        hovermode="closest",
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+
+
+def _focused_additive_history(history: pd.DataFrame, selected_iso3: str) -> pd.DataFrame:
+    return history.loc[history["iso3"].eq(selected_iso3.upper())].sort_values("year").reset_index(drop=True)
+
+
+def _gdp_display_scale(values: pd.Series) -> tuple[float, str]:
+    maximum = pd.to_numeric(values, errors="coerce").max()
+    return (1e12, "T") if pd.notna(maximum) and float(maximum) >= 1e12 else (1e9, "B")
+
+
+def _country_additive_latest_summary(latest: pd.DataFrame, *, metric: str, latest_year: int) -> None:
+    if latest.empty:
+        return
+    row = latest.iloc[-1]
+    scale, unit = _gdp_display_scale(latest["value"])
+    metric_label = "Nominal GDP" if metric == "nominal" else "GDP PPP"
+    st.markdown(
+        f"**{latest_year}: {row['country_name']}  |  {metric_label}: ${float(row['value']) / scale:,.2f}{unit}  |  "
+        f"World share: {float(row['share_pct']):.2f}%**"
+    )
 
 
 def _additive_latest_summary(latest: pd.DataFrame, *, metric: str, latest_year: int) -> None:

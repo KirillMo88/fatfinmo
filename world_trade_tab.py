@@ -11,10 +11,17 @@ import streamlit as st
 from world_trade import REGION_ORDER, TradeBalanceService, load_world_trade_module
 
 
-CHINA_REGION_COLORS = dict(zip(
-    REGION_ORDER,
-    ["#5f8fae", "#7c86aa", "#b77a62", "#b9955a", "#8c7fa8", "#a8738e", "#70927d", "#8b96a6", "#5f9691"],
-))
+CHINA_REGION_COLORS = {
+    "ASEAN Plus": "#38BDF8",
+    "EU": "#818CF8",
+    "US": "#FB923C",
+    "Americas ex US": "#FACC15",
+    "CIS": "#C084FC",
+    "Middle East": "#F472B6",
+    "Africa": "#4ADE80",
+    "Other": "#94A3B8",
+    "Hong Kong": "#2DD4BF",
+}
 
 
 @st.cache_data(show_spinner="Loading World Trade data…", ttl=180 * 24 * 60 * 60)
@@ -234,7 +241,10 @@ def _render_china_current_period(
     custom = selected[["exports_usd_bn", "share_pct", "source"]].to_numpy()
     fig = go.Figure(go.Bar(
         y=selected["region"], x=selected[value_col], orientation="h",
-        marker_color=[CHINA_REGION_COLORS[str(region)] for region in selected["region"]],
+        marker={
+            "color": [CHINA_REGION_COLORS[str(region)] for region in selected["region"]],
+            "line": {"color": "#0B1018", "width": 0.8},
+        },
         text=selected[value_col], texttemplate=("$%{text:,.1f}" if metric == "USD bn" else "%{text:.1f}%"),
         textposition="outside", cliponaxis=False,
         customdata=custom,
@@ -269,7 +279,10 @@ def _render_china_stacked_columns(
         region_values = [values.at[region, year] if year in values.columns else np.nan for year in years]
         fig.add_trace(go.Bar(
             x=[str(year) for year in years], y=region_values, name=region,
-            marker_color=CHINA_REGION_COLORS[region],
+            marker={
+                "color": CHINA_REGION_COLORS[region],
+                "line": {"color": "#0B1018", "width": 0.8},
+            },
             hovertemplate=(
                 f"<b>{region}</b><br>Year: %{{x}}<br>Exports: $%{{y:,.1f}}bn<extra></extra>"
                 if metric == "USD bn"

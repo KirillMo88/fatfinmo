@@ -243,7 +243,8 @@ def test_china_regions_are_ranked_from_largest_to_smallest_for_selected_period()
         "ASEAN Plus", "EU", "US", "Americas ex US", "Hong Kong",
         "Other", "Middle East", "Africa", "CIS",
     ]
-    assert CHINA_REGION_COLORS["ASEAN Plus"] == "#5f8fae"
+    assert CHINA_REGION_COLORS["ASEAN Plus"] == "#38BDF8"
+    assert len(set(CHINA_REGION_COLORS.values())) == len(REGION_ORDER)
 
 
 def test_china_historical_cache_migrates_to_2025_fallback(tmp_path):
