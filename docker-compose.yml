@@ -36,6 +36,7 @@ services:
       - ./persistent/technical_outlook:/app/persistent/technical_outlook
       - ./persistent/technical_outlook_simple_v3:/app/persistent/technical_outlook_simple_v3
       - ./persistent/commodity_cycle:/app/persistent/commodity_cycle
+      - ./persistent/world_economy:/app/persistent/world_economy
 
   screener-jobs:
     build: .
@@ -78,6 +79,7 @@ services:
       - ./persistent/technical_outlook:/app/persistent/technical_outlook
       - ./persistent/technical_outlook_simple_v3:/app/persistent/technical_outlook_simple_v3
       - ./persistent/commodity_cycle:/app/persistent/commodity_cycle
+      - ./persistent/world_economy:/app/persistent/world_economy
 
   tester:
     build: .

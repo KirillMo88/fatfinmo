@@ -11,6 +11,7 @@ import streamlit as st
 from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode, JsCode
 
 from world_economy import load_world_economy_data
+from world_trade_tab import load_world_trade_snapshot, render_world_trade_module
 
 
 @st.cache_data(show_spinner="Loading official BIS and IMF data…", ttl=6 * 60 * 60)
@@ -25,6 +26,10 @@ def render_world_economy_tab() -> None:
         refresh = st.button("Refresh World Economy", key="world_economy_refresh", use_container_width=True)
     if refresh:
         _load_snapshot.clear()
+        load_world_trade_snapshot.clear()
+    trade_snapshot = load_world_trade_snapshot(int(refresh))
+    render_world_trade_module(trade_snapshot)
+    st.divider()
     try:
         snapshot = _load_snapshot(int(refresh))
     except Exception as exc:
