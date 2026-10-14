@@ -11,6 +11,7 @@ import streamlit as st
 from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode, JsCode
 
 from world_economy import load_world_economy_data
+from world_gdp_tab import load_world_gdp_snapshot, render_world_gdp_module
 from world_trade_tab import load_world_trade_snapshot, render_world_trade_module
 
 
@@ -26,7 +27,11 @@ def render_world_economy_tab() -> None:
         refresh = st.button("Refresh World Economy", key="world_economy_refresh", use_container_width=True)
     if refresh:
         _load_snapshot.clear()
+        load_world_gdp_snapshot.clear()
         load_world_trade_snapshot.clear()
+    gdp_snapshot = load_world_gdp_snapshot(int(refresh))
+    render_world_gdp_module(gdp_snapshot)
+    st.divider()
     trade_snapshot = load_world_trade_snapshot(int(refresh))
     render_world_trade_module(trade_snapshot)
     st.divider()
@@ -525,27 +530,15 @@ def _render_comparison_table(table: pd.DataFrame, year: int, source_metadata: di
     top_gdp_cds = _top_gdp_cds_countries(table)
     if not top_gdp_cds.empty:
         st.subheader("Sovereign 5Y CDS — Top 10 GDP Countries")
-        fig = go.Figure(go.Bar(
-            x=top_gdp_cds["cds_5y_bps"],
-            y=top_gdp_cds["country_name"],
-            orientation="h",
-            marker_color="#5b9cf5",
-            customdata=top_gdp_cds[["cds_var_6m_pct", "cds_pd_pct"]],
-            hovertemplate=(
-                "%{y}<br>5Y CDS: %{x:.2f} bps<br>6M variation: %{customdata[0]:.2f}%"
-                "<br>Implied PD: %{customdata[1]:.2f}%<extra></extra>"
-            ),
-        ))
-        fig.update_layout(
-            height=max(300, 38 * len(top_gdp_cds) + 90),
-            margin={"l": 30, "r": 20, "t": 20, "b": 45},
-            xaxis_title="Basis points (bps)",
-            yaxis={"title": "", "categoryorder": "array", "categoryarray": top_gdp_cds["country_name"].tolist()},
-            showlegend=False,
-        )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+        level_fig, variation_fig = _build_sovereign_cds_figures(top_gdp_cds)
+        level_col, variation_col = st.columns(2, gap="medium")
+        with level_col:
+            st.plotly_chart(level_fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+        with variation_col:
+            st.plotly_chart(variation_fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
         st.caption(
             f"Source: {source_metadata.get('sovereign_cds_url', 'World Government Bonds Sovereign CDS')} · "
+            "Var 6m is the source's six-month percentage change in the 5Y CDS quote. "
             "PD is the source's implied probability of default using a 40% recovery assumption."
         )
 
@@ -557,6 +550,73 @@ def _top_gdp_cds_countries(table: pd.DataFrame, count: int = 10) -> pd.DataFrame
         & table["country_name"].astype(str).str.strip().str.casefold().ne("russian federation")
     ].dropna(subset=["cds_5y_bps"])
     return eligible.nsmallest(count, "gdp_rank").sort_values("gdp_rank", ascending=False)
+
+
+def _build_sovereign_cds_figures(countries: pd.DataFrame) -> tuple[go.Figure, go.Figure]:
+    """Build aligned level and six-month variation charts for one country cohort."""
+    data = countries.copy()
+    data["cds_5y_bps"] = pd.to_numeric(data["cds_5y_bps"], errors="coerce")
+    data["cds_var_6m_pct"] = pd.to_numeric(data["cds_var_6m_pct"], errors="coerce")
+    data["cds_pd_pct"] = pd.to_numeric(data["cds_pd_pct"], errors="coerce")
+    country_order = data["country_name"].tolist()
+    height = max(320, 38 * len(data) + 110)
+
+    level_fig = go.Figure(go.Bar(
+        x=data["cds_5y_bps"],
+        y=data["country_name"],
+        orientation="h",
+        marker_color="#5f8fae",
+        customdata=data[["cds_var_6m_pct", "cds_pd_pct"]],
+        hovertemplate=(
+            "%{y}<br>5Y CDS: %{x:.2f} bps<br>6M variation: %{customdata[0]:+.2f}%"
+            "<br>Implied PD: %{customdata[1]:.2f}%<extra></extra>"
+        ),
+    ))
+    level_fig.update_layout(
+        title={"text": "5Y CDS level", "x": 0.5},
+        height=height,
+        margin={"l": 25, "r": 18, "t": 48, "b": 45},
+        xaxis_title="Basis points (bps)",
+        yaxis={"title": "", "categoryorder": "array", "categoryarray": country_order},
+        showlegend=False,
+    )
+
+    variation_colors = np.where(
+        data["cds_var_6m_pct"].gt(0), "#b77a62",
+        np.where(data["cds_var_6m_pct"].lt(0), "#70927d", "#8b96a6"),
+    )
+    variation_text = data["cds_var_6m_pct"].map(
+        lambda value: "N/A" if pd.isna(value) else f"{float(value):+.1f}%"
+    )
+    variation_fig = go.Figure(go.Bar(
+        x=data["cds_var_6m_pct"],
+        y=data["country_name"],
+        orientation="h",
+        marker_color=variation_colors,
+        text=variation_text,
+        textposition="outside",
+        cliponaxis=False,
+        customdata=data[["cds_5y_bps", "cds_pd_pct"]],
+        hovertemplate=(
+            "%{y}<br>6M variation: %{x:+.2f}%<br>5Y CDS: %{customdata[0]:.2f} bps"
+            "<br>Implied PD: %{customdata[1]:.2f}%<extra></extra>"
+        ),
+    ))
+    finite_variation = data["cds_var_6m_pct"].replace([np.inf, -np.inf], np.nan).dropna().abs()
+    variation_limit = max(float(finite_variation.max()) if not finite_variation.empty else 1.0, 1.0) * 1.25
+    variation_fig.add_vline(x=0, line={"color": "#94a3b8", "width": 1.2})
+    variation_fig.update_layout(
+        title={"text": "5Y CDS variation — 6 months", "x": 0.5},
+        height=height,
+        margin={"l": 12, "r": 48, "t": 48, "b": 45},
+        xaxis={"title": "Change over 6 months (%)", "range": [-variation_limit, variation_limit], "zeroline": False},
+        yaxis={
+            "title": "", "categoryorder": "array", "categoryarray": country_order,
+            "showticklabels": False,
+        },
+        showlegend=False,
+    )
+    return level_fig, variation_fig
 
 
 def _xlsx_export(table: pd.DataFrame, year: int, source_metadata: dict[str, Any]) -> bytes:

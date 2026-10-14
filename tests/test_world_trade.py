@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from world_trade import ChinaExportGeographyService, GlobalTradeService, REGION_ORDER, TradeBalanceService
-from world_trade_tab import _render_china_stacked_columns
+from world_trade_tab import CHINA_REGION_COLORS, _ranked_region_order, _render_china_stacked_columns
 
 
 class _Response:
@@ -56,6 +56,11 @@ class _WtoClient:
 
     def get(self, url, params=None, headers=None, **kwargs):
         self.calls.append({"url": url, "params": params, "headers": headers})
+        if url.endswith("/reporters"):
+            return self.response_type([
+                {"code": f"X{index:03d}", "iso3A": f"X{index:03d}", "name": f"Economy {index:03d}", "displayOrder": index}
+                for index in range(159)
+            ] + [{"code": "AAA", "iso3A": "AAA", "name": "Economy – A", "displayOrder": 159}])
         value_field = "exports" if params["i"] == TradeBalanceService.EXPORT_CODE else "imports"
         values = {"exports": (100.0, 100.0), "imports": (90.0, 90.0)}[value_field]
         return self.response_type([
@@ -113,12 +118,15 @@ def test_trade_balance_api_uses_official_data_endpoint_and_total_merchandise(tmp
     client = _WtoClient()
     frame = TradeBalanceService(tmp_path, client=client)._download_api()
 
-    assert len(client.calls) == 2
-    assert all(call["url"].endswith("/timeseries/v1/data") for call in client.calls)
-    assert {call["params"]["i"] for call in client.calls} == {
+    assert len(client.calls) == 3
+    reporter_call = client.calls[0]
+    assert reporter_call["url"].endswith("/timeseries/v1/reporters")
+    assert reporter_call["params"]["ig"] == "individual"
+    data_calls = [call for call in client.calls if call["url"].endswith("/timeseries/v1/data")]
+    assert {call["params"]["i"] for call in data_calls} == {
         TradeBalanceService.EXPORT_CODE, TradeBalanceService.IMPORT_CODE,
     }
-    for call in client.calls:
+    for call in data_calls:
         assert call["params"]["r"] == "all"
         assert call["params"]["p"] == "000"
         assert call["params"]["pc"] == "TO"
@@ -127,6 +135,8 @@ def test_trade_balance_api_uses_official_data_endpoint_and_total_merchandise(tmp
         assert call["headers"] == {"Ocp-Apim-Subscription-Key": "test-key"}
     assert frame.loc[frame["economy_code"].eq("AAA"), "exports_usd_mn"].iloc[0] == pytest.approx(100.0)
     assert frame.loc[frame["economy_code"].eq("AAA"), "imports_usd_mn"].iloc[0] == pytest.approx(90.0)
+    assert frame.loc[frame["economy_code"].eq("0"), "economy"].iloc[0] == "World"
+    assert not frame.loc[frame["economy_code"].eq("0"), "is_individual_economy"].iloc[0]
 
 
 def test_trade_balance_api_accepts_wto_cp1252_json(tmp_path, monkeypatch):
@@ -167,6 +177,33 @@ def test_trade_balance_top_five_each_side_is_dynamic():
     assert set(selected["trade_balance_usd_bn"]) == {-7, -6, -5, -4, -3, 3, 4, 5, 6, 7}
 
 
+def test_trade_balance_excludes_economic_groups_from_validation_and_rankings(tmp_path):
+    frame = _wto_fixture()
+    group_names = [
+        "BRICS members", "BRIC members", "OPEC (Organization of the Petroleum Exporting Countries)",
+        "Gulf Cooperation Council (GCC)", "South Asian Association for Regional Cooperation (SAARC)",
+        "G-20", "United States-Mexico-Canada Agreement (USMCA/CUSMA/T-MEC)", "G-7 (Group of Seven)",
+    ]
+    groups = []
+    for year in (2015, 2025):
+        for index, name in enumerate(group_names):
+            groups.append({
+                "year": year,
+                "economy": name,
+                "economy_code": f"GROUP{index}",
+                "exports_usd_mn": 2_000_000.0 + index * 100_000,
+                "imports_usd_mn": 100_000.0,
+            })
+    frame = pd.concat([frame, pd.DataFrame(groups)], ignore_index=True)
+
+    validated, metadata = TradeBalanceService(tmp_path).validate(frame)
+    ranked = TradeBalanceService.top_balances(validated, metadata["latest_valid_year"])
+
+    assert not set(group_names).intersection(validated["economy"])
+    assert not set(group_names).intersection(ranked["economy"])
+    assert len(validated.loc[validated["year"].eq(2025)]) == 160
+
+
 def test_china_historical_seed_reconciles(tmp_path):
     service = ChinaExportGeographyService(tmp_path)
     service._refresh_from_raw = lambda: False
@@ -190,6 +227,23 @@ def test_china_2025_seed_fallback_matches_reference():
     actual = seed.loc[seed["Region"].ne("TOTAL")].set_index("Region")["2025 share %"]
     for region, reference in expected.items():
         assert actual[region] == pytest.approx(reference, abs=0.1)
+
+
+def test_china_regions_are_ranked_from_largest_to_smallest_for_selected_period():
+    seed = pd.read_csv("data/china_export_regions_2000_2010_2020_2025_full.csv")
+    frame = pd.DataFrame({
+        "year": 2025,
+        "region": seed.loc[seed["Region"].ne("TOTAL"), "Region"],
+        "share_pct": seed.loc[seed["Region"].ne("TOTAL"), "2025 share %"],
+    })
+
+    order = _ranked_region_order(frame, 2025, "share_pct")
+
+    assert order == [
+        "ASEAN Plus", "EU", "US", "Americas ex US", "Hong Kong",
+        "Other", "Middle East", "Africa", "CIS",
+    ]
+    assert CHINA_REGION_COLORS["ASEAN Plus"] == "#5f8fae"
 
 
 def test_china_historical_cache_migrates_to_2025_fallback(tmp_path):
