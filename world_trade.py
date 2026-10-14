@@ -403,6 +403,7 @@ class TradeBalanceService:
         checks: dict[int, dict[str, Any]] = {}
         previous_cohort: set[str] | None = None
         for year in sorted(economies["year"].dropna().astype(int).unique()):
+            year = int(year)
             current = economies.loc[economies["year"].eq(year)]
             total_row = world.loc[world["year"].eq(year)]
             world_exports = float(total_row["exports_usd_mn"].iloc[0]) if not total_row.empty else np.nan
