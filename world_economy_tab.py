@@ -11,6 +11,10 @@ import streamlit as st
 from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode, JsCode
 
 from world_economy import load_world_economy_data
+from economic_efficiency_tab import (
+    load_economic_efficiency_snapshot,
+    render_economic_efficiency_module,
+)
 from world_gdp_tab import load_world_gdp_snapshot, render_world_gdp_module
 from world_trade_tab import load_world_trade_snapshot, render_world_trade_module
 
@@ -27,10 +31,14 @@ def render_world_economy_tab() -> None:
         refresh = st.button("Refresh World Economy", key="world_economy_refresh", use_container_width=True)
     if refresh:
         _load_snapshot.clear()
+        load_economic_efficiency_snapshot.clear()
         load_world_gdp_snapshot.clear()
         load_world_trade_snapshot.clear()
     gdp_snapshot = load_world_gdp_snapshot(int(refresh))
     render_world_gdp_module(gdp_snapshot)
+    st.divider()
+    efficiency_snapshot = load_economic_efficiency_snapshot(int(refresh))
+    render_economic_efficiency_module(efficiency_snapshot, gdp_snapshot)
     st.divider()
     snapshot: dict[str, Any] | None = None
     snapshot_error: Exception | None = None
