@@ -7,7 +7,13 @@ import pandas as pd
 import pytest
 
 from world_gdp import WorldGDPService
-from world_gdp_tab import _format_change, _format_number
+from world_gdp_tab import (
+    _focused_additive_history,
+    _format_change,
+    _format_number,
+    _gdp_display_scale,
+    _top10_display_table,
+)
 
 
 def _frame(years: list[int], country_count: int = 12) -> pd.DataFrame:
@@ -79,6 +85,23 @@ def test_dynamic_top10_and_selected_country_reconcile_without_double_counting() 
     assert year_2010["value"].sum() == pytest.approx(year_2010["world_value"].iloc[0])
 
 
+def test_country_focus_additive_view_contains_only_the_selected_country() -> None:
+    history = WorldGDPService.build_additive_history(
+        _frame([2000, 2010]), metric="nominal", reference_year=2010, selected_iso3="C11"
+    )
+
+    focused = _focused_additive_history(history, "c11")
+
+    assert set(focused["iso3"]) == {"C11"}
+    assert focused["year"].tolist() == [2000, 2010]
+    assert focused["country_name"].eq("Country 11").all()
+
+
+def test_country_gdp_scale_uses_billions_below_one_trillion() -> None:
+    assert _gdp_display_scale(pd.Series([18e9, 22e9])) == (1e9, "B")
+    assert _gdp_display_scale(pd.Series([900e9, 1.2e12])) == (1e12, "T")
+
+
 def test_ppp_history_never_creates_pre_1990_observations() -> None:
     history = WorldGDPService.build_additive_history(
         _frame([1980, 1990, 2000]), metric="ppp", reference_year=2000
@@ -106,10 +129,28 @@ def test_per_capita_selected_view_contains_only_country_and_world() -> None:
 
 def test_table_value_formatting_uses_units_signs_and_na() -> None:
     assert _format_number(30.7697, "${:,.2f}T") == "$30.77T"
+    assert _format_number(41.259824, "${:,.2f}T") == "$41.26T"
     assert _format_number(np.nan, "${:,.2f}T") == "N/A"
     assert _format_change(72.44) == "+72.4%"
     assert _format_change(-13.16) == "−13.2%"
     assert _format_change(np.nan) == "N/A"
+
+
+def test_top10_display_groups_all_change_columns_on_the_right() -> None:
+    table = WorldGDPService.build_top10_table(_frame([2014, 2024]), reference_year=2024)
+
+    display = _top10_display_table(table)
+
+    assert display.columns.tolist() == [
+        "Rank",
+        "Country",
+        "Nominal GDP, $T",
+        "GDP PPP, Intl$T",
+        "GDP per capita, $",
+        "Nominal GDP 10Y Change",
+        "GDP PPP 10Y Change",
+        "GDP per capita 10Y Change",
+    ]
 
 
 def test_latest_common_year_applies_150_economy_coverage() -> None:
