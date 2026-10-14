@@ -14,6 +14,7 @@ from economic_efficiency import (
     build_efficiency_table,
     eligible_countries,
     load_economic_efficiency_data,
+    resolve_nominal_gdp_year,
     resolve_reference_year,
 )
 
@@ -44,7 +45,9 @@ def render_economic_efficiency_module(
         return
 
     try:
-        reference_year = resolve_reference_year(pwt, world_gdp)
+        validated_gdp_year = world_gdp_snapshot.get("metadata", {}).get("reference_year")
+        ranking_year = int(validated_gdp_year) if validated_gdp_year else resolve_nominal_gdp_year(world_gdp)
+        reference_year = resolve_reference_year(pwt, world_gdp, ranking_year=ranking_year)
     except Exception as exc:
         st.error(f"Economic Efficiency data could not be synchronized: {exc}")
         return
@@ -56,16 +59,18 @@ def render_economic_efficiency_module(
         services,
         world_gdp,
         reference_year=reference_year,
+        ranking_year=ranking_year,
         selected_iso3=selected_iso3,
     )
     mode = "Country Historical Analysis" if selected_iso3 else "Global Comparison"
     metadata = snapshot.get("metadata", {})
     st.caption(
-        f"Mode: {mode} · Synchronized observation year: {reference_year} · "
+        f"Mode: {mode} · PWT observation year: {reference_year} · "
+        f"Nominal GDP ranking year: {ranking_year} · "
         f"PWT {metadata.get('pwt_version', PWT_VERSION)} · Rankings: World Bank nominal GDP"
     )
 
-    _render_efficiency_table(table, reference_year)
+    _render_efficiency_table(table, reference_year, ranking_year)
     st.divider()
     if selected_iso3:
         history = build_country_history(
@@ -80,7 +85,7 @@ def render_economic_efficiency_module(
         else:
             _render_historical_charts(history)
     else:
-        _render_global_charts(table, reference_year)
+        _render_global_charts(table, reference_year, ranking_year)
 
     retrieved = metadata.get("retrieved_at_utc", "unknown")
     st.caption(
@@ -112,10 +117,11 @@ def _country_selector(countries: pd.DataFrame) -> str | None:
     return selected
 
 
-def _render_efficiency_table(table: pd.DataFrame, reference_year: int) -> None:
+def _render_efficiency_table(table: pd.DataFrame, reference_year: int, ranking_year: int) -> None:
     st.subheader("Economic Efficiency Table")
     st.caption(
-        f"Top 10 by nominal GDP in {reference_year}. Ten-year changes compare exact observations in "
+        f"Top 10 by nominal GDP in {ranking_year}. Efficiency metrics use PWT {reference_year}; "
+        f"ten-year changes compare exact observations in "
         f"{reference_year} and {reference_year - 10}; missing endpoints remain N/A."
     )
     display = pd.DataFrame({
@@ -126,13 +132,12 @@ def _render_efficiency_table(table: pd.DataFrame, reference_year: int) -> None:
         "GDP / Capital": table["capital_productivity_current_pct"],
         "GDP / Capital Change 10Y": table["capital_productivity_change_10y_pct"],
         "Services / GDP": table["services_gdp_pct"],
-        "Services Year": table["services_year"].astype("Int64"),
-        "GDP per Hour Worked": table["gdp_per_hour_ppp"],
-        "GDP per Hour Worked 10Y": table["gdp_per_hour_change_10y_pct"],
+        "GDP PPP per Hour Worked": table["gdp_per_hour_ppp"],
+        "GDP PPP per Hour Worked 10Y": table["gdp_per_hour_change_10y_pct"],
         "_selected": table["is_selected"].fillna(False),
     })
     metric_columns = [
-        "TFP Growth 10Y", "GDP / Capital Change 10Y", "GDP per Hour Worked 10Y"
+        "TFP Growth 10Y", "GDP / Capital Change 10Y", "GDP PPP per Hour Worked 10Y"
     ]
     styler = display.drop(columns="_selected").style.format({
         "TFP Level, US = 100": lambda value: _fmt(value, "{:.1f}"),
@@ -140,9 +145,8 @@ def _render_efficiency_table(table: pd.DataFrame, reference_year: int) -> None:
         "GDP / Capital": _fmt_pct,
         "GDP / Capital Change 10Y": _fmt_pct,
         "Services / GDP": _fmt_pct,
-        "Services Year": lambda value: "N/A" if pd.isna(value) else str(int(value)) + ("*" if int(value) != reference_year else ""),
-        "GDP per Hour Worked": lambda value: _fmt(value, "${:,.1f}"),
-        "GDP per Hour Worked 10Y": _fmt_pct,
+        "GDP PPP per Hour Worked": lambda value: _fmt(value, "${:,.1f}"),
+        "GDP PPP per Hour Worked 10Y": _fmt_pct,
     }, na_rep="N/A")
     styler = styler.map(_change_color, subset=metric_columns)
     selected_mask = display["_selected"].to_numpy(dtype=bool)
@@ -152,10 +156,10 @@ def _render_efficiency_table(table: pd.DataFrame, reference_year: int) -> None:
     )
     st.dataframe(styler, use_container_width=True, hide_index=True, height=min(470, 42 + 35 * len(display)))
     if table["services_is_older"].fillna(False).any():
-        st.caption("* Services/GDP uses the most recent earlier WDI observation; the actual source year is shown.")
+        st.caption("Services/GDP uses the most recent available WDI observation when the PWT reference-year value is unavailable.")
 
 
-def _render_global_charts(table: pd.DataFrame, reference_year: int) -> None:
+def _render_global_charts(table: pd.DataFrame, reference_year: int, ranking_year: int) -> None:
     top10 = table.head(10).copy()
     st.subheader("Productivity Charts")
     left, right = st.columns(2, gap="medium")
@@ -188,9 +192,23 @@ def _render_global_charts(table: pd.DataFrame, reference_year: int) -> None:
             hover_lines=[("Formula", "change in rgdpna / rnna")],
         )
 
-    left, _ = st.columns(2, gap="medium")
+    left, right = st.columns(2, gap="medium")
     with left:
         _plot_labor_productivity(top10, reference_year)
+    with right:
+        _plot_global_bar(
+            top10,
+            "gdp_per_hour_change_10y_pct",
+            "GDP PPP per Hour Worked — 10Y Change",
+            "10Y change (%)",
+            reference_year=reference_year,
+            zero_line=True,
+            signed=True,
+            sort_by="gdp_per_hour_ppp",
+            text_template="%{text:+.1f}%",
+            value_suffix="%",
+            hover_lines=[("Formula", "change in rgdpna / (emp × avh)")],
+        )
 
     st.subheader("Economic Efficiency Matrix — Top 10 Economies")
     size_mode = st.segmented_control(
@@ -199,7 +217,7 @@ def _render_global_charts(table: pd.DataFrame, reference_year: int) -> None:
         default="Nominal GDP",
         key="efficiency_bubble_size",
     ) or "Nominal GDP"
-    _plot_efficiency_matrix(top10, reference_year, size_mode)
+    _plot_efficiency_matrix(top10, reference_year, ranking_year, size_mode)
 
 
 def _plot_global_bar(
@@ -212,9 +230,13 @@ def _plot_global_bar(
     reference_line: float | None = None,
     zero_line: bool = False,
     signed: bool = False,
+    sort_by: str | None = None,
+    text_template: str = "%{text:.1f}",
+    value_suffix: str = "",
     hover_lines: list[tuple[str, str]] | None = None,
 ) -> None:
-    data = frame.dropna(subset=[column]).sort_values(column, ascending=False)
+    required = [column, *([sort_by] if sort_by and sort_by != column else [])]
+    data = frame.dropna(subset=required).sort_values(sort_by or column, ascending=False)
     if data.empty:
         st.info(f"No valid data for {title}.")
         return
@@ -223,10 +245,10 @@ def _plot_global_bar(
     extra = "".join(f"<br>{label}: {value}" for label, value in (hover_lines or []))
     fig = go.Figure(go.Bar(
         x=data["country_name"], y=values, marker_color=colors,
-        text=values, texttemplate="%{text:.1f}", textposition="outside", cliponaxis=False,
+        text=values, texttemplate=text_template, textposition="outside", cliponaxis=False,
         customdata=data[["iso3"]],
         hovertemplate=(
-            "<b>%{x} (%{customdata[0]})</b><br>Value: %{y:.2f}<br>Observation year: "
+            f"<b>%{{x}} (%{{customdata[0]}})</b><br>Value: %{{y:.2f}}{value_suffix}<br>Observation year: "
             f"{reference_year}{extra}<br>Source: PWT {PWT_VERSION}<extra></extra>"
         ),
     ))
@@ -286,21 +308,23 @@ def _plot_labor_productivity(frame: pd.DataFrame, reference_year: int) -> None:
         text=data["gdp_per_hour_ppp"], texttemplate="$%{text:.1f}", textposition="outside", cliponaxis=False,
         customdata=custom,
         hovertemplate=(
-            "<b>%{x} (%{customdata[0]})</b><br>GDP per hour: $%{y:,.2f} PPP"
+            "<b>%{x} (%{customdata[0]})</b><br>GDP PPP per hour worked: $%{y:,.2f}"
             "<br>Average annual hours: %{customdata[1]:,.0f}"
             "<br>10Y growth: %{customdata[2]:+.2f}%"
             f"<br>Observation year: {reference_year}<br>Formula: cgdpo / (emp × avh)<br>Source: PWT {PWT_VERSION}<extra></extra>"
         ),
     ))
     fig.update_layout(
-        title={"text": "Labor Productivity — GDP per Hour Worked", "x": 0.5}, height=430,
+        title={"text": "Labor Productivity — GDP PPP per Hour Worked", "x": 0.5}, height=430,
         margin={"l": 55, "r": 25, "t": 55, "b": 85}, showlegend=False, hovermode="closest",
         xaxis={"tickangle": -25}, yaxis={"title": "PPP USD/hour", "tickprefix": "$", "gridcolor": "rgba(148,163,184,0.20)"},
     )
     st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
 
 
-def _plot_efficiency_matrix(frame: pd.DataFrame, reference_year: int, size_mode: str) -> None:
+def _plot_efficiency_matrix(
+    frame: pd.DataFrame, reference_year: int, ranking_year: int, size_mode: str
+) -> None:
     size_column = {"Nominal GDP": "nominal_gdp_usd", "GDP PPP": "cgdpo", "Capital Stock": "cn"}[size_mode]
     data = frame.dropna(subset=["tfp_level", "tfp_growth_10y_pct", size_column]).copy()
     if data.empty:
@@ -331,8 +355,10 @@ def _plot_efficiency_matrix(frame: pd.DataFrame, reference_year: int, size_mode:
             "<br>Nominal GDP: $%{customdata[1]:,.0f}<br>GDP / Capital: %{customdata[2]:.2f}%"
             "<br>GDP / Capital Change 10Y: %{customdata[3]:+.2f}%"
             "<br>Services / GDP: %{customdata[4]:.2f}% (year %{customdata[5]:.0f})"
-            "<br>GDP per Hour: $%{customdata[6]:,.2f}<br>GDP per Hour Growth 10Y: %{customdata[7]:+.2f}%"
-            f"<br>PWT year: {reference_year}<br>Source: PWT {PWT_VERSION} + World Bank WDI<extra></extra>"
+            "<br>GDP PPP per Hour Worked: $%{customdata[6]:,.2f}"
+            "<br>GDP PPP per Hour Worked Growth 10Y: %{customdata[7]:+.2f}%"
+            f"<br>PWT year: {reference_year}<br>Nominal GDP year: {ranking_year}"
+            f"<br>Source: PWT {PWT_VERSION} + World Bank WDI<extra></extra>"
         ),
     ))
     fig.add_shape(type="rect", x0=x_median, x1=x1, y0=y_median, y1=y1, fillcolor="rgba(74,222,128,0.12)", line_width=0, layer="below")
@@ -403,13 +429,13 @@ def _render_historical_charts(history: pd.DataFrame) -> None:
     left, right = st.columns(2, gap="medium")
     with left:
         labor_mode = st.segmented_control(
-            "Labor productivity", ["GDP per Hour — Level", "GDP per Hour — 10Y Growth"],
-            default="GDP per Hour — Level", key="efficiency_history_labor_mode",
-        ) or "GDP per Hour — Level"
+            "Labor productivity", ["GDP PPP per Hour Worked — Level", "GDP PPP per Hour Worked — 10Y Growth"],
+            default="GDP PPP per Hour Worked — Level", key="efficiency_history_labor_mode",
+        ) or "GDP PPP per Hour Worked — Level"
         labor_values = history["gdp_per_hour_real"] if labor_mode.endswith("Level") else history["gdp_per_hour_change_10y_pct"]
         labor_axis = "Constant-price USD/hour" if labor_mode.endswith("Level") else "10Y growth (%)"
         _plot_history_line(
-            history, labor_values, "GDP per Hour Worked — Historical", labor_axis,
+            history, labor_values, "GDP PPP per Hour Worked — Historical", labor_axis,
             "PWT: rgdpna / (emp × avh)", zero_line=not labor_mode.endswith("Level"),
             signed_fill=not labor_mode.endswith("Level"),
         )

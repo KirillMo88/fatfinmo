@@ -148,7 +148,7 @@ def render_business_cycle_tab(api_key: str | None) -> None:
     st.markdown("### Inflation Details")
     direction_col, term_col = st.columns(2)
     with direction_col:
-        show_inflation_components = st.checkbox("Show inflation channel scores", value=False, key="business_cycle_show_inflation_components")
+        show_inflation_components = st.checkbox("Show inflation channel scores", value=True, key="business_cycle_show_inflation_components")
         st.plotly_chart(build_inflation_direction_fig(d, show_inflation_components), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
     with term_col:
         st.plotly_chart(build_expinf_curve_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
@@ -801,10 +801,15 @@ def build_inflation_direction_fig(d: pd.DataFrame, show_components: bool) -> go.
     fig.add_hrect(y0=-0.20, y1=0.20, fillcolor="#94a3b8", opacity=0.12, line_width=0)
     fig.add_trace(go.Scatter(x=d["date"], y=d["InflationDirectionScore"], mode="lines", name="InflationDirectionScore", line={"color": "#f8fafc", "width": 2.0}))
     if show_components:
-        for col, color in [("MarketPricingScore", "#38bdf8"), ("ModelImpliedInflationScore", "#facc15"), ("SurveyInflationScore", "#e879f9")]:
-            fig.add_trace(go.Scatter(x=d["date"], y=d[col], mode="lines", name=col, line={"color": color, "width": 1.4, "dash": "dot"}))
+        channels = [
+            ("MarketPricingScore", "MarketPricing = 0.65M_T5YIE + 0.35M_T10YIE", "#38bdf8"),
+            ("ModelImpliedInflationScore", "ModelImplied = 0.60M_EXPINF1YR + 0.40M_EXPINF5YR", "#facc15"),
+            ("SurveyInflationScore", "Survey = M_MICH", "#e879f9"),
+        ]
+        for col, label, color in channels:
+            fig.add_trace(go.Scatter(x=d["date"], y=d[col], mode="lines", name=label, line={"color": color, "width": 1.4, "dash": "dot"}))
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
-    return style_business_fig(fig, "Inflation Direction", 340)
+    return style_business_fig(fig, "InflationDirectionScore= 0.35MarketPricing+0.40ModelImplied+0.25Survey", 340)
 
 
 def build_expinf_curve_fig(d: pd.DataFrame) -> go.Figure:
@@ -822,9 +827,10 @@ def build_leading_realized_fig(d: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     add_background_bands(fig, d, "InflationConfirmationStatus", CONFIRMATION_COLORS, opacity=0.10)
     fig.add_trace(go.Scatter(x=d["date"], y=d["InflationDirectionScore"], mode="lines", name="InflationDirectionScore", line={"color": "#f8fafc", "width": 2.0}))
-    fig.add_trace(go.Scatter(x=d["date"], y=d["RealizedInflationMomentum"], mode="lines", name="RealizedInflationMomentum", line={"color": "#f97316", "width": 1.8}))
+    realized_label = "Realized Inflation = 0.35Core PCE + 0.30Core CPI + 0.20Headline CPI + 0.15PPI"
+    fig.add_trace(go.Scatter(x=d["date"], y=d["RealizedInflationMomentum"], mode="lines", name=realized_label, line={"color": "#f97316", "width": 1.8}))
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
-    return style_business_fig(fig, "Leading vs Realized Inflation", 320)
+    return style_business_fig(fig, f"Leading vs {realized_label}", 320)
 
 
 def build_t5yifr_fig(d: pd.DataFrame) -> go.Figure:
