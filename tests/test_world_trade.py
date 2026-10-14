@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import numpy as np
@@ -24,7 +25,7 @@ class _Response:
 class _Cp1252Response(_Response):
     def __init__(self, payload):
         super().__init__(payload)
-        self.content = __import__("json").dumps(payload, ensure_ascii=False).encode("cp1252")
+        self.content = json.dumps(payload, ensure_ascii=False).encode("cp1252")
 
     def json(self):
         raise UnicodeDecodeError("utf-8", self.content, 0, 1, "test invalid byte")
@@ -104,6 +105,7 @@ def test_trade_balance_validation_and_period_selection(tmp_path):
     assert len(validated.loc[validated["year"].eq(2025)]) == 160
     assert "World" not in set(validated["economy"])
     assert validated["trade_balance_usd_bn"].iloc[0] == pytest.approx(0.001)
+    json.dumps(metadata)
 
 
 def test_trade_balance_api_uses_official_data_endpoint_and_total_merchandise(tmp_path, monkeypatch):
