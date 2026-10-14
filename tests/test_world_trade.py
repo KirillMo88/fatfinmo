@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from world_trade import ChinaExportGeographyService, GlobalTradeService, REGION_ORDER, TradeBalanceService
+from world_trade_tab import _render_china_stacked_columns
 
 
 class _Response:
@@ -18,6 +19,15 @@ class _Response:
 
     def json(self):
         return self._payload
+
+
+class _Cp1252Response(_Response):
+    def __init__(self, payload):
+        super().__init__(payload)
+        self.content = __import__("json").dumps(payload, ensure_ascii=False).encode("cp1252")
+
+    def json(self):
+        raise UnicodeDecodeError("utf-8", self.content, 0, 1, "test invalid byte")
 
 
 class _WdiClient:
@@ -36,6 +46,27 @@ class _WdiClient:
                 value = 5e12 + offset * 2e11
             rows.append({"date": str(year), "value": value})
         return _Response([{"lastupdated": "2026-01-01"}, rows])
+
+
+class _WtoClient:
+    def __init__(self, response_type=_Response):
+        self.calls = []
+        self.response_type = response_type
+
+    def get(self, url, params=None, headers=None, **kwargs):
+        self.calls.append({"url": url, "params": params, "headers": headers})
+        value_field = "exports" if params["i"] == TradeBalanceService.EXPORT_CODE else "imports"
+        values = {"exports": (100.0, 100.0), "imports": (90.0, 90.0)}[value_field]
+        return self.response_type([
+            {
+                "year": 2025, "reportingEconomy": "Economy – A", "reportingEconomyCode": "AAA",
+                "partnerEconomyCode": "000", "productOrSectorCode": "TO", "value": values[0],
+            },
+            {
+                "year": 2025, "reportingEconomy": "World", "reportingEconomyCode": "000",
+                "partnerEconomyCode": "000", "productOrSectorCode": "TO", "value": values[1],
+            },
+        ])
 
 
 def test_global_trade_calculations_exclude_current_year(tmp_path):
@@ -75,6 +106,40 @@ def test_trade_balance_validation_and_period_selection(tmp_path):
     assert validated["trade_balance_usd_bn"].iloc[0] == pytest.approx(0.001)
 
 
+def test_trade_balance_api_uses_official_data_endpoint_and_total_merchandise(tmp_path, monkeypatch):
+    monkeypatch.setenv("WTO_API_KEY", "test-key")
+    client = _WtoClient()
+    frame = TradeBalanceService(tmp_path, client=client)._download_api()
+
+    assert len(client.calls) == 2
+    assert all(call["url"].endswith("/timeseries/v1/data") for call in client.calls)
+    assert {call["params"]["i"] for call in client.calls} == {
+        TradeBalanceService.EXPORT_CODE, TradeBalanceService.IMPORT_CODE,
+    }
+    for call in client.calls:
+        assert call["params"]["r"] == "all"
+        assert call["params"]["p"] == "000"
+        assert call["params"]["pc"] == "TO"
+        assert call["params"]["head"] == "M"
+        assert call["params"]["max"] == 1_000_000
+        assert call["headers"] == {"Ocp-Apim-Subscription-Key": "test-key"}
+    assert frame.loc[frame["economy_code"].eq("AAA"), "exports_usd_mn"].iloc[0] == pytest.approx(100.0)
+    assert frame.loc[frame["economy_code"].eq("AAA"), "imports_usd_mn"].iloc[0] == pytest.approx(90.0)
+
+
+def test_trade_balance_api_accepts_wto_cp1252_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("WTO_API_KEY", "test-key")
+    frame = TradeBalanceService(tmp_path, client=_WtoClient(_Cp1252Response))._download_api()
+    assert frame.loc[frame["economy_code"].eq("AAA"), "economy"].iloc[0] == "Economy – A"
+
+
+def test_trade_balance_missing_key_warning_is_explicit(tmp_path, monkeypatch):
+    monkeypatch.delenv("WTO_API_KEY", raising=False)
+    result = TradeBalanceService(tmp_path).load(force_refresh=True)
+    assert result["status"] == "unavailable"
+    assert "WTO_API_KEY" in result["warning"]
+
+
 def test_trade_balance_rejects_incomplete_world_coverage(tmp_path):
     frame = _wto_fixture(economies=149)
     with pytest.raises(ValueError, match="No completed year"):
@@ -102,15 +167,19 @@ def test_trade_balance_top_five_each_side_is_dynamic():
 
 def test_china_historical_seed_reconciles(tmp_path):
     service = ChinaExportGeographyService(tmp_path)
+    service._refresh_from_raw = lambda: False
     result = service.load()
     history = result["data"]
-    assert set(history["year"]) == {2000, 2010, 2020}
+    assert set(history["year"]) == {2000, 2010, 2020, 2025}
+    assert result["status"] == "fallback"
+    assert result["metadata"]["latest_valid_year"] == 2025
+    assert result["metadata"]["latest_data_is_fallback"] is True
     assert list(history.loc[history["year"].eq(2000)].sort_values("region")["region"].sort_values()) == sorted(REGION_ORDER)
     for _, period in history.groupby("year"):
         assert period["share_pct"].sum() == pytest.approx(100.0, abs=0.05)
 
 
-def test_china_2025_seed_is_validation_only_and_matches_reference():
+def test_china_2025_seed_fallback_matches_reference():
     seed = pd.read_csv("data/china_export_regions_2000_2010_2020_2025_full.csv")
     expected = {
         "ASEAN Plus": 31.5, "EU": 14.8, "US": 11.1, "Americas ex US": 9.2,
@@ -119,6 +188,18 @@ def test_china_2025_seed_is_validation_only_and_matches_reference():
     actual = seed.loc[seed["Region"].ne("TOTAL")].set_index("Region")["2025 share %"]
     for region, reference in expected.items():
         assert actual[region] == pytest.approx(reference, abs=0.1)
+
+
+def test_china_historical_cache_migrates_to_2025_fallback(tmp_path):
+    service = ChinaExportGeographyService(tmp_path)
+    service.history_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({
+        "year": [2000], "region": ["US"], "exports_usd_bn": [1.0],
+        "share_pct": [1.0], "source": ["old cache"],
+    }).to_csv(service.history_path, index=False)
+    migrated = service._historical()
+    assert set(migrated["year"]) == {2000, 2010, 2020, 2025}
+    assert len(migrated.loc[migrated["year"].eq(2025)]) == len(REGION_ORDER)
 
 
 @pytest.mark.parametrize(
@@ -163,3 +244,18 @@ def test_gacc_cny_parser_reconciles_to_official_usd_total(tmp_path):
         source, source_name="gacc_country_2025.csv", annual_totals={2025: 3_771.9},
     )
     assert parsed["exports_usd_bn"].sum() == pytest.approx(3_771.9)
+
+
+def test_china_stacked_columns_use_all_table_periods(tmp_path, monkeypatch):
+    service = ChinaExportGeographyService(tmp_path)
+    history = service._historical()
+    captured = {}
+    monkeypatch.setattr("world_trade_tab.st.plotly_chart", lambda figure, **_: captured.setdefault("figure", figure))
+    monkeypatch.setattr("world_trade_tab.st.caption", lambda *_, **__: None)
+    _render_china_stacked_columns(history, 2025, 2025, "Share %")
+    figure = captured["figure"]
+    assert figure.layout.barmode == "stack"
+    assert len(figure.data) == len(REGION_ORDER)
+    assert list(figure.data[0].x) == ["2000", "2010", "2020", "2025"]
+    for column_index in range(4):
+        assert sum(float(trace.y[column_index]) for trace in figure.data) == pytest.approx(100.0, abs=0.05)

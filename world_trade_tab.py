@@ -11,6 +11,12 @@ import streamlit as st
 from world_trade import REGION_ORDER, TradeBalanceService, load_world_trade_module
 
 
+CHINA_REGION_COLORS = dict(zip(
+    REGION_ORDER,
+    ["#38bdf8", "#818cf8", "#f97316", "#f59e0b", "#a78bfa", "#ec4899", "#22c55e", "#94a3b8", "#14b8a6"],
+))
+
+
 @st.cache_data(show_spinner="Loading World Trade data…", ttl=180 * 24 * 60 * 60)
 def load_world_trade_snapshot(refresh_nonce: int = 0) -> dict[str, Any]:
     return load_world_trade_module(force_refresh=refresh_nonce > 0)
@@ -170,11 +176,12 @@ def _render_china_exports(result: dict[str, Any]) -> None:
     latest = metadata.get("latest_valid_year")
     status_labels = {
         "current": "Latest official GACC data", "cached": "Cached valid data",
-        "historical_only": "Historical imported data", "unavailable": "Unavailable",
+        "fallback": "2025 historical fallback", "historical_only": "Historical imported data",
+        "unavailable": "Unavailable",
     }
     meta_left, meta_middle, meta_right = st.columns(3)
     meta_left.metric("Latest annual observation", int(latest) if latest else "Not loaded")
-    meta_middle.metric("Source", "GACC" if latest else "Historical import")
+    meta_middle.metric("Source", "Historical fallback" if result.get("status") == "fallback" else "GACC" if latest else "Historical import")
     meta_right.metric("Data status", status_labels.get(result.get("status"), str(result.get("status", "unknown"))))
     period_options = ["2000", "2010", "2020", "Previous Year"]
     metric_col, period_col = st.columns([1, 2])
@@ -195,11 +202,10 @@ def _render_china_exports(result: dict[str, Any]) -> None:
             value_col = "exports_usd_bn" if metric == "USD bn" else "share_pct"
             suffix = "" if metric == "USD bn" else "%"
             prefix = "$" if metric == "USD bn" else ""
-            color_map = dict(zip(REGION_ORDER, ["#38bdf8", "#818cf8", "#f97316", "#f59e0b", "#a78bfa", "#ec4899", "#22c55e", "#94a3b8", "#14b8a6"]))
             custom = selected[["exports_usd_bn", "share_pct", "source"]].to_numpy()
             fig = go.Figure(go.Bar(
                 y=selected["region"], x=selected[value_col], orientation="h",
-                marker_color=[color_map[str(region)] for region in selected["region"]],
+                marker_color=[CHINA_REGION_COLORS[str(region)] for region in selected["region"]],
                 text=selected[value_col], texttemplate=("$%{text:,.1f}" if metric == "USD bn" else "%{text:.1f}%"),
                 textposition="outside", cliponaxis=False,
                 customdata=custom,
@@ -218,14 +224,58 @@ def _render_china_exports(result: dict[str, Any]) -> None:
             )
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
 
+    _render_china_stacked_columns(frame, latest, selected_year, metric)
     _render_china_comparison_table(frame, latest, selected_year, metric)
     if result.get("warning"):
         st.warning(result["warning"])
-    source = metadata.get("source", "Historical research dataset; GACC Previous Year not loaded")
-    st.caption(
-        f"Source: {source} · Previous Year means the latest completed, validated GACC calendar year"
-        + (f" ({int(latest)})." if latest else ".")
+    source = metadata.get("source", "Historical research dataset")
+    if metadata.get("latest_data_is_fallback"):
+        st.caption(f"Source: {source} · GACC data is unavailable, so Previous Year uses the supplied 2025 fallback.")
+    else:
+        st.caption(
+            f"Source: {source} · Previous Year means the latest completed, validated GACC calendar year"
+            + (f" ({int(latest)})." if latest else ".")
+        )
+
+
+def _render_china_stacked_columns(
+    frame: pd.DataFrame, latest: int | None, selected_year: int | None, metric: str,
+) -> None:
+    years = [2000, 2010, 2020] + ([int(latest)] if latest and int(latest) not in {2000, 2010, 2020} else [])
+    if frame.empty or not years:
+        return
+    visible = frame.loc[pd.to_numeric(frame["year"], errors="coerce").isin(years)].copy()
+    value_column = "exports_usd_bn" if metric == "USD bn" else "share_pct"
+    values = visible.pivot_table(index="region", columns="year", values=value_column, aggfunc="first").reindex(REGION_ORDER)
+    fig = go.Figure()
+    for region in REGION_ORDER:
+        region_values = [values.at[region, year] if year in values.columns else np.nan for year in years]
+        fig.add_trace(go.Bar(
+            x=[str(year) for year in years], y=region_values, name=region,
+            marker_color=CHINA_REGION_COLORS[region],
+            hovertemplate=(
+                f"<b>{region}</b><br>Year: %{{x}}<br>Exports: $%{{y:,.1f}}bn<extra></extra>"
+                if metric == "USD bn"
+                else f"<b>{region}</b><br>Year: %{{x}}<br>Share: %{{y:.2f}}%<extra></extra>"
+            ),
+        ))
+    yaxis: dict[str, Any] = {
+        "title": metric, "gridcolor": "#293241",
+        "ticksuffix": "%" if metric == "Share %" else "",
+        "tickprefix": "$" if metric == "USD bn" else "",
+    }
+    if metric == "Share %":
+        yaxis["range"] = [0, 105]
+    fig.update_layout(
+        title={"text": "China Export Geography | Historical Comparison", "x": 0.5},
+        barmode="stack", height=540, margin={"l": 58, "r": 25, "t": 58, "b": 90},
+        xaxis={"title": None, "type": "category"}, yaxis=yaxis,
+        legend={"orientation": "h", "yanchor": "top", "y": -0.12, "xanchor": "center", "x": 0.5},
+        hovermode="x unified",
     )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+    if selected_year in years:
+        st.caption(f"Selected period: {selected_year}. The stacked columns use the same values as the comparison table below.")
 
 
 def _render_china_comparison_table(frame: pd.DataFrame, latest: int | None, selected_year: int | None, metric: str) -> None:

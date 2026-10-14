@@ -220,6 +220,9 @@ class TradeBalanceService:
 
     EXPORT_CODE = "ITS_MTV_AX"
     IMPORT_CODE = "ITS_MTV_AM"
+    TOTAL_MERCHANDISE_CODE = "TO"
+    WORLD_PARTNER_CODE = "000"
+    API_MAX_RECORDS = 1_000_000
     AGGREGATE_NAMES = {
         "world", "total", "all economies", "european union", "eu", "asean",
         "africa", "asia", "europe", "middle east", "north america", "south america",
@@ -246,6 +249,8 @@ class TradeBalanceService:
                 }))
             except Exception as exc:
                 errors.append(f"WTO API: {exc}")
+        else:
+            errors.append("WTO_API_KEY is not configured")
         for path in sorted(self.raw.glob("*"), key=lambda item: item.stat().st_mtime, reverse=True):
             if path.suffix.lower() not in {".csv", ".xls", ".xlsx"}:
                 continue
@@ -273,7 +278,7 @@ class TradeBalanceService:
             return result
         return {
             "data": pd.DataFrame(), "metadata": {}, "status": "unavailable",
-            "warning": "WTO trade balances are incomplete. Add an official CSV/XLSX to "
+            "warning": "WTO trade balances are incomplete. Configure WTO_API_KEY or add an official CSV/XLSX to "
                        f"{self.raw}." + ((" " + " | ".join(errors[-3:])) if errors else ""),
         }
 
@@ -285,19 +290,45 @@ class TradeBalanceService:
         own_client = self.client is None
         client = self.client or httpx.Client(timeout=60.0, follow_redirects=True)
         frames = []
+        last_completed_year = _utc_now().year - 1
         try:
             for code, field in ((self.EXPORT_CODE, "exports_usd_mn"), (self.IMPORT_CODE, "imports_usd_mn")):
                 response = client.get(
-                    f"{WTO_API_BASE_URL}/indicator",
-                    params={"i": code, "r": "all", "p": "000", "ps": "2000-2099", "pc": "A", "fmt": "json", "mode": "full", "lang": 1},
+                    f"{WTO_API_BASE_URL.rstrip('/')}/data",
+                    params={
+                        "i": code,
+                        "r": "all",
+                        "p": self.WORLD_PARTNER_CODE,
+                        "ps": f"2000-{last_completed_year}",
+                        "pc": self.TOTAL_MERCHANDISE_CODE,
+                        "fmt": "json",
+                        "mode": "full",
+                        "head": "M",
+                        "lang": 1,
+                        "meta": "false",
+                        "off": 0,
+                        "max": self.API_MAX_RECORDS,
+                    },
                     headers={"Ocp-Apim-Subscription-Key": key},
                 )
                 response.raise_for_status()
-                payload = response.json()
-                records = payload.get("Dataset") or payload.get("dataset") or payload.get("data") or payload
+                try:
+                    payload = response.json()
+                except UnicodeDecodeError:
+                    payload = json.loads(response.content.decode("cp1252"))
+                if isinstance(payload, list):
+                    records = payload
+                elif isinstance(payload, dict):
+                    records = payload.get("Dataset") or payload.get("dataset") or payload.get("data") or payload
+                else:
+                    raise ValueError(f"Unexpected WTO API payload type for {code}: {type(payload).__name__}")
                 part = pd.DataFrame(records)
                 if part.empty:
                     raise ValueError(f"No records for {code}")
+                if len(part) >= self.API_MAX_RECORDS:
+                    raise ValueError(
+                        f"WTO response for {code} reached the {self.API_MAX_RECORDS:,}-record API limit"
+                    )
                 year_col = _find_column(part.columns, ["Year", "PeriodCode", "period"])
                 economy_col = _find_column(part.columns, ["ReportingEconomy", "Reporter", "economy"])
                 code_col = _find_column(part.columns, ["ReportingEconomyCode", "ReporterCode", "iso3"])
@@ -472,22 +503,34 @@ class ChinaExportGeographyService:
         metadata = _read_json(self.metadata_path) if self.metadata_path.exists() else {}
         combined = historical.copy() if dynamic.empty else pd.concat([historical, dynamic], ignore_index=True)
         combined = combined.sort_values(["year", "region"]).drop_duplicates(["year", "region"], keep="last")
+        fallback_year = 2025 if 2025 in set(pd.to_numeric(historical["year"], errors="coerce")) else None
+        dynamic_latest = int(pd.to_numeric(dynamic["year"], errors="coerce").max()) if not dynamic.empty else None
+        use_fallback = fallback_year is not None and (dynamic_latest is None or dynamic_latest < fallback_year)
+        if use_fallback:
+            metadata = {
+                **metadata,
+                "latest_valid_year": fallback_year,
+                "source": "Supplied historical table (2025 fallback)",
+                "latest_data_is_fallback": True,
+            }
         return {
             "data": combined.reset_index(drop=True), "metadata": metadata,
-            "status": ("current" if refreshed else "cached") if not dynamic.empty else "historical_only",
+            "status": "fallback" if use_fallback else ("current" if refreshed else "cached"),
             "warning": warning,
         }
 
     def _historical(self) -> pd.DataFrame:
         if self.history_path.exists():
-            return pd.read_csv(self.history_path)
+            cached = pd.read_csv(self.history_path)
+            if {2000, 2010, 2020, 2025}.issubset(set(pd.to_numeric(cached["year"], errors="coerce"))):
+                return cached
         if not self.seed_path.exists():
             raise FileNotFoundError(f"Historical China export seed is missing: {self.seed_path}")
         source = pd.read_csv(self.seed_path)
         if "Region" not in source.columns or "TOTAL" not in set(source["Region"]):
             raise ValueError("Historical China export seed has an invalid schema")
         rows = []
-        for year in (2000, 2010, 2020):
+        for year in (2000, 2010, 2020, 2025):
             value_col = next((column for column in source.columns if str(year) in column and "US$bn" in column), None)
             share_col = next((column for column in source.columns if str(year) in column and "share" in column.lower()), None)
             if value_col is None or share_col is None:
@@ -496,7 +539,8 @@ class ChinaExportGeographyService:
                 row = source.loc[source["Region"].eq(region)]
                 if row.empty:
                     raise ValueError(f"Historical China export seed is missing {region}")
-                rows.append({"year": year, "region": region, "exports_usd_bn": float(row[value_col].iloc[0]), "share_pct": float(row[share_col].iloc[0]), "source": "Historical research dataset"})
+                source_label = "Supplied historical table (fallback)" if year == 2025 else "Historical research dataset"
+                rows.append({"year": year, "region": region, "exports_usd_bn": float(row[value_col].iloc[0]), "share_pct": float(row[share_col].iloc[0]), "source": source_label})
             total = float(source.loc[source["Region"].eq("TOTAL"), value_col].iloc[0])
             if abs(sum(item["exports_usd_bn"] for item in rows if item["year"] == year) - total) > max(0.1, total * 0.001):
                 raise ValueError(f"Historical China export values do not reconcile for {year}")
@@ -505,7 +549,7 @@ class ChinaExportGeographyService:
         _write_json(self.historical_metadata_path, {
             "provider": "Supplied historical research dataset", "source_document": self.seed_path.name,
             "checksum_sha256": hashlib.sha256(self.seed_path.read_bytes()).hexdigest(),
-            "observation_period": "2000, 2010, 2020", "unit": "USD billion and percent",
+            "observation_period": "2000, 2010, 2020, 2025", "unit": "USD billion and percent",
             "currency": "USD", "transformation": "Wide regional table normalized to region-year rows",
             "validation_status": "valid", "dataset_version": 1, "imported_at_utc": _utc_now().isoformat(),
         })
