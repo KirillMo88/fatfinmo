@@ -85,7 +85,7 @@ def test_sovereign_cds_figures_share_country_order_and_show_six_month_variation(
     assert list(level.layout.yaxis.categoryarray) == expected_order
     assert list(variation.layout.yaxis.categoryarray) == expected_order
     assert list(variation.data[0].x) == [0.0, -14.55, 0.05]
-    assert list(variation.data[0].marker.color) == ["#8b96a6", "#70927d", "#b77a62"]
+    assert list(variation.data[0].marker.color) == ["#94A3B8", "#22C55E", "#EF4444"]
     assert variation.layout.yaxis.showticklabels is False
     assert variation.layout.xaxis.range[0] == pytest.approx(-variation.layout.xaxis.range[1])
 

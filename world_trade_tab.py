@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -29,13 +30,15 @@ def load_world_trade_snapshot(refresh_nonce: int = 0) -> dict[str, Any]:
     return load_world_trade_module(force_refresh=refresh_nonce > 0)
 
 
-def render_world_trade_module(snapshot: dict[str, Any]) -> None:
+def render_world_trade_module(
+    snapshot: dict[str, Any], *, macro_snapshot: dict[str, Any] | None = None
+) -> None:
     st.header("World Trade")
     st.caption("Historical cycle diagnostics, merchandise trade balances, and China export geography")
 
     _render_global_trade(snapshot["global_trade"])
     st.divider()
-    _render_trade_balances(snapshot["trade_balances"])
+    _render_trade_balances(snapshot["trade_balances"], macro_snapshot=macro_snapshot)
     st.divider()
     _render_china_exports(snapshot["china_exports"])
 
@@ -127,14 +130,32 @@ def _render_global_trade(result: dict[str, Any]) -> None:
     )
 
 
-def _render_trade_balances(result: dict[str, Any]) -> None:
-    st.subheader("Top 5 Net Exporting and Net Importing Countries")
+def _render_trade_balances(
+    result: dict[str, Any], *, macro_snapshot: dict[str, Any] | None = None
+) -> None:
+    st.subheader("Top 5 External Balances by Country")
+    metric_col, period_col = st.columns([1, 2])
+    with metric_col:
+        balance_metric = st.segmented_control(
+            "Balance metric",
+            ["Trade Balance", "Current Account Balance"],
+            default="Trade Balance",
+            key="world_external_balance_metric",
+        )
+    with period_col:
+        comparison = st.segmented_control(
+            "Period", ["Previous Year", "10 Years Ago"], default="Previous Year",
+            key="world_trade_balance_period",
+        )
+    balance_metric = balance_metric or "Trade Balance"
+    comparison = comparison or "Previous Year"
+    if balance_metric == "Current Account Balance":
+        _render_current_account_balances(macro_snapshot, comparison)
+        return
+
     st.caption("Individual WTO reporting economies only; economic groups and regional aggregates are excluded.")
     metadata = result.get("metadata", {})
     frame = result.get("data", pd.DataFrame()).copy()
-    comparison = st.segmented_control(
-        "Period", ["Previous Year", "10 Years Ago"], default="Previous Year", key="world_trade_balance_period",
-    )
     if frame.empty or not metadata.get("latest_valid_year"):
         st.info("Data incomplete: no completed year has passed the WTO 150-economy and 95% coverage checks.")
         if result.get("warning"):
@@ -176,6 +197,122 @@ def _render_trade_balances(result: dict[str, Any]) -> None:
     )
     if result.get("warning"):
         st.warning(result["warning"])
+
+
+def _render_current_account_balances(
+    macro_snapshot: dict[str, Any] | None, comparison: str
+) -> None:
+    frame, metadata = _build_current_account_balance_data(macro_snapshot)
+    if frame.empty or not metadata.get("latest_valid_year"):
+        st.info("Current-account data is unavailable until the IMF WEO snapshot used by Country Macro Trajectory is loaded.")
+        return
+    year = int(
+        metadata["latest_valid_year"]
+        if comparison == "Previous Year"
+        else metadata["ten_year_comparison_year"]
+    )
+    top = _top_current_account_balances(frame, year)
+    if top.empty:
+        st.info(f"No comparable IMF WEO current-account records are available for {year}.")
+        return
+    values = top["current_account_usd_bn"]
+    colors = np.where(values.ge(0), "#3b82f6", "#f97316")
+    labels = [f"{value:+,.0f}" for value in values]
+    custom = top[["current_account_pct", "nominal_gdp_usd_bn"]].to_numpy(dtype=float)
+    fig = go.Figure(go.Bar(
+        x=values, y=top["economy"], orientation="h",
+        marker_color=colors, text=labels, textposition="outside", cliponaxis=False,
+        customdata=custom,
+        hovertemplate=(
+            "<b>%{y}</b><br>Current account: $%{x:,.1f}bn"
+            "<br>Current account / GDP: %{customdata[0]:.2f}%"
+            "<br>Nominal GDP: $%{customdata[1]:,.1f}bn"
+            f"<br>Year: {year}<br>Source: IMF WEO<extra></extra>"
+        ),
+    ))
+    fig.add_vline(x=0, line={"color": "#94a3b8", "width": 1.4})
+    max_abs = max(float(values.abs().max()), 1.0)
+    fig.update_layout(
+        title={"text": f"Current account balance, USD bn | {year}", "x": 0.5},
+        height=520, margin={"l": 110, "r": 80, "t": 52, "b": 48}, showlegend=False,
+        xaxis={"title": "USD billions", "range": [-max_abs * 1.25, max_abs * 1.25], "gridcolor": "#293241"},
+        yaxis={"title": None},
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+    st.caption(
+        f"Source: IMF World Economic Outlook, BCA_NGDPD and NGDPD · "
+        f"WEO vintage: {metadata.get('weo_vintage', 'unknown')} · "
+        f"Countries: {int(top.attrs.get('available_countries', frame.loc[frame['year'].eq(year), 'iso3'].nunique()))} · "
+        "Current account USD bn = current account (% GDP) × nominal GDP. "
+        "Universe matches the countries available in Country Macro Trajectory."
+    )
+
+
+def _build_current_account_balance_data(
+    macro_snapshot: dict[str, Any] | None, *, completed_year: int | None = None
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    empty = pd.DataFrame(columns=[
+        "year", "iso3", "economy", "current_account_pct",
+        "nominal_gdp_usd_bn", "current_account_usd_bn",
+    ])
+    if not macro_snapshot:
+        return empty, {}
+    history = macro_snapshot.get("history", pd.DataFrame()).copy()
+    required = {"year", "iso3", "country_name", "current_account_pct", "nominal_gdp_usd_bn"}
+    if history.empty or not required.issubset(history.columns):
+        return empty, {}
+    if "is_provisional" in history:
+        history = history.loc[~history["is_provisional"].fillna(False)].copy()
+    history["year"] = pd.to_numeric(history["year"], errors="coerce")
+    cutoff = int(completed_year if completed_year is not None else datetime.now(timezone.utc).year - 1)
+    history = history.loc[history["year"].le(cutoff)].copy()
+    history["current_account_pct"] = pd.to_numeric(history["current_account_pct"], errors="coerce")
+    history["nominal_gdp_usd_bn"] = pd.to_numeric(history["nominal_gdp_usd_bn"], errors="coerce")
+    history = history.dropna(subset=[
+        "year", "iso3", "country_name", "current_account_pct", "nominal_gdp_usd_bn",
+    ])
+    history = history.drop_duplicates(["year", "iso3"], keep="last")
+    history["current_account_usd_bn"] = (
+        history["nominal_gdp_usd_bn"] * history["current_account_pct"] / 100.0
+    )
+    history = history.rename(columns={"country_name": "economy"})
+    output = history[[
+        "year", "iso3", "economy", "current_account_pct",
+        "nominal_gdp_usd_bn", "current_account_usd_bn",
+    ]].reset_index(drop=True)
+    valid_years = sorted(output["year"].astype(int).unique())
+    if not valid_years:
+        return empty, {}
+    latest_year = max(valid_years)
+    ten_year_target = latest_year - 10
+    ten_year = ten_year_target if ten_year_target in valid_years else max(
+        (year for year in valid_years if year <= ten_year_target), default=min(valid_years)
+    )
+    source_metadata = macro_snapshot.get("metadata", {})
+    metadata = {
+        "latest_valid_year": latest_year,
+        "ten_year_comparison_year": int(ten_year),
+        "weo_vintage": source_metadata.get("weo_vintage", "unknown"),
+    }
+    return output, metadata
+
+
+def _top_current_account_balances(frame: pd.DataFrame, year: int) -> pd.DataFrame:
+    selected = frame.loc[pd.to_numeric(frame["year"], errors="coerce").eq(year)].copy()
+    selected["current_account_usd_bn"] = pd.to_numeric(
+        selected["current_account_usd_bn"], errors="coerce"
+    )
+    positive = selected.loc[selected["current_account_usd_bn"].gt(0)].nlargest(
+        5, "current_account_usd_bn"
+    )
+    negative = selected.loc[selected["current_account_usd_bn"].lt(0)].nsmallest(
+        5, "current_account_usd_bn"
+    )
+    result = pd.concat([positive, negative]).sort_values(
+        "current_account_usd_bn", ascending=True
+    ).reset_index(drop=True)
+    result.attrs["available_countries"] = int(selected["iso3"].nunique())
+    return result
 
 
 def _render_china_exports(result: dict[str, Any]) -> None:

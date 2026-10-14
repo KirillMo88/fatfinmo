@@ -54,7 +54,11 @@ def render_world_gdp_module(snapshot: dict[str, Any]) -> None:
 
     reference_year = int(metadata.get("reference_year") or WorldGDPService.latest_common_year(frame))
     table = WorldGDPService.build_top10_table(frame, reference_year=reference_year)
-    _render_top10_table(table, reference_year)
+    table_col, share_change_col = st.columns([1.2, 1], gap="medium")
+    with table_col:
+        _render_top10_table(table, reference_year)
+    with share_change_col:
+        _render_top10_share_change(frame, table, reference_year)
     st.divider()
     _render_world_gdp_history(frame, reference_year)
 
@@ -121,6 +125,98 @@ def _top10_display_table(table: pd.DataFrame) -> pd.DataFrame:
         "GDP PPP 10Y Change",
         "GDP per capita 10Y Change",
     ]]
+
+
+def _render_top10_share_change(
+    frame: pd.DataFrame, table: pd.DataFrame, reference_year: int
+) -> None:
+    st.subheader("20Y Change in World GDP Share")
+    change = _top10_world_share_change(frame, table, reference_year)
+    if change.empty:
+        st.info(f"A comparable 20-year world-share history is unavailable for {reference_year}.")
+        return
+    fig = _build_top10_share_change_figure(change, reference_year)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
+
+
+def _top10_world_share_change(
+    frame: pd.DataFrame, table: pd.DataFrame, reference_year: int
+) -> pd.DataFrame:
+    base_year = int(reference_year) - 20
+    data = frame.copy()
+    data["year"] = pd.to_numeric(data["year"], errors="coerce")
+    data["nominal_gdp_usd"] = pd.to_numeric(data["nominal_gdp_usd"], errors="coerce")
+    world = (
+        data.loc[data["iso3"].eq("WLD") & data["year"].isin([base_year, reference_year])]
+        .dropna(subset=["nominal_gdp_usd"])
+        .drop_duplicates("year", keep="last")
+        .set_index("year")["nominal_gdp_usd"]
+    )
+    if base_year not in world or reference_year not in world:
+        return pd.DataFrame()
+    top_codes = table[["iso3", "country_name"]].drop_duplicates("iso3")
+    observations = (
+        data.loc[
+            data["iso3"].isin(top_codes["iso3"])
+            & data["year"].isin([base_year, reference_year]),
+            ["iso3", "year", "nominal_gdp_usd"],
+        ]
+        .drop_duplicates(["iso3", "year"], keep="last")
+        .pivot(index="iso3", columns="year", values="nominal_gdp_usd")
+    )
+    if base_year not in observations or reference_year not in observations:
+        return pd.DataFrame()
+    result = top_codes.set_index("iso3").join(observations, how="left").reset_index()
+    result["base_share_pct"] = result[base_year] / float(world.loc[base_year]) * 100.0
+    result["current_share_pct"] = result[reference_year] / float(world.loc[reference_year]) * 100.0
+    result["share_change_pp"] = result["current_share_pct"] - result["base_share_pct"]
+    return (
+        result.dropna(subset=["base_share_pct", "current_share_pct", "share_change_pp"])
+        .sort_values("share_change_pp", ascending=True)
+        .reset_index(drop=True)
+    )
+
+
+def _build_top10_share_change_figure(change: pd.DataFrame, reference_year: int) -> go.Figure:
+    base_year = int(reference_year) - 20
+    values = change["share_change_pp"]
+    colors = np.where(values.ge(0), "#3B82F6", "#F97316")
+    labels = [f"{value:+.2f} pp" for value in values]
+    custom = change[["base_share_pct", "current_share_pct"]].to_numpy(dtype=float)
+    fig = go.Figure(go.Bar(
+        x=values,
+        y=change["country_name"],
+        orientation="h",
+        marker_color=colors,
+        text=labels,
+        textposition="outside",
+        cliponaxis=False,
+        customdata=custom,
+        hovertemplate=(
+            "<b>%{y}</b>"
+            f"<br>{base_year} share: %{{customdata[0]:.2f}}%"
+            f"<br>{reference_year} share: %{{customdata[1]:.2f}}%"
+            "<br>20Y change: %{x:+.2f} pp"
+            "<br>Source: World Bank WDI<extra></extra>"
+        ),
+    ))
+    fig.add_vline(x=0, line={"color": "#94A3B8", "width": 1.2})
+    max_abs = max(float(values.abs().max()), 0.1)
+    fig.update_layout(
+        title={"text": f"Share of world nominal GDP, pp | {base_year}–{reference_year}", "x": 0.5},
+        height=425,
+        margin={"l": 105, "r": 75, "t": 52, "b": 48},
+        showlegend=False,
+        hovermode="closest",
+        xaxis={
+            "title": "Percentage-point change",
+            "range": [-max_abs * 1.28, max_abs * 1.28],
+            "ticksuffix": " pp",
+            "gridcolor": "rgba(148,163,184,0.20)",
+        },
+        yaxis={"title": None},
+    )
+    return fig
 
 
 def _selected_rows(event: Any) -> list[int]:
@@ -384,7 +480,7 @@ def _render_per_capita_chart(
             "tickprefix": "" if relative else "$",
             "gridcolor": "rgba(148,163,184,0.20)",
         },
-        hovermode="x unified" if selected_iso3 is None else "closest",
+        hovermode="closest",
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "responsive": True})
 

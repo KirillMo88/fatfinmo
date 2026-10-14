@@ -32,13 +32,17 @@ def render_world_economy_tab() -> None:
     gdp_snapshot = load_world_gdp_snapshot(int(refresh))
     render_world_gdp_module(gdp_snapshot)
     st.divider()
-    trade_snapshot = load_world_trade_snapshot(int(refresh))
-    render_world_trade_module(trade_snapshot)
-    st.divider()
+    snapshot: dict[str, Any] | None = None
+    snapshot_error: Exception | None = None
     try:
         snapshot = _load_snapshot(int(refresh))
     except Exception as exc:
-        st.error(f"World Economy data is unavailable: {exc}")
+        snapshot_error = exc
+    trade_snapshot = load_world_trade_snapshot(int(refresh))
+    render_world_trade_module(trade_snapshot, macro_snapshot=snapshot)
+    st.divider()
+    if snapshot is None:
+        st.error(f"World Economy data is unavailable: {snapshot_error}")
         return
 
     table = snapshot["table"].copy()
@@ -582,8 +586,8 @@ def _build_sovereign_cds_figures(countries: pd.DataFrame) -> tuple[go.Figure, go
     )
 
     variation_colors = np.where(
-        data["cds_var_6m_pct"].gt(0), "#b77a62",
-        np.where(data["cds_var_6m_pct"].lt(0), "#70927d", "#8b96a6"),
+        data["cds_var_6m_pct"].gt(0), "#EF4444",
+        np.where(data["cds_var_6m_pct"].lt(0), "#22C55E", "#94A3B8"),
     )
     variation_text = data["cds_var_6m_pct"].map(
         lambda value: "N/A" if pd.isna(value) else f"{float(value):+.1f}%"
