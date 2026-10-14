@@ -283,22 +283,51 @@ def calculate_efficiency_history(pwt: pd.DataFrame) -> pd.DataFrame:
     return result.replace([np.inf, -np.inf], np.nan)
 
 
-def resolve_reference_year(pwt: pd.DataFrame, world_gdp: pd.DataFrame) -> int:
+def resolve_nominal_gdp_year(world_gdp: pd.DataFrame) -> int:
+    """Return the latest year with enough country observations to form a Top 10."""
+    gdp = world_gdp.copy()
+    gdp["year"] = pd.to_numeric(gdp["year"], errors="coerce")
+    gdp["nominal_gdp_usd"] = pd.to_numeric(gdp["nominal_gdp_usd"], errors="coerce")
+    if "is_country" not in gdp:
+        gdp["is_country"] = gdp["iso3"].ne("WLD")
+    valid = gdp.loc[gdp["is_country"]].dropna(subset=["year", "nominal_gdp_usd"])
+    coverage = valid.groupby("year")["iso3"].nunique()
+    candidates = coverage.loc[coverage.ge(10)]
+    if candidates.empty:
+        raise ValueError("No WDI year has enough nominal-GDP observations to form a Top 10")
+    return int(candidates.index.max())
+
+
+def resolve_reference_year(
+    pwt: pd.DataFrame,
+    world_gdp: pd.DataFrame,
+    *,
+    ranking_year: int | None = None,
+) -> int:
     efficiency = calculate_efficiency_history(pwt)
     gdp = world_gdp.copy()
     gdp["year"] = pd.to_numeric(gdp["year"], errors="coerce")
     gdp["nominal_gdp_usd"] = pd.to_numeric(gdp["nominal_gdp_usd"], errors="coerce")
     if "is_country" not in gdp:
         gdp["is_country"] = gdp["iso3"].ne("WLD")
+    gdp_year = int(ranking_year if ranking_year is not None else resolve_nominal_gdp_year(gdp))
+    ranked = (
+        gdp.loc[gdp["year"].eq(gdp_year) & gdp["is_country"]]
+        .dropna(subset=["nominal_gdp_usd"])
+        .nlargest(10, "nominal_gdp_usd")
+    )
+    if len(ranked) != 10:
+        raise ValueError(f"Nominal-GDP ranking year {gdp_year} does not contain ten economies")
+    ranked_codes = set(ranked["iso3"])
     complete = efficiency[list(PWT_METRIC_COLUMNS)].notna().all(axis=1)
     candidates = sorted(efficiency.loc[complete, "year"].unique(), reverse=True)
     for year in candidates:
-        annual_gdp = gdp.loc[gdp["year"].eq(year) & gdp["is_country"]].dropna(subset=["nominal_gdp_usd"])
-        top10 = annual_gdp.nlargest(10, "nominal_gdp_usd")
         available = set(efficiency.loc[complete & efficiency["year"].eq(year), "iso3"])
-        if len(top10) == 10 and set(top10["iso3"]).issubset(available):
+        if ranked_codes.issubset(available):
             return int(year)
-    raise ValueError("No synchronized PWT/WDI year has complete efficiency data for the nominal-GDP Top 10")
+    raise ValueError(
+        f"No PWT year has complete efficiency data for the nominal-GDP Top 10 from {gdp_year}"
+    )
 
 
 def eligible_countries(pwt: pd.DataFrame, reference_year: int) -> pd.DataFrame:
@@ -326,6 +355,7 @@ def build_efficiency_table(
     world_gdp: pd.DataFrame,
     *,
     reference_year: int,
+    ranking_year: int | None = None,
     selected_iso3: str | None = None,
 ) -> pd.DataFrame:
     history = calculate_efficiency_history(pwt)
@@ -335,8 +365,9 @@ def build_efficiency_table(
     gdp["nominal_gdp_usd"] = pd.to_numeric(gdp["nominal_gdp_usd"], errors="coerce")
     if "is_country" not in gdp:
         gdp["is_country"] = gdp["iso3"].ne("WLD")
+    gdp_year = int(ranking_year if ranking_year is not None else resolve_nominal_gdp_year(gdp))
     ranked = (
-        gdp.loc[gdp["year"].eq(int(reference_year)) & gdp["is_country"]]
+        gdp.loc[gdp["year"].eq(gdp_year) & gdp["is_country"]]
         .dropna(subset=["nominal_gdp_usd"])
         .sort_values("nominal_gdp_usd", ascending=False)
         .drop_duplicates("iso3", keep="first")
@@ -344,6 +375,7 @@ def build_efficiency_table(
     )
     ranked["global_gdp_rank"] = np.arange(1, len(ranked) + 1)
     top = ranked.head(10).merge(current, on="iso3", how="left", validate="one_to_one")
+    top["nominal_gdp_year"] = gdp_year
     top["position"] = top["global_gdp_rank"].map(lambda value: f"#{int(value)}")
     top["is_selected"] = top["iso3"].eq(str(selected_iso3 or "").upper())
 
@@ -360,6 +392,7 @@ def build_efficiency_table(
                     "global_gdp_rank": np.nan,
                 }])
             appended = selected_gdp.iloc[[0]].merge(selected_metric, on="iso3", how="left")
+            appended["nominal_gdp_year"] = gdp_year
             appended["position"] = "Selected"
             appended["is_selected"] = True
             top = pd.concat([top, appended], ignore_index=True, sort=False)

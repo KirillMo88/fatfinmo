@@ -9,6 +9,7 @@ from economic_efficiency import (
     build_efficiency_table,
     calculate_efficiency_history,
     eligible_countries,
+    resolve_nominal_gdp_year,
     resolve_reference_year,
 )
 
@@ -101,6 +102,29 @@ def test_reference_year_and_selector_require_complete_pwt_data() -> None:
     incomplete = _pwt()
     incomplete.loc[incomplete["countrycode"].eq("MEX") & incomplete["year"].eq(2023), "avh"] = np.nan
     assert "MEX" not in set(eligible_countries(incomplete, 2023)["iso3"])
+
+
+def test_latest_nominal_gdp_year_drives_ranking_with_older_pwt_metrics() -> None:
+    gdp = _gdp()
+    latest = gdp.loc[gdp["year"].eq(2023)].copy()
+    latest["year"] = 2025
+    latest.loc[latest["iso3"].eq("MEX"), "nominal_gdp_usd"] = 35_000e9
+    latest.loc[latest["iso3"].eq("CAN"), "nominal_gdp_usd"] = 10_000e9
+    gdp = pd.concat([gdp, latest], ignore_index=True)
+
+    ranking_year = resolve_nominal_gdp_year(gdp)
+    reference_year = resolve_reference_year(_pwt(), gdp, ranking_year=ranking_year)
+    table = build_efficiency_table(
+        _pwt(), _services(), gdp,
+        reference_year=reference_year,
+        ranking_year=ranking_year,
+    )
+
+    assert ranking_year == 2025
+    assert reference_year == 2023
+    assert "MEX" in set(table.head(10)["iso3"])
+    assert "CAN" not in set(table.head(10)["iso3"])
+    assert table["nominal_gdp_year"].eq(2025).all()
 
 
 def test_selected_country_is_appended_and_services_year_is_explicit() -> None:
