@@ -23,11 +23,29 @@ from ai_dashboard import (
     normalized_ticker_history,
     period_start_date,
 )
+from ramp_ai_index import RampAIIndexSnapshot, load_ramp_ai_index_snapshot
 
 
 AI_PRICE_TTL_SECONDS = 21600
 AI_FUNDAMENTALS_TTL_SECONDS = 43200
+RAMP_AI_INDEX_TTL_SECONDS = 3600
 AI_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
+RAMP_MAKER_COLORS = {
+    "Anthropic": "#F59E0B",
+    "OpenAI": "#10B981",
+    "xAI": "#F43F5E",
+    "Google": "#3B82F6",
+    "Cursor": "#A855F7",
+    "Moonshot": "#EC4899",
+    "DeepSeek": "#06B6D4",
+    "Z.ai": "#84CC16",
+    "Alibaba": "#F97316",
+    "Typesafe": "#EAB308",
+    "MiniMax": "#14B8A6",
+    "NVIDIA": "#22C55E",
+    "Meta": "#6366F1",
+    "Thinking Machines Lab": "#D946EF",
+}
 PERF_COLS = ["Perf 1D", "Perf 1W", "Perf 1M", "Perf 3M", "Perf 6M", "Perf 12M", "Perf 3Y", "Perf 5Y", "Perf 10Y"]
 MOMENTUM_PERFORMANCE_OPTIONS = {
     "1M": "Perf 1M",
@@ -86,6 +104,11 @@ def build_ai_dashboard_cached(price_nonce: int = 0, fundamentals_nonce: int = 0)
     prices = load_ai_prices_cached(price_nonce)
     fundamentals, errors = load_ai_fundamentals_cached(fundamentals_nonce)
     return calculate_ai_dashboard(prices=prices, fundamentals=fundamentals, fundamentals_errors=errors)
+
+
+@st.cache_data(show_spinner=False, ttl=RAMP_AI_INDEX_TTL_SECONDS)
+def load_ramp_ai_index_cached() -> RampAIIndexSnapshot:
+    return load_ramp_ai_index_snapshot()
 
 
 def render_ai_dashboard_tab() -> None:
@@ -296,39 +319,117 @@ def render_ai_companies(companies: pd.DataFrame) -> None:
 
 
 def render_ai_fundamentals(companies: pd.DataFrame, groups: pd.DataFrame) -> None:
-    mode = st.segmented_control("Mode", ["Group", "Company"], default="Group", key="ai_fundamentals_mode")
-    if mode == "Company":
-        display = apply_company_filters(companies, prefix="ai_fundamentals")
-        cols = [
-            "Group",
-            "Company",
-            "Ticker",
-            "Market Cap",
-            "Trailing P/E",
-            "Forward P/E",
-            "PEG Ratio",
-            "Price/Sales",
-            "Quarterly Revenue Growth YoY",
-            "Revenue Growth 3Y",
-            "Operating Margin TTM",
-            "Price vs ATH",
-            "ATH Date",
-        ]
-    else:
-        display = groups.copy()
-        cols = [
-            "Group",
-            "Total Market Cap",
-            "Median Trailing P/E",
-            "Median Forward P/E",
-            "Median PEG",
-            "Median Price/Sales",
-            "Median Quarterly Revenue Growth YoY",
-            "Median Revenue Growth 3Y",
-            "Median Operating Margin TTM",
-            "Median Price vs ATH",
-        ]
-    st.dataframe(format_table(display[cols].copy()), use_container_width=True, hide_index=True)
+    ramp_tab, market_tab = st.tabs(["Ramp AI Index", "Market Fundamentals"])
+    with ramp_tab:
+        render_ramp_ai_index_fundamentals(load_ramp_ai_index_cached())
+    with market_tab:
+        mode = st.segmented_control("Mode", ["Group", "Company"], default="Group", key="ai_fundamentals_mode")
+        if mode == "Company":
+            display = apply_company_filters(companies, prefix="ai_fundamentals")
+            cols = [
+                "Group", "Company", "Ticker", "Market Cap", "Trailing P/E", "Forward P/E", "PEG Ratio",
+                "Price/Sales", "Quarterly Revenue Growth YoY", "Revenue Growth 3Y", "Operating Margin TTM",
+                "Price vs ATH", "ATH Date",
+            ]
+        else:
+            display = groups.copy()
+            cols = [
+                "Group", "Total Market Cap", "Median Trailing P/E", "Median Forward P/E", "Median PEG",
+                "Median Price/Sales", "Median Quarterly Revenue Growth YoY", "Median Revenue Growth 3Y",
+                "Median Operating Margin TTM", "Median Price vs ATH",
+            ]
+        st.dataframe(format_table(display[cols].copy()), use_container_width=True, hide_index=True)
+
+
+def render_ramp_ai_index_fundamentals(snapshot: RampAIIndexSnapshot) -> None:
+    if snapshot.status == "UNAVAILABLE":
+        st.warning(f"Ramp AI Index data is unavailable. {snapshot.error or ''}")
+        return
+    monthly_as_of = snapshot.latest_dates.get("adoption_models", "N/A")
+    token_as_of = snapshot.latest_dates.get("token_volume_maker", "N/A")
+    status_label = "Historical fallback" if snapshot.status == "HISTORICAL_FALLBACK" else "Current public data"
+    st.caption(
+        f"Source: [Ramp AI Index](https://ramp.com/data/ai-index) · {status_label} · "
+        f"monthly data through {monthly_as_of} · token data through {token_as_of}"
+    )
+    data = snapshot.datasets
+    row1_left, row1_right = st.columns(2)
+    with row1_left:
+        st.plotly_chart(build_ramp_long_line_fig(data["adoption_models"], "Series", "Adoption rate (%)", "Adoption + Models", "Adoption rate (%)"), use_container_width=True, config=AI_PLOTLY_CONFIG)
+    with row1_right:
+        st.plotly_chart(build_ramp_long_line_fig(data["adoption_sectors"], "Sector", "Adoption rate (%)", "Adoption + Sectors", "Adoption rate (%)"), use_container_width=True, config=AI_PLOTLY_CONFIG)
+
+    row2_left, row2_right = st.columns(2)
+    with row2_left:
+        st.plotly_chart(build_ramp_wide_line_fig(data["spend_per_employee"], "AI spend by employee", "USD per employee per month", value_prefix="$"), use_container_width=True, config=AI_PLOTLY_CONFIG)
+    with row2_right:
+        spend_share = data["share_of_business_spend"][["Date", "AI share of business spend (%)"]].copy()
+        st.plotly_chart(build_ramp_wide_line_fig(spend_share, "AI share of business spend", "Share of business spend (%)", percent_points=True), use_container_width=True, config=AI_PLOTLY_CONFIG)
+
+    row3_left, row3_right = st.columns(2)
+    with row3_left:
+        st.plotly_chart(build_ramp_wide_line_fig(data["token_volume_maker"], "Token volume by maker", "Index (global peak = 100)", colors=RAMP_MAKER_COLORS), use_container_width=True, config=AI_PLOTLY_CONFIG)
+    with row3_right:
+        st.plotly_chart(build_ramp_share_area_fig(data["token_volume_maker_share"]), use_container_width=True, config=AI_PLOTLY_CONFIG)
+
+    row4_left, row4_right = st.columns(2)
+    with row4_left:
+        st.plotly_chart(build_ramp_wide_line_fig(data["token_spend_maker"], "Token spend by maker", "Index (global peak = 100)", colors=RAMP_MAKER_COLORS), use_container_width=True, config=AI_PLOTLY_CONFIG)
+    with row4_right:
+        st.plotly_chart(
+            build_ramp_wide_line_fig(data["token_price"], "Token price", "USD per million tokens", value_prefix="$", colors={"OpenAI & Anthropic": "#E5E7EB", "OpenAI": "#10B981", "Anthropic": "#F59E0B"}),
+            use_container_width=True,
+            config=AI_PLOTLY_CONFIG,
+        )
+
+
+def build_ramp_long_line_fig(frame: pd.DataFrame, series_col: str, value_col: str, title: str, y_title: str) -> go.Figure:
+    fig = go.Figure()
+    for name, block in frame.groupby(series_col, sort=False):
+        block = block.sort_values("Date")
+        color = RAMP_MAKER_COLORS.get(str(name))
+        line: dict[str, Any] = {"width": 2.0}
+        if color:
+            line["color"] = color
+        if str(name) == "Ramp Overall":
+            line.update({"color": "#F8FAFC", "width": 2.8})
+        fig.add_trace(go.Scatter(x=block["Date"], y=pd.to_numeric(block[value_col], errors="coerce"), mode="lines", name=str(name), line=line, hovertemplate=f"{name}<br>%{{x|%b %Y}}<br>{value_col}: %{{y:.2f}}<extra></extra>"))
+    fig.update_yaxes(title=y_title, ticksuffix="%")
+    return style_ramp_fig(fig, title)
+
+
+def build_ramp_wide_line_fig(frame: pd.DataFrame, title: str, y_title: str, value_prefix: str = "", percent_points: bool = False, colors: dict[str, str] | None = None) -> go.Figure:
+    fig = go.Figure()
+    for column in [column for column in frame.columns if column != "Date"]:
+        values = pd.to_numeric(frame[column], errors="coerce")
+        if values.notna().sum() == 0:
+            continue
+        color = (colors or {}).get(column)
+        hover_value = f"{value_prefix}%{{y:,.2f}}{'%' if percent_points else ''}"
+        fig.add_trace(go.Scatter(x=frame["Date"], y=values, mode="lines", name=column, line={"width": 2.1, **({"color": color} if color else {})}, connectgaps=False, hovertemplate=f"{column}<br>%{{x|%b %d, %Y}}<br>{hover_value}<extra></extra>"))
+    fig.update_yaxes(title=y_title, ticksuffix="%" if percent_points else "")
+    return style_ramp_fig(fig, title)
+
+
+def build_ramp_share_area_fig(frame: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    for column in [column for column in frame.columns if column != "Date"]:
+        values = pd.to_numeric(frame[column], errors="coerce")
+        if values.fillna(0.0).abs().max() == 0.0:
+            continue
+        line: dict[str, Any] = {"width": 0.7}
+        if RAMP_MAKER_COLORS.get(column):
+            line["color"] = RAMP_MAKER_COLORS[column]
+        fig.add_trace(go.Scatter(x=frame["Date"], y=values, mode="lines", name=column, stackgroup="one", groupnorm="fraction", line=line, hovertemplate=f"{column}<br>%{{x|%b %d, %Y}}<br>Share: %{{y:.2%}}<extra></extra>"))
+    fig.update_yaxes(title="Share of token volume", tickformat=".0%", range=[0, 1])
+    return style_ramp_fig(fig, "Token volume by maker share")
+
+
+def style_ramp_fig(fig: go.Figure, title: str) -> go.Figure:
+    fig = style_ai_fig(fig, title)
+    fig.update_layout(height=460, margin={"l": 58, "r": 28, "t": 58, "b": 125}, hovermode="closest", legend={"orientation": "h", "yanchor": "top", "y": -0.2, "xanchor": "left", "x": 0})
+    fig.update_xaxes(hoverformat="%Y-%m-%d")
+    return fig
 
 
 def render_ai_charts(data: AIDashboardData, companies: pd.DataFrame, groups: pd.DataFrame, benchmark: str) -> None:

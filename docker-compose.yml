@@ -38,6 +38,7 @@ services:
       - ./persistent/technical_outlook_simple_v3:/app/persistent/technical_outlook_simple_v3
       - ./persistent/commodity_cycle:/app/persistent/commodity_cycle
       - ./persistent/world_economy:/app/persistent/world_economy
+      - ./persistent/ramp_ai_index:/app/persistent/ramp_ai_index
 
   screener-jobs:
     build: .
@@ -59,6 +60,8 @@ services:
       SCREENER_REFRESH_RETRY_SECONDS: ${SCREENER_REFRESH_RETRY_SECONDS:-300}
       SCREENER_WEEKLY_POSITIONING_UTC: ${SCREENER_WEEKLY_POSITIONING_UTC:-12:30}
       SCREENER_WEEKLY_POSITIONING_WEEKDAY: ${SCREENER_WEEKLY_POSITIONING_WEEKDAY:-5}
+      SCREENER_RAMP_AI_INDEX_UTC: ${SCREENER_RAMP_AI_INDEX_UTC:-06:15}
+      SCREENER_RAMP_AI_INDEX_DAY: ${SCREENER_RAMP_AI_INDEX_DAY:-15}
       TRADINGVIEW_MCP_ENABLED: ${TRADINGVIEW_MCP_ENABLED:-1}
       TRADINGVIEW_MCP_REDIRECT_URI: ${TRADINGVIEW_MCP_REDIRECT_URI:-}
       TRADINGVIEW_MCP_STORAGE_DIR: /app/persistent/tradingview_mcp
@@ -81,6 +84,7 @@ services:
       - ./persistent/technical_outlook_simple_v3:/app/persistent/technical_outlook_simple_v3
       - ./persistent/commodity_cycle:/app/persistent/commodity_cycle
       - ./persistent/world_economy:/app/persistent/world_economy
+      - ./persistent/ramp_ai_index:/app/persistent/ramp_ai_index
 
   tester:
     build: .
