@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import os
 import subprocess
@@ -21,6 +22,7 @@ from rates_financial_conditions import SNAPSHOT_PATH as RATES_FC_SNAPSHOT_PATH, 
 from funding_conditions import WEEKLY_PATH as FUNDING_SNAPSHOT_PATH, refresh_snapshot as refresh_funding_snapshot
 from treasury_fiscal_regime import SNAPSHOT_PATH as TREASURY_FISCAL_SNAPSHOT_PATH, refresh_snapshot as refresh_treasury_fiscal_snapshot
 from treasury_funding_policy import refresh_snapshot as refresh_treasury_funding_policy_snapshot
+from ramp_ai_index import SNAPSHOT_PATH as RAMP_AI_INDEX_SNAPSHOT_PATH, refresh_ramp_ai_index_snapshot
 from technical_outlook_simple_v3.config import (
     CONFIG_VERSION as TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG_VERSION,
     CORE_ASSET_KEYS as TECHNICAL_OUTLOOK_SIMPLE_V3_CORE_ASSET_KEYS,
@@ -39,6 +41,8 @@ JOB_LOG_PATH = JOB_DIR / "refresh_jobs.jsonl"
 DEFAULT_NIGHTLY_UTC = "02:30"
 DEFAULT_FUNDING_LATE_RETRY_UTC = "05:00"
 DEFAULT_WEEKLY_POSITIONING_UTC = "12:30"
+DEFAULT_RAMP_AI_INDEX_UTC = "06:15"
+DEFAULT_RAMP_AI_INDEX_DAY = 15
 DEFAULT_MARKET_PERFORMANCE_INTERVAL_SECONDS = 600
 DEFAULT_SCHEDULER_POLL_SECONDS = 30
 DEFAULT_NIGHTLY_TIMEOUT_SECONDS = 7200
@@ -64,6 +68,8 @@ class ScheduledJob:
     daily_at: dt_time | None = None
     weekly_weekday: int | None = None
     weekly_at: dt_time | None = None
+    monthly_day: int | None = None
+    monthly_at: dt_time | None = None
     interval_seconds: int | None = None
     process: subprocess.Popen | None = None
     process_started_at: float | None = None
@@ -273,6 +279,32 @@ def run_treasury_fiscal_regime() -> None:
         raise
 
 
+def run_ramp_ai_index() -> None:
+    started = time.time()
+    try:
+        with job_lock("ramp_ai_index"):
+            snapshot = refresh_ramp_ai_index_snapshot()
+        rows_updated = sum(len(frame) for frame in snapshot.datasets.values())
+        log_job(
+            "ramp_ai_index",
+            started,
+            "CURRENT",
+            rows_updated,
+            source_status={"LatestDates": snapshot.latest_dates, "Source": snapshot.source},
+        )
+    except FileExistsError:
+        log_job("ramp_ai_index", started, "SKIPPED_LOCKED")
+    except Exception as exc:
+        log_job(
+            "ramp_ai_index",
+            started,
+            "FAILED",
+            source_status={"SnapshotRetained": RAMP_AI_INDEX_SNAPSHOT_PATH.exists()},
+            error=str(exc),
+        )
+        raise
+
+
 def parse_utc_hhmm(value: str, fallback: str) -> dt_time:
     raw = (value or fallback).strip()
     try:
@@ -297,6 +329,20 @@ def next_weekly_run(now: datetime, weekday: int, run_at: dt_time) -> datetime:
     candidate += timedelta(days=days_ahead)
     if candidate <= now:
         candidate += timedelta(days=7)
+    return candidate
+
+
+def next_monthly_run(now: datetime, day: int, run_at: dt_time) -> datetime:
+    year, month = now.year, now.month
+    safe_day = min(max(1, int(day)), calendar.monthrange(year, month)[1])
+    candidate = datetime(year, month, safe_day, run_at.hour, run_at.minute, tzinfo=timezone.utc)
+    if candidate <= now:
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+        safe_day = min(max(1, int(day)), calendar.monthrange(year, month)[1])
+        candidate = datetime(year, month, safe_day, run_at.hour, run_at.minute, tzinfo=timezone.utc)
     return candidate
 
 
@@ -342,6 +388,20 @@ def initial_weekly_due(now: datetime, weekday: int, run_at: dt_time, job_name: s
     return upcoming
 
 
+def initial_monthly_due(now: datetime, day: int, run_at: dt_time, job_name: str) -> datetime:
+    upcoming = next_monthly_run(now, day, run_at)
+    if upcoming.month == 1:
+        year, month = upcoming.year - 1, 12
+    else:
+        year, month = upcoming.year, upcoming.month - 1
+    safe_day = min(max(1, int(day)), calendar.monthrange(year, month)[1])
+    latest_due = datetime(year, month, safe_day, run_at.hour, run_at.minute, tzinfo=timezone.utc)
+    successful_at = last_successful_job_time(job_name)
+    if latest_due <= now and (successful_at is None or successful_at < latest_due):
+        return latest_due
+    return upcoming
+
+
 def _last_job_status_since(job_name: str, started_at: float) -> str | None:
     if not JOB_LOG_PATH.exists():
         return None
@@ -375,6 +435,10 @@ def _next_regular_run(job: ScheduledJob, now: datetime) -> datetime:
         if job.weekly_at is None:
             raise ValueError(f"Scheduled weekly job has no run time: {job.name}")
         return next_weekly_run(now, job.weekly_weekday, job.weekly_at)
+    if job.monthly_day is not None:
+        if job.monthly_at is None:
+            raise ValueError(f"Scheduled monthly job has no run time: {job.name}")
+        return next_monthly_run(now, job.monthly_day, job.monthly_at)
     if job.interval_seconds is not None:
         return now + timedelta(seconds=job.interval_seconds)
     return datetime.max.replace(tzinfo=timezone.utc)
@@ -488,6 +552,11 @@ def run_scheduler() -> None:
         os.getenv("SCREENER_WEEKLY_POSITIONING_UTC", DEFAULT_WEEKLY_POSITIONING_UTC),
         DEFAULT_WEEKLY_POSITIONING_UTC,
     )
+    ramp_ai_index_at = parse_utc_hhmm(
+        os.getenv("SCREENER_RAMP_AI_INDEX_UTC", DEFAULT_RAMP_AI_INDEX_UTC),
+        DEFAULT_RAMP_AI_INDEX_UTC,
+    )
+    ramp_ai_index_day = int(os.getenv("SCREENER_RAMP_AI_INDEX_DAY", str(DEFAULT_RAMP_AI_INDEX_DAY)))
     overlay_interval = int(os.getenv("SCREENER_MARKET_PERFORMANCE_INTERVAL_SECONDS", str(DEFAULT_MARKET_PERFORMANCE_INTERVAL_SECONDS)))
     poll_seconds = int(os.getenv("SCREENER_SCHEDULER_POLL_SECONDS", str(DEFAULT_SCHEDULER_POLL_SECONDS)))
     weekly_weekday = int(os.getenv("SCREENER_WEEKLY_POSITIONING_WEEKDAY", "5"))
@@ -503,6 +572,7 @@ def run_scheduler() -> None:
         ScheduledJob("rates_financial_conditions_late_retry", "rates-financial-conditions-late-retry", initial_daily_due(now, funding_retry_at, "rates_financial_conditions_late_retry"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=funding_retry_at),
         ScheduledJob("funding_conditions_late_retry", "funding-conditions-late-retry", initial_daily_due(now, funding_retry_at, "funding_conditions_late_retry"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=funding_retry_at),
         ScheduledJob("weekly_positioning", "weekly-positioning", initial_weekly_due(now, weekly_weekday, weekly_at, "weekly_positioning"), configured_timeout("SCREENER_WEEKLY_POSITIONING_TIMEOUT_SECONDS", DEFAULT_WEEKLY_POSITIONING_TIMEOUT_SECONDS), weekly_weekday=weekly_weekday, weekly_at=weekly_at),
+        ScheduledJob("ramp_ai_index", "ramp-ai-index", initial_monthly_due(now, ramp_ai_index_day, ramp_ai_index_at, "ramp_ai_index"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), monthly_day=ramp_ai_index_day, monthly_at=ramp_ai_index_at),
         ScheduledJob("market_performance_10m", "market-performance", now, configured_timeout("SCREENER_MARKET_PERFORMANCE_TIMEOUT_SECONDS", DEFAULT_MARKET_PERFORMANCE_TIMEOUT_SECONDS), interval_seconds=max(60, overlay_interval)),
     ]
     log_scheduler(
@@ -533,6 +603,8 @@ def run_scheduler() -> None:
             by_name["funding_conditions"].due_at = now
         if not TREASURY_FISCAL_SNAPSHOT_PATH.exists():
             by_name["treasury_fiscal_regime"].due_at = now
+        if not RAMP_AI_INDEX_SNAPSHOT_PATH.exists():
+            by_name["ramp_ai_index"].due_at = now
 
     while True:
         reap_scheduled_jobs(jobs, retry_seconds)
@@ -554,7 +626,7 @@ def run_scheduler() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screener refresh jobs")
-    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "liquidity-forecast", "rates-financial-conditions", "rates-financial-conditions-late-retry", "funding-conditions", "funding-conditions-late-retry", "treasury-fiscal-regime", "weekly-positioning", "scheduler"])
+    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "liquidity-forecast", "rates-financial-conditions", "rates-financial-conditions-late-retry", "funding-conditions", "funding-conditions-late-retry", "treasury-fiscal-regime", "weekly-positioning", "ramp-ai-index", "scheduler"])
     args = parser.parse_args()
     if args.job == "market-performance":
         update_market_performance_overlay()
@@ -574,6 +646,8 @@ def main() -> None:
         run_treasury_fiscal_regime()
     elif args.job == "weekly-positioning":
         run_weekly_positioning()
+    elif args.job == "ramp-ai-index":
+        run_ramp_ai_index()
     elif args.job == "scheduler":
         run_scheduler()
 
