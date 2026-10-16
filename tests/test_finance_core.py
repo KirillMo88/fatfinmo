@@ -7,6 +7,7 @@ import pandas as pd
 
 from finance_core import (
     _scenario_label,
+    average_true_range,
     analyze_ticker,
     crossover_dates,
     drop_incomplete_daily_bar,
@@ -28,6 +29,19 @@ def make_ohlcv(close: pd.Series) -> pd.DataFrame:
         },
         index=close.index,
     )
+
+
+def test_average_true_range_uses_intrabar_and_gap_ranges() -> None:
+    index = pd.date_range("2026-01-01", periods=4, freq="D")
+    high = pd.Series([11.0, 12.0, 15.0, 14.0], index=index)
+    low = pd.Series([9.0, 10.0, 12.0, 11.0], index=index)
+    close = pd.Series([10.0, 11.0, 14.0, 12.0], index=index)
+
+    result = average_true_range(high, low, close, period=3)
+
+    assert np.isnan(result.iloc[1])
+    assert result.iloc[2] == 8.0 / 3.0
+    assert result.iloc[3] == 3.0
 
 
 def test_incomplete_current_utc_bar_is_removed() -> None:
