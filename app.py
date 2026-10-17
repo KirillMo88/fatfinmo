@@ -5764,7 +5764,65 @@ PERFORMANCE_BUBBLE_X_OPTIONS = {
 }
 
 
-def _prepare_performance_sma200w_bubble_frame(df: pd.DataFrame, x_metric: str) -> pd.DataFrame:
+PERFORMANCE_BUBBLE_GROUP_MEMBERS = {
+    "AI": (
+        "AI Compute",
+        "AI Servers",
+        "Data Center Owners",
+        "Grid",
+        "Hyperscalers",
+        "Manufacturing",
+        "Memory",
+        "Networking",
+        "Power & Cooling",
+        "Power Producers",
+        "Semiconductor Equipment",
+    ),
+    "Agriculture": ("DBA",),
+    "Asia": ("ASEA", "EIDO", "EPHE", "EWJ", "EWM", "EWT", "EWY", "INDA", "KWEB", "MCHI", "THD", "TUR", "VNM"),
+    "Bonds EM": ("EMB",),
+    "Bonds HY": ("HYG", "JNK"),
+    "Bonds UST": ("SHY",),
+    "Bonds UST LT": ("TLT",),
+    "Bonds UST MT": ("IEF",),
+    "Crypto Altcoins": ("BITW", "ETH-USD", "SOL-USD"),
+    "Crypto BTC": ("BTC-USD",),
+    "DM": ("VEA",),
+    "EM": ("EEM",),
+    "EU": ("EWG", "EWI", "EWQ", "EWU"),
+    "Energy": ("DBE", "DBO", "FCG", "URNM"),
+    "Gold": ("GDX", "GDXJ", "GLD"),
+    "Green Energy": ("FAN", "TAN"),
+    "LATAM": ("ECH", "EPU", "EWW", "EWZ", "ILF"),
+    "Metals": ("COPX", "CPER", "DBB", "LIT", "REMX"),
+    "Pacific": ("EPP",),
+    "QQQ": ("QQQ",),
+    "Real Estate": ("VNQ", "VNQI"),
+    "SPY": ("SPY",),
+    "Silver": ("SIL", "SLV"),
+    "Tech": ("BLOK", "BUG", "DTCR", "SKYY", "SOXX", "TINY"),
+    "Transport": ("BOAT",),
+    "US Sectors Aggressive": ("XLC", "XLF", "XLI", "XLK", "XLY"),
+    "US Sectors Commodity": ("XLB", "XLE"),
+    "US Sectors Defensive": ("XLP", "XLU", "XLV"),
+}
+
+PERFORMANCE_BUBBLE_GROUP_BY_TICKER = {
+    ticker: group
+    for group, tickers in PERFORMANCE_BUBBLE_GROUP_MEMBERS.items()
+    for ticker in tickers
+}
+
+
+def _prepare_performance_sma200w_bubble_frame(
+    df: pd.DataFrame,
+    x_metric: str,
+    view_mode: str = "ETF",
+    include_negative: bool = False,
+) -> pd.DataFrame:
+    if view_mode not in {"ETF", "Group"}:
+        raise ValueError(f"Unsupported Performance vs SMA200W view mode: {view_mode}")
+
     required_cols = ["Ticker", x_metric, "SMA200W_Distance_Percentile", "Avg_Forward_Return_6M_%"]
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
@@ -5775,7 +5833,27 @@ def _prepare_performance_sma200w_bubble_frame(df: pd.DataFrame, x_metric: str) -
     d["SMA200W_Distance_Percentile"] = pd.to_numeric(d["SMA200W_Distance_Percentile"], errors="coerce")
     d["Avg_Forward_Return_6M_%"] = pd.to_numeric(d["Avg_Forward_Return_6M_%"], errors="coerce")
     d = d.dropna(subset=[x_metric, "SMA200W_Distance_Percentile", "Avg_Forward_Return_6M_%"])
-    d = d[d[x_metric] >= 0.0].copy()
+
+    if view_mode == "Group":
+        d["Group_2"] = d["Ticker"].map(PERFORMANCE_BUBBLE_GROUP_BY_TICKER)
+        d = d.dropna(subset=["Group_2"])
+        d = (
+            d.groupby("Group_2", as_index=False)
+            .agg(
+                **{
+                    x_metric: (x_metric, "median"),
+                    "SMA200W_Distance_Percentile": ("SMA200W_Distance_Percentile", "median"),
+                    "Avg_Forward_Return_6M_%": ("Avg_Forward_Return_6M_%", "median"),
+                    "Group_Size": ("Ticker", "size"),
+                }
+            )
+            .rename(columns={"Group_2": "Ticker"})
+        )
+    else:
+        d["Group_Size"] = 1
+
+    if not include_negative:
+        d = d[d[x_metric] >= 0.0].copy()
     if d.empty:
         return d
 
@@ -5791,23 +5869,72 @@ def _prepare_performance_sma200w_bubble_frame(df: pd.DataFrame, x_metric: str) -
     return d
 
 
+def _prepare_performance_gainers_losers_frame(
+    df: pd.DataFrame,
+    x_metric: str,
+    view_mode: str = "ETF",
+) -> pd.DataFrame:
+    d = _prepare_performance_sma200w_bubble_frame(
+        df,
+        x_metric,
+        view_mode=view_mode,
+        include_negative=True,
+    )
+    if d.empty:
+        return d
+
+    gainers = d[d["Selected_Performance"] > 0.0].nlargest(5, "Selected_Performance")
+    losers = d[d["Selected_Performance"] < 0.0].nsmallest(5, "Selected_Performance")
+    ranked = pd.concat([gainers, losers], ignore_index=True)
+    if ranked.empty:
+        return ranked
+
+    ranked["Performance_Direction"] = np.where(
+        ranked["Selected_Performance"] >= 0.0,
+        "Gainer",
+        "Loser",
+    )
+    return ranked.sort_values("Selected_Performance", ascending=False).reset_index(drop=True)
+
+
 def _render_performance_sma200w_bubble_chart(chart_df: pd.DataFrame) -> None:
     st.subheader("Performance vs SMA200W Percentile")
-    x_label = st.radio(
-        "X-axis metric",
-        options=list(PERFORMANCE_BUBBLE_X_OPTIONS.keys()),
-        index=1,
-        horizontal=True,
-        key="performance_sma200w_bubble_x_metric",
-    )
+    view_col, metric_col = st.columns([0.8, 2.2])
+    with view_col:
+        view_mode = st.radio(
+            "View",
+            options=["ETF", "Group"],
+            index=0,
+            horizontal=True,
+            key="performance_sma200w_bubble_view_mode",
+        )
+    with metric_col:
+        x_label = st.radio(
+            "X-axis metric",
+            options=list(PERFORMANCE_BUBBLE_X_OPTIONS.keys()),
+            index=1,
+            horizontal=True,
+            key="performance_sma200w_bubble_x_metric",
+        )
     x_metric = PERFORMANCE_BUBBLE_X_OPTIONS[x_label]
-    d = _prepare_performance_sma200w_bubble_frame(chart_df, x_metric)
+    d = _prepare_performance_sma200w_bubble_frame(chart_df, x_metric, view_mode=view_mode)
+    ranked = _prepare_performance_gainers_losers_frame(chart_df, x_metric, view_mode=view_mode)
     if d.empty:
-        st.info(f"No assets with non-negative {x_label} and complete SMA200W / forward return data.")
+        entity_label = "groups" if view_mode == "Group" else "assets"
+        st.info(f"No {entity_label} with non-negative {x_label} and complete SMA200W / forward return data.")
         return
 
     x_max = float(d["Selected_Performance"].max())
     x_domain_max = max(1.0, x_max * 1.12)
+
+    tooltip = [
+        alt.Tooltip("Ticker:N", title="Group" if view_mode == "Group" else "Asset / Ticker"),
+        alt.Tooltip("Selected_Performance:Q", title=f"{x_label} %", format="+.2f"),
+        alt.Tooltip("SMA200W_Percentile:Q", title="SMA200W Percentile", format=".0f"),
+        alt.Tooltip("Avg_Forward_Return_6M:Q", title="Avg Forward Return 6M %", format="+.2f"),
+    ]
+    if view_mode == "Group":
+        tooltip.append(alt.Tooltip("Group_Size:Q", title="ETFs used", format=".0f"))
 
     base = alt.Chart(d).encode(
         x=alt.X(
@@ -5820,24 +5947,19 @@ def _render_performance_sma200w_bubble_chart(chart_df: pd.DataFrame) -> None:
             scale=alt.Scale(domain=[100.0, 0.0]),
             axis=alt.Axis(title="SMA200W Percentile", format=".0f"),
         ),
-        tooltip=[
-            alt.Tooltip("Ticker:N", title="Asset / Ticker"),
-            alt.Tooltip("Selected_Performance:Q", title=f"{x_label} %", format="+.2f"),
-            alt.Tooltip("SMA200W_Percentile:Q", title="SMA200W Percentile", format=".0f"),
-            alt.Tooltip("Avg_Forward_Return_6M:Q", title="Avg Forward Return 6M %", format="+.2f"),
-        ],
+        tooltip=tooltip,
     )
 
     bubbles = base.mark_circle(opacity=0.72, stroke="#111827", strokeWidth=0.6).encode(
         color=alt.Color(
             "Forward_Return_Sign:N",
             scale=alt.Scale(domain=["Positive", "Negative"], range=["#22c55e", "#ef4444"]),
-            legend=alt.Legend(title="Bubble color", labelExpr="datum.label === 'Positive' ? 'Positive Avg Forward Return 6M' : 'Negative Avg Forward Return 6M'"),
+            legend=None,
         ),
         size=alt.Size(
             "Bubble_Size:Q",
             scale=alt.Scale(range=[80, 850], zero=True),
-            legend=alt.Legend(title="Bubble size: |Avg Forward Return 6M|"),
+            legend=None,
         ),
     )
     labels = base.mark_text(dx=9, dy=0, align="left", baseline="middle", fontSize=10, color="#e5e7eb").encode(
@@ -5845,12 +5967,67 @@ def _render_performance_sma200w_bubble_chart(chart_df: pd.DataFrame) -> None:
     )
 
     chart = (bubbles + labels).properties(height=520)
-    st.altair_chart(chart, use_container_width=True)
-    st.caption(
-        "Green = positive Avg Forward Return 6M, red = negative. "
-        "Larger bubble = larger absolute Avg Forward Return 6M. "
-        "Assets with negative selected performance are excluded."
-    )
+
+    main_col, ranking_col = st.columns([3, 1], gap="medium")
+    with main_col:
+        st.altair_chart(chart, use_container_width=True)
+        st.caption(
+            "Green = positive Avg Forward Return 6M, red = negative. "
+            "Larger bubble = larger absolute Avg Forward Return 6M. "
+            + ("Group values are medians across mapped ETFs with complete chart data. " if view_mode == "Group" else "")
+            + f"{'Groups' if view_mode == 'Group' else 'Assets'} with negative selected performance are excluded."
+        )
+
+    with ranking_col:
+        st.markdown("**Top 10 Gainers / Losers**")
+        if ranked.empty:
+            st.info(f"No positive or negative {x_label} observations.")
+        else:
+            performance_extent = max(float(ranked["Selected_Performance"].abs().max()), 1.0)
+            ranking_tooltip = [
+                alt.Tooltip("Ticker:N", title="Group" if view_mode == "Group" else "Asset / Ticker"),
+                alt.Tooltip("Selected_Performance:Q", title=f"{x_label} %", format="+.2f"),
+            ]
+            if view_mode == "Group":
+                ranking_tooltip.append(alt.Tooltip("Group_Size:Q", title="ETFs used", format=".0f"))
+
+            ranking_base = alt.Chart(ranked).encode(
+                x=alt.X(
+                    "Selected_Performance:Q",
+                    scale=alt.Scale(domain=[-performance_extent * 1.25, performance_extent * 1.25]),
+                    axis=alt.Axis(title=f"{x_label} %", format="+.0f"),
+                ),
+                y=alt.Y(
+                    "Ticker:N",
+                    sort=alt.SortField(field="Selected_Performance", order="descending"),
+                    axis=alt.Axis(title=None, labelLimit=140),
+                ),
+                tooltip=ranking_tooltip,
+            )
+            ranking_bars = ranking_base.mark_bar(size=18).encode(
+                color=alt.Color(
+                    "Performance_Direction:N",
+                    scale=alt.Scale(domain=["Gainer", "Loser"], range=["#3b82f6", "#f97316"]),
+                    legend=None,
+                )
+            )
+            positive_labels = (
+                ranking_base.transform_filter(alt.datum.Selected_Performance >= 0.0)
+                .mark_text(align="left", baseline="middle", dx=4, color="#e5e7eb", fontSize=10)
+                .encode(text=alt.Text("Selected_Performance:Q", format="+.1f"))
+            )
+            negative_labels = (
+                ranking_base.transform_filter(alt.datum.Selected_Performance < 0.0)
+                .mark_text(align="right", baseline="middle", dx=-4, color="#e5e7eb", fontSize=10)
+                .encode(text=alt.Text("Selected_Performance:Q", format="+.1f"))
+            )
+            zero_line = (
+                alt.Chart(pd.DataFrame({"Selected_Performance": [0.0]}))
+                .mark_rule(color="#9ca3af", strokeWidth=1)
+                .encode(x="Selected_Performance:Q")
+            )
+            ranking_chart = (zero_line + ranking_bars + positive_labels + negative_labels).properties(height=520)
+            st.altair_chart(ranking_chart, use_container_width=True)
 
 
 def _prepare_spy_weekly_regime_frame() -> pd.DataFrame:
