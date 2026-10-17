@@ -28,6 +28,37 @@ USD_KRW_TICKER = "KRW=X"
 KRW_QUOTED_TICKERS = {"000660.KS", "005930.KS", "006930.KS"}
 
 
+def average_true_range(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """Return a simple rolling ATR from aligned OHLC series."""
+    aligned = pd.concat(
+        [
+            pd.to_numeric(high, errors="coerce").rename("high"),
+            pd.to_numeric(low, errors="coerce").rename("low"),
+            pd.to_numeric(close, errors="coerce").rename("close"),
+        ],
+        axis=1,
+        join="inner",
+    ).dropna()
+    if aligned.empty:
+        return pd.Series(dtype="float64")
+    previous_close = aligned["close"].shift(1)
+    true_range = pd.concat(
+        [
+            (aligned["high"] - aligned["low"]).abs(),
+            (aligned["high"] - previous_close).abs(),
+            (aligned["low"] - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    window = max(1, int(period))
+    return true_range.rolling(window=window, min_periods=window).mean()
+
+
 def extract_ohlcv_frame(px: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if px is None or px.empty:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])

@@ -33,6 +33,7 @@ from alpha_engine import (
 )
 from finance_core import (
     USD_KRW_TICKER,
+    average_true_range,
     convert_krw_ohlcv_to_usd,
     download_completed_ohlcv,
     download_latest_ohlcv,
@@ -260,6 +261,7 @@ DISPLAY_COLUMNS = [
     "SMA50w_vs_SMA200w_Spread_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
     "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
     "Divergence_Bull_Count", "Divergence_Bear_Count",
+    "ATR_Daily_14", "ATR_Weekly_14",
 ]
 
 TABLE_HEADER_NAMES = {
@@ -323,6 +325,8 @@ TABLE_HEADER_NAMES = {
     "Div_6M_vs_RSI": "Div\nRSI",
     "Div_6M_vs_MACD": "Div\nMACD",
     "Div_6M_vs_ROC": "Div\nROC",
+    "ATR_Daily_14": "Daily ATR\n14",
+    "ATR_Weekly_14": "Weekly ATR\n14",
 }
 
 TABLE_PERMANENTLY_HIDDEN_COLUMNS = {
@@ -353,6 +357,7 @@ NUMERIC_COLUMNS = [
     "Absolute_SMA_Score", "Relative_SMA_Score", "SMA200d_Robust_Z_36M",
     "Regime_Dependent_SMAZ_Risk", "Perf12M_Extreme_Risk", "Base_Alpha",
     "SPY_vs_SMA40W_%", "SPY_Drawdown_52W_%", "SPY_Volatility_13W_%", "SPY_Volatility_Percentile",
+    "ATR_Daily_14", "ATR_Weekly_14",
 ]
 
 PERFORMANCE_COLUMNS = [
@@ -391,7 +396,7 @@ PERFORMANCE_REFERENCE_COLUMNS = [
 
 SNAPSHOT_DIR = Path(__file__).with_name("persistent") / "snapshots"
 JOB_STATUS_DIR = Path(__file__).with_name("persistent") / "job_status"
-SCREENER_SNAPSHOT_MODEL_VERSION = "screener-snapshot-v1"
+SCREENER_SNAPSHOT_MODEL_VERSION = "screener-snapshot-v2-atr"
 
 INVERSE_PERFORMANCE_COLUMNS = [
     "Perf_12M_Percentile",
@@ -1258,6 +1263,7 @@ def get_metrics(
         adx14, di_plus14, di_minus14 = compute_adx_dmi_wilder(high=high, low=low, close=close, period=14)
 
         cur_rsi = safe_last(rsi14)
+        daily_atr14 = safe_last(average_true_range(high, low, close, period=14))
         cur_adx14 = safe_last(adx14)
         cur_di_plus14 = safe_last(di_plus14)
         cur_di_minus14 = safe_last(di_minus14)
@@ -1301,6 +1307,9 @@ def get_metrics(
         golden_cross_w1 = False
         death_cross_w1 = False
         wk_close = pd.to_numeric(wk_ohlcv["Close"], errors="coerce").dropna()
+        wk_high = pd.to_numeric(wk_ohlcv["High"], errors="coerce")
+        wk_low = pd.to_numeric(wk_ohlcv["Low"], errors="coerce")
+        weekly_atr14 = safe_last(average_true_range(wk_high, wk_low, wk_close, period=14))
         rsi14w = RSIIndicator(close=wk_close, window=14).rsi() if len(wk_close) >= 14 else pd.Series(dtype="float64")
         cur_rsi14w = safe_last(rsi14w)
         (
@@ -1338,7 +1347,8 @@ def get_metrics(
             cur_adx14, cur_di_plus14, cur_di_minus14, cur_di_plus14_delta2, cur_di_minus14_delta2,
             bb_position, bb_mid, bb_upper, bb_lower, bb_step_up, bb_step_down, wk_close_last,
             int(golden_cross_d1), int(death_cross_d1), int(golden_cross_w1), int(death_cross_w1),
-            div_rsi, div_macd, div_roc
+            div_rsi, div_macd, div_roc,
+            daily_atr14, weekly_atr14,
         ]
     except Exception:
         return None
@@ -1488,6 +1498,7 @@ def compute_slow_metrics_table(
         "BB_Position", "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last",
         "GoldenCross_D1", "DeathCross_D1", "GoldenCross_W1", "DeathCross_W1",
         "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
+        "ATR_Daily_14", "ATR_Weekly_14",
     ]
     rows = []
     performance_benchmark_close = None
@@ -7277,6 +7288,8 @@ def main():
             "RSI_14W": 48,
             "Divergence_Bull_Count": 54,
             "Divergence_Bear_Count": 54,
+            "ATR_Daily_14": 90,
+            "ATR_Weekly_14": 90,
         }
         hidden_labels = {
             table_col_labels[col]
@@ -7309,6 +7322,21 @@ def main():
             col_label = table_col_labels.get(col, col.replace("_", " "))
             if col_label in table_display_df.columns:
                 gb.configure_column(col_label, valueFormatter=number_formatter, type=["numericColumn"])
+
+        atr_number_formatter = JsCode(
+            """
+            function(params) {
+                if (params.value === null || params.value === undefined || isNaN(params.value)) {
+                    return "NaN";
+                }
+                return Number(params.value).toFixed(2);
+            }
+            """
+        )
+        for col in ("ATR_Daily_14", "ATR_Weekly_14"):
+            col_label = table_col_labels.get(col, col.replace("_", " "))
+            if col_label in table_display_df.columns:
+                gb.configure_column(col_label, valueFormatter=atr_number_formatter, type=["numericColumn"])
 
         perf_color_styles = {}
         for col in PERFORMANCE_COLUMNS:

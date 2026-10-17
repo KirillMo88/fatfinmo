@@ -531,6 +531,8 @@ def latest_screener_snapshot_time() -> datetime | None:
     for meta_path in app.SNAPSHOT_DIR.glob("screener_snapshot_latest_*.json"):
         try:
             payload = json.loads(meta_path.read_text(encoding="utf-8"))
+            if payload.get("ModelVersion") != app.SCREENER_SNAPSHOT_MODEL_VERSION:
+                continue
             calculated_at = pd.to_datetime(payload.get("CalculatedAt"), utc=True)
             if pd.isna(calculated_at):
                 continue
