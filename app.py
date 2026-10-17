@@ -5999,8 +5999,8 @@ def _render_performance_sma200w_bubble_chart(chart_df: pd.DataFrame) -> None:
                 ),
                 y=alt.Y(
                     "Ticker:N",
-                    sort=alt.SortField(field="Selected_Performance", order="descending"),
-                    axis=alt.Axis(title=None, labelLimit=140),
+                    sort=ranked["Ticker"].tolist(),
+                    axis=None,
                 ),
                 tooltip=ranking_tooltip,
             )
@@ -6010,6 +6010,16 @@ def _render_performance_sma200w_bubble_chart(chart_df: pd.DataFrame) -> None:
                     scale=alt.Scale(domain=["Gainer", "Loser"], range=["#3b82f6", "#f97316"]),
                     legend=None,
                 )
+            )
+            positive_name_labels = (
+                ranking_base.transform_filter(alt.datum.Selected_Performance >= 0.0)
+                .mark_text(align="right", baseline="middle", dx=-6, color="#e5e7eb", fontSize=10, fontWeight="bold")
+                .encode(x=alt.datum(0.0), text="Ticker:N")
+            )
+            negative_name_labels = (
+                ranking_base.transform_filter(alt.datum.Selected_Performance < 0.0)
+                .mark_text(align="left", baseline="middle", dx=6, color="#e5e7eb", fontSize=10, fontWeight="bold")
+                .encode(x=alt.datum(0.0), text="Ticker:N")
             )
             positive_labels = (
                 ranking_base.transform_filter(alt.datum.Selected_Performance >= 0.0)
@@ -6026,7 +6036,14 @@ def _render_performance_sma200w_bubble_chart(chart_df: pd.DataFrame) -> None:
                 .mark_rule(color="#9ca3af", strokeWidth=1)
                 .encode(x="Selected_Performance:Q")
             )
-            ranking_chart = (zero_line + ranking_bars + positive_labels + negative_labels).properties(height=520)
+            ranking_chart = (
+                zero_line
+                + ranking_bars
+                + positive_name_labels
+                + negative_name_labels
+                + positive_labels
+                + negative_labels
+            ).properties(height=520)
             st.altair_chart(ranking_chart, use_container_width=True)
 
 
