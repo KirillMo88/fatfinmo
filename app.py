@@ -1184,6 +1184,64 @@ def lightweight_current_price(ticker: str, refresh_bucket: int = 0) -> float:
     return np.nan
 
 
+def bulk_current_prices(tickers: list[str], refresh_bucket: int = 0) -> dict[str, float]:
+    _ = refresh_bucket
+    unique_tickers = [
+        ticker
+        for ticker in dict.fromkeys(str(ticker) for ticker in tickers)
+        if ticker and not is_ai_group_label(ticker)
+    ]
+    if not unique_tickers:
+        return {}
+
+    download_tickers = list(unique_tickers)
+    needs_krw_fx = any(is_krw_quoted_ticker(ticker) for ticker in unique_tickers)
+    if needs_krw_fx and USD_KRW_TICKER not in download_tickers:
+        download_tickers.append(USD_KRW_TICKER)
+
+    def download_batch(batch: list[str]) -> pd.DataFrame:
+        if not batch:
+            return pd.DataFrame()
+        try:
+            return yf.download(
+                batch,
+                period="5d",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                group_by="ticker",
+                threads=True,
+                timeout=10,
+            )
+        except Exception:
+            return pd.DataFrame()
+
+    def extract_prices(raw: pd.DataFrame, batch: list[str], fx_frame: pd.DataFrame) -> dict[str, float]:
+        prices: dict[str, float] = {}
+        for ticker in batch:
+            frame = extract_ohlcv_frame(raw, ticker)
+            if is_krw_quoted_ticker(ticker) and not fx_frame.empty:
+                frame = convert_krw_ohlcv_to_usd(frame, fx_frame)
+            close = pd.to_numeric(frame.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
+            if not close.empty:
+                prices[ticker] = float(close.iloc[-1])
+        return prices
+
+    raw = download_batch(download_tickers)
+    fx_frame = extract_ohlcv_frame(raw, USD_KRW_TICKER) if needs_krw_fx else pd.DataFrame()
+    prices = extract_prices(raw, unique_tickers, fx_frame)
+
+    missing = [ticker for ticker in unique_tickers if ticker not in prices]
+    if missing:
+        retry_tickers = list(missing)
+        if needs_krw_fx and USD_KRW_TICKER not in retry_tickers:
+            retry_tickers.append(USD_KRW_TICKER)
+        retry_raw = download_batch(retry_tickers)
+        retry_fx = extract_ohlcv_frame(retry_raw, USD_KRW_TICKER) if needs_krw_fx else pd.DataFrame()
+        prices.update(extract_prices(retry_raw, missing, retry_fx if not retry_fx.empty else fx_frame))
+    return prices
+
+
 def overlay_performance_from_refs(row: pd.Series, current_price: float) -> dict[str, float]:
     out = {"CurrentPrice": current_price}
     mapping = {
@@ -1415,12 +1473,13 @@ def compute_performance_table(
 
     columns = ["Group", "Subgroup", "Ticker", *FAST_PERFORMANCE_COLUMNS]
     rows = []
+    price_tickers = slow_df.get("Ticker", pd.Series(dtype="object")).tolist()
+    if performance_benchmark_ticker:
+        price_tickers.append(performance_benchmark_ticker)
+    latest_prices = bulk_current_prices(price_tickers, refresh_bucket)
     benchmark_current_price = np.nan
     if performance_benchmark_ticker:
-        benchmark_current_price = lightweight_current_price(
-            performance_benchmark_ticker,
-            refresh_bucket=refresh_bucket,
-        )
+        benchmark_current_price = latest_prices.get(performance_benchmark_ticker, np.nan)
         if not np.isfinite(benchmark_current_price):
             ticker_values = slow_df.get("Ticker", pd.Series(index=slow_df.index, dtype="object"))
             benchmark_rows = slow_df.loc[ticker_values == performance_benchmark_ticker]
@@ -1434,7 +1493,7 @@ def compute_performance_table(
         ticker = str(row.get("Ticker", ""))
         key = (group, subgroup, ticker)
         previous = previous_by_key.get(key)
-        current_price = lightweight_current_price(ticker, refresh_bucket=refresh_bucket)
+        current_price = latest_prices.get(ticker, np.nan)
         if not np.isfinite(current_price):
             fallback_price = row.get("CurrentPrice")
             if not is_ai_group_label(ticker) and previous is not None:
@@ -5883,8 +5942,8 @@ def _prepare_performance_gainers_losers_frame(
     if d.empty:
         return d
 
-    gainers = d[d["Selected_Performance"] > 0.0].nlargest(5, "Selected_Performance")
-    losers = d[d["Selected_Performance"] < 0.0].nsmallest(5, "Selected_Performance")
+    gainers = d[d["Selected_Performance"] > 0.0].nlargest(10, "Selected_Performance")
+    losers = d[d["Selected_Performance"] < 0.0].nsmallest(10, "Selected_Performance")
     ranked = pd.concat([gainers, losers], ignore_index=True)
     if ranked.empty:
         return ranked
@@ -6013,12 +6072,28 @@ def _render_performance_sma200w_bubble_chart(chart_df: pd.DataFrame) -> None:
             )
             positive_name_labels = (
                 ranking_base.transform_filter(alt.datum.Selected_Performance >= 0.0)
-                .mark_text(align="right", baseline="middle", dx=-6, color="#e5e7eb", fontSize=10, fontWeight="bold")
+                .mark_text(
+                    align="right",
+                    baseline="middle",
+                    dx=-9,
+                    color="#ffffff",
+                    fontSize=12,
+                    fontWeight="normal",
+                    opacity=1.0,
+                )
                 .encode(x=alt.datum(0.0), text="Ticker:N")
             )
             negative_name_labels = (
                 ranking_base.transform_filter(alt.datum.Selected_Performance < 0.0)
-                .mark_text(align="left", baseline="middle", dx=6, color="#e5e7eb", fontSize=10, fontWeight="bold")
+                .mark_text(
+                    align="left",
+                    baseline="middle",
+                    dx=9,
+                    color="#ffffff",
+                    fontSize=12,
+                    fontWeight="normal",
+                    opacity=1.0,
+                )
                 .encode(x=alt.datum(0.0), text="Ticker:N")
             )
             positive_labels = (

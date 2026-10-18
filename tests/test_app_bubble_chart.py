@@ -8,6 +8,7 @@ from app import (
     PERFORMANCE_BUBBLE_GROUP_BY_TICKER,
     _prepare_performance_gainers_losers_frame,
     _prepare_performance_sma200w_bubble_frame,
+    bulk_current_prices,
 )
 
 
@@ -78,8 +79,8 @@ def test_bubble_frame_rejects_unknown_view_mode():
         _prepare_performance_sma200w_bubble_frame(pd.DataFrame(), "Perf_1M_%", view_mode="Unknown")
 
 
-def test_gainers_losers_uses_five_from_each_side_of_selected_period():
-    values = [-6.0, -5.0, -4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+def test_gainers_losers_uses_ten_from_each_side_of_selected_period():
+    values = [float(value) for value in range(-12, 0)] + [float(value) for value in range(1, 13)]
     df = pd.DataFrame(
         {
             "Ticker": [f"T{i}" for i in range(len(values))],
@@ -92,6 +93,51 @@ def test_gainers_losers_uses_five_from_each_side_of_selected_period():
 
     result = _prepare_performance_gainers_losers_frame(df, "Perf_1W_%")
 
-    assert len(result) == 10
-    assert result["Selected_Performance"].tolist() == [6.0, 5.0, 4.0, 3.0, 2.0, -2.0, -3.0, -4.0, -5.0, -6.0]
-    assert result["Performance_Direction"].value_counts().to_dict() == {"Gainer": 5, "Loser": 5}
+    assert len(result) == 20
+    assert result["Selected_Performance"].tolist() == [
+        12.0,
+        11.0,
+        10.0,
+        9.0,
+        8.0,
+        7.0,
+        6.0,
+        5.0,
+        4.0,
+        3.0,
+        -3.0,
+        -4.0,
+        -5.0,
+        -6.0,
+        -7.0,
+        -8.0,
+        -9.0,
+        -10.0,
+        -11.0,
+        -12.0,
+    ]
+    assert result["Performance_Direction"].value_counts().to_dict() == {"Gainer": 10, "Loser": 10}
+
+
+def test_bulk_current_prices_uses_one_download_for_all_tickers(monkeypatch):
+    dates = pd.to_datetime(["2026-10-15", "2026-10-16"])
+    columns = pd.MultiIndex.from_product(
+        [["AAA", "BBB"], ["Open", "High", "Low", "Close", "Volume"]]
+    )
+    raw = pd.DataFrame(index=dates, columns=columns, dtype="float64")
+    raw[("AAA", "Close")] = [10.0, 11.0]
+    raw[("BBB", "Close")] = [20.0, 22.0]
+    calls = []
+
+    def fake_download(tickers, **kwargs):
+        calls.append((tickers, kwargs))
+        return raw
+
+    monkeypatch.setattr("app.yf.download", fake_download)
+
+    result = bulk_current_prices(["AAA", "BBB", "AAA"], refresh_bucket=123)
+
+    assert result == {"AAA": 11.0, "BBB": 22.0}
+    assert len(calls) == 1
+    assert calls[0][0] == ["AAA", "BBB"]
+    assert calls[0][1]["threads"] is True
