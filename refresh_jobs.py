@@ -34,6 +34,12 @@ from technical_outlook_simple_v3.storage import (
     MANIFEST_PATH as TECHNICAL_OUTLOOK_SIMPLE_V3_MANIFEST_PATH,
     read_manifest as read_technical_outlook_simple_v3_manifest,
 )
+from weekly_market_intelligence import (
+    IntelligenceConfig,
+    IntelligenceRepository,
+    generate_weekly_intelligence,
+    latest_eligible_week_end,
+)
 
 
 JOB_DIR = Path("persistent") / "job_status"
@@ -44,6 +50,7 @@ DEFAULT_WEEKLY_POSITIONING_UTC = "12:30"
 DEFAULT_RAMP_AI_INDEX_UTC = "06:15"
 DEFAULT_RAMP_AI_INDEX_DAY = 15
 DEFAULT_MARKET_PERFORMANCE_INTERVAL_SECONDS = 600
+DEFAULT_WMI_READINESS_POLL_SECONDS = 3600
 DEFAULT_SCHEDULER_POLL_SECONDS = 30
 DEFAULT_NIGHTLY_TIMEOUT_SECONDS = 7200
 DEFAULT_WEEKLY_POSITIONING_TIMEOUT_SECONDS = 3600
@@ -186,6 +193,42 @@ def run_weekly_positioning() -> None:
         log_job("weekly_positioning", started, "SKIPPED_LOCKED")
     except Exception as exc:
         log_job("weekly_positioning", started, "FAILED", rows_updated, source_status=source_status, error=str(exc))
+        raise
+
+
+def run_weekly_market_intelligence() -> None:
+    started = time.time()
+    try:
+        with job_lock("weekly_market_intelligence"):
+            config = IntelligenceConfig.from_env()
+            week_end = latest_eligible_week_end(datetime.now(timezone.utc), config)
+            repository = IntelligenceRepository(
+                os.getenv(
+                    "WMI_DB_PATH",
+                    str(Path("persistent") / "weekly_market_intelligence" / "weekly_market_intelligence.sqlite3"),
+                )
+            )
+            result = generate_weekly_intelligence(
+                week_end=week_end,
+                group_members=app.PERFORMANCE_BUBBLE_GROUP_MEMBERS,
+                history_loader=lambda ticker: app.download_metrics_ohlcv(ticker, period="10y"),
+                weekly_builder=app.build_weekly_ohlcv_from_daily,
+                adx_calculator=app.compute_adx_dmi_wilder,
+                repository=repository,
+                config=config,
+            )
+        status = "CURRENT" if result.status in {"PUBLISHED", "SKIPPED_ALREADY_PUBLISHED"} else result.status
+        log_job(
+            "weekly_market_intelligence",
+            started,
+            status,
+            rows_updated=int(result.details.get("theses", 0)),
+            source_status={"Result": result.status, "WeekEnd": result.week_end, **result.details},
+        )
+    except FileExistsError:
+        log_job("weekly_market_intelligence", started, "SKIPPED_LOCKED")
+    except Exception as exc:
+        log_job("weekly_market_intelligence", started, "FAILED", error=str(exc))
         raise
 
 
@@ -560,11 +603,15 @@ def run_scheduler() -> None:
     )
     ramp_ai_index_day = int(os.getenv("SCREENER_RAMP_AI_INDEX_DAY", str(DEFAULT_RAMP_AI_INDEX_DAY)))
     overlay_interval = int(os.getenv("SCREENER_MARKET_PERFORMANCE_INTERVAL_SECONDS", str(DEFAULT_MARKET_PERFORMANCE_INTERVAL_SECONDS)))
+    wmi_poll_seconds = configured_timeout("WMI_READINESS_POLL_SECONDS", DEFAULT_WMI_READINESS_POLL_SECONDS)
     poll_seconds = int(os.getenv("SCREENER_SCHEDULER_POLL_SECONDS", str(DEFAULT_SCHEDULER_POLL_SECONDS)))
     weekly_weekday = int(os.getenv("SCREENER_WEEKLY_POSITIONING_WEEKDAY", "5"))
 
     now = datetime.now(timezone.utc)
     retry_seconds = configured_timeout("SCREENER_REFRESH_RETRY_SECONDS", DEFAULT_REFRESH_RETRY_SECONDS)
+    max_concurrent_jobs = configured_timeout(
+        "SCREENER_MAX_CONCURRENT_SCHEDULED_JOBS", MAX_CONCURRENT_SCHEDULED_JOBS
+    )
     jobs = [
         ScheduledJob("nightly_analytics", "nightly-analytics", initial_daily_due(now, nightly_at, "nightly_analytics"), configured_timeout("SCREENER_NIGHTLY_TIMEOUT_SECONDS", DEFAULT_NIGHTLY_TIMEOUT_SECONDS), daily_at=nightly_at),
         ScheduledJob("liquidity_forecast", "liquidity-forecast", initial_daily_due(now, nightly_at, "liquidity_forecast"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=nightly_at),
@@ -576,9 +623,10 @@ def run_scheduler() -> None:
         ScheduledJob("weekly_positioning", "weekly-positioning", initial_weekly_due(now, weekly_weekday, weekly_at, "weekly_positioning"), configured_timeout("SCREENER_WEEKLY_POSITIONING_TIMEOUT_SECONDS", DEFAULT_WEEKLY_POSITIONING_TIMEOUT_SECONDS), weekly_weekday=weekly_weekday, weekly_at=weekly_at),
         ScheduledJob("ramp_ai_index", "ramp-ai-index", initial_monthly_due(now, ramp_ai_index_day, ramp_ai_index_at, "ramp_ai_index"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), monthly_day=ramp_ai_index_day, monthly_at=ramp_ai_index_at),
         ScheduledJob("market_performance_10m", "market-performance", now, configured_timeout("SCREENER_MARKET_PERFORMANCE_TIMEOUT_SECONDS", DEFAULT_MARKET_PERFORMANCE_TIMEOUT_SECONDS), interval_seconds=max(60, overlay_interval)),
+        ScheduledJob("weekly_market_intelligence", "weekly-market-intelligence", now, configured_timeout("SCREENER_WMI_TIMEOUT_SECONDS", 3600), interval_seconds=max(300, wmi_poll_seconds)),
     ]
     log_scheduler(
-        f"Scheduler started; max_parallel={MAX_CONCURRENT_SCHEDULED_JOBS}; "
+        f"Scheduler started; max_parallel={max_concurrent_jobs}; "
         + ", ".join(f"{job.name}={job.due_at.isoformat()}" for job in jobs)
     )
 
@@ -614,7 +662,7 @@ def run_scheduler() -> None:
         active_count = sum(job.process is not None for job in jobs)
         for job in jobs:
             if job.due_at <= now_dt and job.process is None:
-                if active_count >= MAX_CONCURRENT_SCHEDULED_JOBS:
+                if active_count >= max_concurrent_jobs:
                     break
                 launch_scheduled_job(job, retry_seconds)
                 if job.process is None and job.due_at <= now_dt:
@@ -628,7 +676,7 @@ def run_scheduler() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screener refresh jobs")
-    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "liquidity-forecast", "rates-financial-conditions", "rates-financial-conditions-late-retry", "funding-conditions", "funding-conditions-late-retry", "treasury-fiscal-regime", "weekly-positioning", "ramp-ai-index", "scheduler"])
+    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "liquidity-forecast", "rates-financial-conditions", "rates-financial-conditions-late-retry", "funding-conditions", "funding-conditions-late-retry", "treasury-fiscal-regime", "weekly-positioning", "ramp-ai-index", "weekly-market-intelligence", "scheduler"])
     args = parser.parse_args()
     if args.job == "market-performance":
         update_market_performance_overlay()
@@ -650,6 +698,8 @@ def main() -> None:
         run_weekly_positioning()
     elif args.job == "ramp-ai-index":
         run_ramp_ai_index()
+    elif args.job == "weekly-market-intelligence":
+        run_weekly_market_intelligence()
     elif args.job == "scheduler":
         run_scheduler()
 

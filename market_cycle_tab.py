@@ -1713,17 +1713,17 @@ def build_structural_roc_fig(d: pd.DataFrame) -> go.Figure:
     return style_fig(fig, "Structural ROC Momentum", 320)
 
 
-def build_structural_momentum_cycle_fig(d: pd.DataFrame) -> go.Figure:
+def build_structural_momentum_cycle_fig(d: pd.DataFrame, asset_label: str = "SPX") -> go.Figure:
     fig = make_subplots(
         rows=3,
         cols=1,
         shared_xaxes=True,
         row_heights=[0.52, 0.36, 0.12],
         vertical_spacing=0.045,
-        subplot_titles=("SPX", "ROC", "SPX Structural Momentum Cycle Phase"),
+        subplot_titles=(asset_label, "ROC", f"{asset_label} Structural Momentum Cycle Phase"),
     )
     add_background_bands(fig, d, "StructuralMomentumCyclePhase", row=1, opacity=0.14)
-    fig.add_trace(go.Scatter(x=d["Date"], y=d["SPX_Close"], mode="lines", name="SPX", line={"color": "#f8fafc", "width": 1.6}), row=1, col=1)
+    fig.add_trace(go.Scatter(x=d["Date"], y=d["SPX_Close"], mode="lines", name=asset_label, line={"color": "#f8fafc", "width": 1.6}), row=1, col=1)
     fig.add_trace(go.Scatter(x=d["Date"], y=pd.to_numeric(d["SPX_ROC36M_3MMA"], errors="coerce") * 100, mode="lines", name="36M ROC 3MMA", line={"color": "#38bdf8", "width": 1.7}), row=2, col=1)
     fig.add_trace(go.Scatter(x=d["Date"], y=pd.to_numeric(d["StructuralROCMomentum"], errors="coerce") * 100, mode="lines", name="ROC Momentum 12M", line={"color": "#facc15", "width": 1.5}), row=2, col=1)
     fig.add_trace(
@@ -1743,10 +1743,10 @@ def build_structural_momentum_cycle_fig(d: pd.DataFrame) -> go.Figure:
         col=1,
     )
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1}, row=2, col=1)
-    fig.update_yaxes(title_text="SPX", row=1, col=1)
+    fig.update_yaxes(title_text=asset_label, row=1, col=1)
     fig.update_yaxes(title_text="%", row=2, col=1)
     fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, row=3, col=1)
-    return style_fig(fig, "SPX Structural Momentum Cycle", 430)
+    return style_fig(fig, f"{asset_label} Structural Momentum Cycle", 430)
 
 
 def build_structural_sync_fig(d: pd.DataFrame) -> go.Figure:
@@ -1836,17 +1836,17 @@ def build_structural_sync_fig(d: pd.DataFrame) -> go.Figure:
     return style_fig(fig, "Structural Synchronized View", 560)
 
 
-def build_momentum_cycle_fig(d: pd.DataFrame) -> go.Figure:
+def build_momentum_cycle_fig(d: pd.DataFrame, asset_label: str = "SPX") -> go.Figure:
     fig = make_subplots(
         rows=3,
         cols=1,
         shared_xaxes=True,
         row_heights=[0.52, 0.36, 0.12],
         vertical_spacing=0.045,
-        subplot_titles=("SPX", "ROC", "SPX Momentum Cycle Phase"),
+        subplot_titles=(asset_label, "ROC", f"{asset_label} Momentum Cycle Phase"),
     )
     add_background_bands(fig, d, "MomentumCyclePhase", row=1, opacity=0.14)
-    fig.add_trace(go.Scatter(x=d["Date"], y=d["SPX_Close"], mode="lines", name="SPX", line={"color": "#f8fafc", "width": 1.6}), row=1, col=1)
+    fig.add_trace(go.Scatter(x=d["Date"], y=d["SPX_Close"], mode="lines", name=asset_label, line={"color": "#f8fafc", "width": 1.6}), row=1, col=1)
     fig.add_trace(go.Scatter(x=d["Date"], y=pd.to_numeric(d["SPX_ROC12M_3MMA"], errors="coerce") * 100, mode="lines", name="12M ROC 3MMA", line={"color": "#38bdf8", "width": 1.7}), row=2, col=1)
     fig.add_trace(go.Scatter(x=d["Date"], y=pd.to_numeric(d["SPX_ROC_Momentum_3M"], errors="coerce") * 100, mode="lines", name="ROC Momentum 3M", line={"color": "#facc15", "width": 1.5}), row=2, col=1)
     fig.add_trace(
@@ -1865,13 +1865,13 @@ def build_momentum_cycle_fig(d: pd.DataFrame) -> go.Figure:
         col=1,
     )
     fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1}, row=2, col=1)
-    fig.update_yaxes(title_text="SPX", row=1, col=1)
+    fig.update_yaxes(title_text=asset_label, row=1, col=1)
     fig.update_yaxes(title_text="%", row=2, col=1)
     fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, row=3, col=1)
-    return style_fig(fig, "SPX Momentum Cycle", 430)
+    return style_fig(fig, f"{asset_label} Momentum Cycle", 430)
 
 
-def build_sma200w_extension_fig(d: pd.DataFrame) -> go.Figure:
+def build_sma200w_extension_fig(d: pd.DataFrame, asset_label: str = "SPX") -> go.Figure:
     fig = go.Figure()
     for y0, y1, color, label in [
         (0, 10, "#38bdf8", "Extreme Oversold"),
@@ -1891,12 +1891,12 @@ def build_sma200w_extension_fig(d: pd.DataFrame) -> go.Figure:
             annotation_position="left",
             annotation_font={"color": "#f8fafc", "size": 10},
         )
-    fig.add_trace(go.Scatter(x=d["Date"], y=d["SMA200WExtensionPercentile"], mode="lines", name="SMA200W percentile", line={"color": "#f8fafc", "width": 1.9}, customdata=np.stack([pd.to_numeric(d["SMA200WExtensionPct"], errors="coerce") * 100, d["SMA200WZone"].astype(str)], axis=-1), hovertemplate="Date: %{x|%Y-%m-%d}<br>Percentile: %{y:.1f}<br>Extension: %{customdata[0]:.1f}%<br>Zone: %{customdata[1]}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=d["Date"], y=d["SMA200WExtensionPercentile"], mode="lines", name=f"{asset_label} SMA200W percentile", line={"color": "#f8fafc", "width": 1.9}, customdata=np.stack([pd.to_numeric(d["SMA200WExtensionPct"], errors="coerce") * 100, d["SMA200WZone"].astype(str)], axis=-1), hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{asset_label} percentile: %{{y:.1f}}<br>Extension: %{{customdata[0]:.1f}}%<br>Zone: %{{customdata[1]}}<extra></extra>"))
     fig.update_yaxes(range=[0, 100], title="0-100")
     return style_fig(fig, "SMA200W Extension", 390)
 
 
-def build_sma200m_extension_fig(d: pd.DataFrame) -> go.Figure:
+def build_sma200m_extension_fig(d: pd.DataFrame, asset_label: str = "SPX") -> go.Figure:
     fig = go.Figure()
     for y0, y1, color, label in [
         (0, 10, "#38bdf8", "Extreme Oversold"),
@@ -1921,7 +1921,7 @@ def build_sma200m_extension_fig(d: pd.DataFrame) -> go.Figure:
             x=d["Date"],
             y=pd.to_numeric(d["StructuralExtensionPercentile"], errors="coerce"),
             mode="lines",
-            name="SMA200M percentile",
+            name=f"{asset_label} SMA200M percentile",
             line={"color": "#f8fafc", "width": 1.9},
             customdata=np.stack(
                 [
@@ -1930,7 +1930,7 @@ def build_sma200m_extension_fig(d: pd.DataFrame) -> go.Figure:
                 ],
                 axis=-1,
             ),
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>Percentile: %{y:.1f}<br>Extension: %{customdata[0]:.1f}%<br>Structural Phase: %{customdata[1]}<extra></extra>",
+            hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{asset_label} percentile: %{{y:.1f}}<br>Extension: %{{customdata[0]:.1f}}%<br>Structural Phase: %{{customdata[1]}}<extra></extra>",
         )
     )
     fig.update_yaxes(range=[0, 100], title="0-100")

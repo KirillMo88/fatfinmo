@@ -17,6 +17,7 @@ services:
       TRADINGVIEW_MCP_ENABLED: ${TRADINGVIEW_MCP_ENABLED:-1}
       TRADINGVIEW_MCP_REDIRECT_URI: ${TRADINGVIEW_MCP_REDIRECT_URI:-}
       TRADINGVIEW_MCP_STORAGE_DIR: /app/persistent/tradingview_mcp
+      WMI_DB_PATH: /app/persistent/weekly_market_intelligence/weekly_market_intelligence.sqlite3
     expose:
       - "8501"
     volumes:
@@ -39,6 +40,7 @@ services:
       - ./persistent/commodity_cycle:/app/persistent/commodity_cycle
       - ./persistent/world_economy:/app/persistent/world_economy
       - ./persistent/ramp_ai_index:/app/persistent/ramp_ai_index
+      - ./persistent/weekly_market_intelligence:/app/persistent/weekly_market_intelligence
 
   screener-jobs:
     build: .
@@ -62,6 +64,14 @@ services:
       SCREENER_WEEKLY_POSITIONING_WEEKDAY: ${SCREENER_WEEKLY_POSITIONING_WEEKDAY:-5}
       SCREENER_RAMP_AI_INDEX_UTC: ${SCREENER_RAMP_AI_INDEX_UTC:-06:15}
       SCREENER_RAMP_AI_INDEX_DAY: ${SCREENER_RAMP_AI_INDEX_DAY:-15}
+      SCREENER_MAX_CONCURRENT_SCHEDULED_JOBS: ${SCREENER_MAX_CONCURRENT_SCHEDULED_JOBS:-1}
+      SCREENER_WMI_TIMEOUT_SECONDS: ${SCREENER_WMI_TIMEOUT_SECONDS:-3600}
+      WMI_DB_PATH: /app/persistent/weekly_market_intelligence/weekly_market_intelligence.sqlite3
+      WMI_TIMEZONE: ${WMI_TIMEZONE:-Europe/Lisbon}
+      WMI_SCHEDULE_LOCAL: ${WMI_SCHEDULE_LOCAL:-23:30}
+      WMI_READINESS_POLL_SECONDS: ${WMI_READINESS_POLL_SECONDS:-3600}
+      WMI_MODEL: ${WMI_MODEL:-gpt-5.6-sol}
+      WMI_REASONING_EFFORT: ${WMI_REASONING_EFFORT:-medium}
       TRADINGVIEW_MCP_ENABLED: ${TRADINGVIEW_MCP_ENABLED:-1}
       TRADINGVIEW_MCP_REDIRECT_URI: ${TRADINGVIEW_MCP_REDIRECT_URI:-}
       TRADINGVIEW_MCP_STORAGE_DIR: /app/persistent/tradingview_mcp
@@ -85,6 +95,7 @@ services:
       - ./persistent/commodity_cycle:/app/persistent/commodity_cycle
       - ./persistent/world_economy:/app/persistent/world_economy
       - ./persistent/ramp_ai_index:/app/persistent/ramp_ai_index
+      - ./persistent/weekly_market_intelligence:/app/persistent/weekly_market_intelligence
 
   tester:
     build: .
