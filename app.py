@@ -79,6 +79,14 @@ from funding_conditions import read_snapshot as read_funding_conditions_snapshot
 from financial_fragility_tab import render_financial_fragility_tab
 from treasury_fiscal_regime_tab import render_treasury_fiscal_regime_tab
 from treasury_funding_policy import read_snapshot as read_treasury_funding_policy_snapshot
+from weekly_market_intelligence_tab import render_weekly_market_intelligence
+from weekly_market_intelligence import (
+    DEFAULT_DB_PATH as WMI_DEFAULT_DB_PATH,
+    IntelligenceConfig as WMIConfig,
+    IntelligenceRepository as WMIRepository,
+    generate_weekly_intelligence as generate_wmi,
+    latest_completed_week_end as wmi_latest_completed_week_end,
+)
 from gold_regime_tab import render_gold_regime_tab
 from portfolio_tab import render_portfolio_tab
 from knowledge_base_tab import render_knowledge_base_tab
@@ -90,6 +98,7 @@ from market_cycle_tab import (
     load_spy_macro_outlook_cached,
     render_market_cycle_tab,
 )
+from qqq_tab import render_qqq_tab
 from vix_based_model import render_vix_based_model
 from technical_outlook_simple_v3_tab import render_technical_outlook_simple_v3_tab
 from global_m2_cycle import (
@@ -235,6 +244,8 @@ ALPHA_TECHNICAL_COLUMNS = [
     "DI_Balance",
     "DI_Plus_14",
     "DI_Minus_14",
+    "DI_Plus_14W",
+    "DI_Minus_14W",
     "SMA_Regime_Score",
     "Absolute_SMA_Score",
     "Relative_SMA_Score",
@@ -257,7 +268,7 @@ DISPLAY_COLUMNS = [
     "Perf_1D_%", "Perf_1W_%", "Perf_1M_%", "Perf_3M_%", "Perf_6M_%", "Perf_12M_%", "Perf_3Y_%", "Perf_5Y_%", "Perf_10Y_%",
     "SMA200W_Distance_Percentile", "Perf_12M_Percentile", "Avg_Forward_Return_6M_%", "Correction_Risk_%",
     "FundFlows_1M_%", "FundFlows_3M_%",
-    "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "RSI_14W", "ADX_14", "BB_Position",
+    "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "RSI_14W", "ADX_14", "ADX_14W", "BB_Position",
     "SMA50w_vs_SMA200w_Spread_%", "SMA_Spread_%_Change_6M_%", "SMA_Trend",
     "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
     "Divergence_Bull_Count", "Divergence_Bear_Count",
@@ -282,8 +293,10 @@ TABLE_HEADER_NAMES = {
     "Opportunity_Score": "Opportunity\nScore",
     "ADX_DI_Trend_Score": "ADX DI\nTrend Score",
     "DI_Balance": "DI\nBalance",
-    "DI_Plus_14": "+DI\n14",
-    "DI_Minus_14": "-DI\n14",
+    "DI_Plus_14": "+DI\n14D",
+    "DI_Minus_14": "-DI\n14D",
+    "DI_Plus_14W": "+DI\n14W",
+    "DI_Minus_14W": "-DI\n14W",
     "SMA_Regime_Score": "SMA Regime\nScore",
     "Absolute_SMA_Score": "Absolute SMA\nScore",
     "Relative_SMA_Score": "Relative SMA\nScore",
@@ -314,7 +327,8 @@ TABLE_HEADER_NAMES = {
     "Price_vs_ATH_%": "Price vs\nATH %",
     "RSI_14": "RSI\n14D",
     "RSI_14W": "RSI\n14W",
-    "ADX_14": "ADX\n14",
+    "ADX_14": "ADX\n14D",
+    "ADX_14W": "ADX\n14W",
     "BB_Position": "BB\nPosition",
     "SMA200W_Distance_Percentile": "SMA200W\nPercentile",
     "SMA50w_vs_SMA200w_Spread_%": "Price vs\nSMA200d %",
@@ -350,9 +364,9 @@ NUMERIC_COLUMNS = [
     "BB_Position",
     "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last",
     "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%",
-    "ADX_14", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
+    "ADX_14", "ADX_14W", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14W", "DI_Minus_14W", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
     "Divergence_Bull_Count", "Divergence_Bear_Count",
-    "Alpha_Rank", "Alpha_Score", "Momentum_Score", "Trend_Quality_Score", "Persistence_Score",
+    "Alpha_Rank", "Alpha_Score", "Momentum_Score", "Short_Term_Momentum_Score", "Trend_Quality_Score", "Persistence_Score",
     "Alpha_Confidence", "Entry_Risk_Score", "Opportunity_Score", "ADX_DI_Trend_Score", "DI_Balance", "SMA_Regime_Score",
     "Absolute_SMA_Score", "Relative_SMA_Score", "SMA200d_Robust_Z_36M",
     "Regime_Dependent_SMAZ_Risk", "Perf12M_Extreme_Risk", "Base_Alpha",
@@ -1370,6 +1384,15 @@ def get_metrics(
         weekly_atr14 = safe_last(average_true_range(wk_high, wk_low, wk_close, period=14))
         rsi14w = RSIIndicator(close=wk_close, window=14).rsi() if len(wk_close) >= 14 else pd.Series(dtype="float64")
         cur_rsi14w = safe_last(rsi14w)
+        wk_adx14, wk_di_plus14, wk_di_minus14 = compute_adx_dmi_wilder(
+            high=wk_high,
+            low=wk_low,
+            close=wk_close,
+            period=14,
+        )
+        cur_adx14w = safe_last(wk_adx14)
+        cur_di_plus14w = safe_last(wk_di_plus14)
+        cur_di_minus14w = safe_last(wk_di_minus14)
         (
             bb_position,
             bb_mid,
@@ -1402,7 +1425,8 @@ def get_metrics(
             flows_1m, flows_3m,
             vs_52w, vs_ath, cur_rsi, cur_rsi14w,
             spread_pct_now, spread_avg_36m, spread_pct_change_6m, sma200d_robust_z_36m, sma_trend,
-            cur_adx14, cur_di_plus14, cur_di_minus14, cur_di_plus14_delta2, cur_di_minus14_delta2,
+            cur_adx14, cur_adx14w, cur_di_plus14, cur_di_minus14, cur_di_plus14w, cur_di_minus14w,
+            cur_di_plus14_delta2, cur_di_minus14_delta2,
             bb_position, bb_mid, bb_upper, bb_lower, bb_step_up, bb_step_down, wk_close_last,
             int(golden_cross_d1), int(death_cross_d1), int(golden_cross_w1), int(death_cross_w1),
             div_rsi, div_macd, div_roc,
@@ -1553,7 +1577,7 @@ def compute_slow_metrics_table(
         "Price_vs_52W_High_%", "Price_vs_ATH_%", "RSI_14", "RSI_14W",
         "SMA50w_vs_SMA200w_Spread_%", "SMA50w_vs_SMA200w_Spread_Avg_36M_%", "SMA_Spread_%_Change_6M_%",
         "SMA200d_Robust_Z_36M", "SMA_Trend",
-        "ADX_14", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
+        "ADX_14", "ADX_14W", "DI_Plus_14", "DI_Minus_14", "DI_Plus_14W", "DI_Minus_14W", "DI_Plus_14_Delta2", "DI_Minus_14_Delta2",
         "BB_Position", "BB_Mid", "BB_Upper", "BB_Lower", "BB_StepUp", "BB_StepDown", "WeeklyClose_Last",
         "GoldenCross_D1", "DeathCross_D1", "GoldenCross_W1", "DeathCross_W1",
         "Div_6M_vs_RSI", "Div_6M_vs_MACD", "Div_6M_vs_ROC",
@@ -4900,6 +4924,8 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
         "DI_Balance",
         "DI_Plus_14",
         "DI_Minus_14",
+        "DI_Plus_14W",
+        "DI_Minus_14W",
         "SMA_Regime_Score",
         "Absolute_SMA_Score",
         "Relative_SMA_Score",
@@ -4924,6 +4950,8 @@ def render_alpha_engine_tab(df: pd.DataFrame) -> None:
                 "DI_Balance": st.column_config.NumberColumn(format="%.2f"),
                 "DI_Plus_14": st.column_config.NumberColumn(format="%.1f"),
                 "DI_Minus_14": st.column_config.NumberColumn(format="%.1f"),
+                "DI_Plus_14W": st.column_config.NumberColumn(format="%.1f"),
+                "DI_Minus_14W": st.column_config.NumberColumn(format="%.1f"),
                 "SMA_Regime_Score": st.column_config.NumberColumn(format="%.1f"),
                 "Absolute_SMA_Score": st.column_config.NumberColumn(format="%.1f"),
                 "Relative_SMA_Score": st.column_config.NumberColumn(format="%.1f"),
@@ -6122,6 +6150,692 @@ def _render_performance_sma200w_bubble_chart(chart_df: pd.DataFrame) -> None:
             st.altair_chart(ranking_chart, use_container_width=True)
 
 
+PERFORMANCE_DASHBOARD_NUMERIC_COLUMNS = [
+    "Perf_1W_%",
+    "Perf_1M_%",
+    "Perf_3M_%",
+    "Perf_6M_%",
+    "Perf_12M_Percentile",
+    "RSI_14",
+    "RSI_14W",
+    "ADX_14",
+    "ADX_14W",
+    "DI_Plus_14",
+    "DI_Minus_14",
+    "DI_Plus_14W",
+    "DI_Minus_14W",
+    "Momentum_Score",
+    "Short_Term_Momentum_Score",
+]
+
+
+def _performance_dashboard_signed_adx_di(
+    adx: pd.Series,
+    plus_di: pd.Series,
+    minus_di: pd.Series,
+) -> pd.Series:
+    adx_values = pd.to_numeric(adx, errors="coerce")
+    plus_values = pd.to_numeric(plus_di, errors="coerce")
+    minus_values = pd.to_numeric(minus_di, errors="coerce")
+    denominator = plus_values + minus_values
+    balance = (plus_values - minus_values) / denominator.where(denominator != 0.0)
+
+    strength = pd.Series(np.nan, index=adx_values.index, dtype="float64")
+    valid_adx = adx_values.notna()
+    if valid_adx.any():
+        strength.loc[valid_adx] = np.interp(
+            adx_values.loc[valid_adx].to_numpy(dtype="float64"),
+            [15.0, 20.0, 25.0, 30.0, 35.0],
+            [0.0, 40.0, 70.0, 90.0, 100.0],
+            left=0.0,
+            right=100.0,
+        )
+    signed = strength * (balance / 0.25).clip(-1.0, 1.0)
+    return signed.where(valid_adx & balance.notna()).clip(-100.0, 100.0)
+
+
+def _performance_dashboard_quadrant(
+    x: pd.Series,
+    y: pd.Series,
+    x_divider: float,
+    y_divider: float,
+    labels: tuple[str, str, str, str],
+) -> pd.Series:
+    x_values = pd.to_numeric(x, errors="coerce")
+    y_values = pd.to_numeric(y, errors="coerce")
+    top_right, top_left, bottom_right, bottom_left = labels
+    conditions = [
+        (x_values > x_divider) & (y_values > y_divider),
+        (x_values < x_divider) & (y_values > y_divider),
+        (x_values > x_divider) & (y_values < y_divider),
+        (x_values < x_divider) & (y_values < y_divider),
+    ]
+    return pd.Series(
+        np.select(conditions, [top_right, top_left, bottom_right, bottom_left], default="Neutral Boundary"),
+        index=x_values.index,
+        dtype="object",
+    )
+
+
+def _prepare_performance_dashboard_frame(df: pd.DataFrame, view_mode: str) -> pd.DataFrame:
+    if view_mode not in {"ETF", "Group"}:
+        raise ValueError(f"Unsupported Performance Dashboard view mode: {view_mode}")
+    if df.empty or "Ticker" not in df.columns:
+        return pd.DataFrame()
+
+    base = df.copy().reset_index(drop=True)
+    for column in PERFORMANCE_DASHBOARD_NUMERIC_COLUMNS:
+        if column not in base.columns:
+            base[column] = np.nan
+        base[column] = pd.to_numeric(base[column], errors="coerce")
+
+    base["Ticker"] = base["Ticker"].astype(str)
+    base["Group_2"] = base["Ticker"].map(PERFORMANCE_BUBBLE_GROUP_BY_TICKER)
+    base["Instrument_Name"] = (
+        base["Instrument_Name"].fillna("").astype(str)
+        if "Instrument_Name" in base.columns
+        else ""
+    )
+    base["Signed_ADX_DI_14D"] = _performance_dashboard_signed_adx_di(
+        base["ADX_14"], base["DI_Plus_14"], base["DI_Minus_14"]
+    )
+    base["Signed_ADX_DI_14W"] = _performance_dashboard_signed_adx_di(
+        base["ADX_14W"], base["DI_Plus_14W"], base["DI_Minus_14W"]
+    )
+    risk_valid = base[["RSI_14W", "Perf_12M_Percentile"]].notna().all(axis=1)
+    base["Extension_Risk_Flag"] = np.where(
+        risk_valid,
+        np.where(
+            (base["RSI_14W"] >= 70.0) & (base["Perf_12M_Percentile"] >= 70.0),
+            "Elevated",
+            "Not Triggered",
+        ),
+        "Unavailable",
+    )
+
+    if view_mode == "ETF":
+        base["Entity_ID"] = "etf:" + base["Ticker"]
+        base["Entity_Label"] = base["Ticker"]
+        base["Entity_Type"] = "ETF"
+        base["Group_2"] = base["Group_2"].fillna("Unmapped")
+        base["Constituent_Count"] = 1
+        base["Valid_Constituent_Count"] = 1
+        base["Risk_Valid_Constituent_Count"] = risk_valid.astype(int)
+        base["Risk_Breadth_%"] = np.where(
+            risk_valid,
+            np.where(base["Extension_Risk_Flag"].eq("Elevated"), 100.0, 0.0),
+            np.nan,
+        )
+        return base
+
+    group_source = base.dropna(subset=["Group_2"]).copy()
+    if group_source.empty:
+        return pd.DataFrame()
+
+    aggregate_columns = [
+        *PERFORMANCE_DASHBOARD_NUMERIC_COLUMNS,
+        "Signed_ADX_DI_14D",
+        "Signed_ADX_DI_14W",
+    ]
+    grouped = group_source.groupby("Group_2", sort=True)
+    result = grouped[aggregate_columns].median().reset_index()
+    result["Constituent_Count"] = result["Group_2"].map(grouped.size()).astype(int)
+
+    chart1_valid = group_source[["Perf_1W_%", "Perf_1M_%", "Perf_3M_%"]].notna().all(axis=1)
+    chart1_counts = chart1_valid.groupby(group_source["Group_2"]).sum().astype(int)
+    result["Valid_Constituent_Count"] = result["Group_2"].map(chart1_counts).fillna(0).astype(int)
+
+    risk_valid_group = group_source[["RSI_14W", "Perf_12M_Percentile"]].notna().all(axis=1)
+    risk_triggered = risk_valid_group & (group_source["RSI_14W"] >= 70.0) & (
+        group_source["Perf_12M_Percentile"] >= 70.0
+    )
+    valid_counts = risk_valid_group.groupby(group_source["Group_2"]).sum()
+    triggered_counts = risk_triggered.groupby(group_source["Group_2"]).sum()
+    risk_breadth = (triggered_counts / valid_counts.replace(0, np.nan)) * 100.0
+    result["Risk_Breadth_%"] = result["Group_2"].map(risk_breadth)
+    result["Risk_Valid_Constituent_Count"] = result["Group_2"].map(valid_counts).fillna(0).astype(int)
+    result["Extension_Risk_Flag"] = np.where(
+        result[["RSI_14W", "Perf_12M_Percentile"]].notna().all(axis=1),
+        np.where(
+            (result["RSI_14W"] >= 70.0) & (result["Perf_12M_Percentile"] >= 70.0),
+            "Elevated",
+            "Not Triggered",
+        ),
+        "Unavailable",
+    )
+    result["Ticker"] = ""
+    result["Instrument_Name"] = ""
+    result["Entity_ID"] = "group:" + result["Group_2"].astype(str)
+    result["Entity_Label"] = result["Group_2"].astype(str)
+    result["Entity_Type"] = "Group"
+    return result
+
+
+def _performance_dashboard_symmetric_domain(values: pd.Series) -> list[float]:
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    extent = max(float(numeric.abs().max()) if not numeric.empty else 0.0, 1.0)
+    extent *= 1.15
+    return [-extent, extent]
+
+
+PERFORMANCE_DASHBOARD_PLOTLY_CONFIG = {
+    "displaylogo": False,
+    "scrollZoom": False,
+    "responsive": True,
+}
+
+
+def _performance_dashboard_format_values(
+    values: pd.Series,
+    *,
+    signed: bool = False,
+    suffix: str = "",
+) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce")
+    return numeric.map(
+        lambda value: (
+            "N/A"
+            if pd.isna(value)
+            else f"{float(value):+.2f}{suffix}"
+            if signed
+            else f"{float(value):.2f}{suffix}"
+        )
+    )
+
+
+def _performance_dashboard_plotly_selection(event: Any) -> str | None:
+    try:
+        selection = event.selection if hasattr(event, "selection") else event.get("selection", {})
+        points = selection.points if hasattr(selection, "points") else selection.get("points", [])
+    except Exception:
+        return None
+    for point in points or []:
+        customdata = point.customdata if hasattr(point, "customdata") else point.get("customdata")
+        if isinstance(customdata, (list, tuple)) and customdata:
+            entity_id = str(customdata[0])
+            if entity_id.startswith("etf:") or entity_id.startswith("group:"):
+                return entity_id
+        elif isinstance(customdata, str) and (customdata.startswith("etf:") or customdata.startswith("group:")):
+            return customdata
+    return None
+
+
+def _performance_dashboard_render_plotly(fig: go.Figure, chart_key: str) -> None:
+    event = st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=chart_key,
+        config=PERFORMANCE_DASHBOARD_PLOTLY_CONFIG,
+        on_select="rerun",
+        selection_mode=("points",),
+    )
+    selected_entity = _performance_dashboard_plotly_selection(event)
+    if selected_entity and selected_entity != st.session_state.get("performance_dashboard_selected_entity"):
+        st.session_state["performance_dashboard_selected_entity"] = selected_entity
+        st.rerun()
+
+
+def _performance_dashboard_plotly_figure(
+    data: pd.DataFrame,
+    x_column: str,
+    y_column: str,
+    x_title: str,
+    y_title: str,
+    x_domain: list[float],
+    y_domain: list[float],
+    quadrant_labels: tuple[str, str, str, str],
+    x_divider: float,
+    y_divider: float,
+    custom_columns: list[str],
+    hovertemplate: str,
+    marker_colors: list[str] | str = "#3b82f6",
+    marker_sizes: list[float] | float = 12.0,
+    highlight_risk_zone: bool = False,
+) -> go.Figure:
+    selected_entity = st.session_state.get("performance_dashboard_selected_entity")
+    entity_ids = data["Entity_ID"].astype(str).tolist()
+    selected_present = bool(selected_entity) and selected_entity in set(entity_ids)
+    marker_opacity = [1.0 if entity_id == selected_entity else 0.18 for entity_id in entity_ids] if selected_present else 0.82
+    marker_width = [3.0 if entity_id == selected_entity else 0.8 for entity_id in entity_ids] if selected_present else 0.8
+    customdata = data[["Entity_ID", *custom_columns]].astype(object).to_numpy()
+    fig = go.Figure()
+    if highlight_risk_zone:
+        fig.add_shape(
+            type="rect",
+            x0=70.0,
+            x1=100.0,
+            y0=70.0,
+            y1=100.0,
+            fillcolor="rgba(239,68,68,0.14)",
+            line={"width": 0},
+            layer="below",
+        )
+    fig.add_vline(x=x_divider, line={"color": "#94a3b8", "width": 1})
+    fig.add_hline(y=y_divider, line={"color": "#94a3b8", "width": 1})
+    if highlight_risk_zone:
+        fig.add_vline(x=70.0, line={"color": "#ef4444", "width": 1, "dash": "dash"}, opacity=0.58)
+        fig.add_hline(y=70.0, line={"color": "#ef4444", "width": 1, "dash": "dash"}, opacity=0.58)
+
+    fig.add_trace(
+        go.Scatter(
+            x=data[x_column],
+            y=data[y_column],
+            mode="markers+text",
+            text=data["Entity_Label"],
+            textposition="top center",
+            textfont={"color": "#e5e7eb", "size": 10},
+            cliponaxis=False,
+            customdata=customdata,
+            hovertemplate=hovertemplate,
+            marker={
+                "color": marker_colors,
+                "size": marker_sizes,
+                "opacity": marker_opacity,
+                "line": {"color": "#e5e7eb", "width": marker_width},
+            },
+            selected={"marker": {"opacity": 1.0}},
+            unselected={"marker": {"opacity": 0.18}},
+            showlegend=False,
+        )
+    )
+
+    top_right, top_left, bottom_right, bottom_left = quadrant_labels
+    for x, y, x_anchor, y_anchor, label in [
+        (0.985, 0.985, "right", "top", top_right),
+        (0.015, 0.985, "left", "top", top_left),
+        (0.985, 0.015, "right", "bottom", bottom_right),
+        (0.015, 0.015, "left", "bottom", bottom_left),
+    ]:
+        fig.add_annotation(
+            x=x,
+            y=y,
+            xref="paper",
+            yref="paper",
+            xanchor=x_anchor,
+            yanchor=y_anchor,
+            text=label,
+            showarrow=False,
+            font={"color": "rgba(148,163,184,0.55)", "size": 11},
+        )
+
+    fig.update_layout(
+        height=516,
+        margin={"l": 18, "r": 14, "t": 10, "b": 18},
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": "#e5e7eb", "size": 11},
+        hoverlabel={"bgcolor": "#111827", "font": {"color": "#f8fafc"}},
+        clickmode="event+select",
+        dragmode="zoom",
+        uirevision=f"performance-dashboard:{x_column}:{y_column}",
+    )
+    fig.update_xaxes(
+        title=x_title,
+        range=x_domain,
+        gridcolor="#263041",
+        zeroline=False,
+        fixedrange=False,
+    )
+    fig.update_yaxes(
+        title=y_title,
+        range=y_domain,
+        gridcolor="#263041",
+        zeroline=False,
+        fixedrange=False,
+    )
+    return fig
+
+
+def _render_performance_rotation_map(data: pd.DataFrame, view_mode: str) -> None:
+    st.markdown("#### Performance Rotation Map")
+    axis_pair_label = st.radio(
+        "Performance axes",
+        options=["3M / 1M", "1M / 1W"],
+        index=0,
+        horizontal=True,
+        key="performance_dashboard_rotation_axes",
+    )
+    x_column, y_column, x_title, y_title = {
+        "3M / 1M": ("Perf_3M_%", "Perf_1M_%", "Performance 3M (%)", "Performance 1M (%)"),
+        "1M / 1W": ("Perf_1M_%", "Perf_1W_%", "Performance 1M (%)", "Performance 1W (%)"),
+    }[axis_pair_label]
+    required = ["Perf_1W_%", "Perf_1M_%", "Perf_3M_%"]
+    d = data.dropna(subset=required).copy()
+    if d.empty:
+        st.info("No complete performance data for the current filters.")
+        return
+    labels = ("Confirmed Leaders", "Early Recovery", "Losing Momentum", "Persistent Laggards")
+    d["Quadrant"] = _performance_dashboard_quadrant(d[x_column], d[y_column], 0.0, 0.0, labels)
+    d["Performance_1W_Direction"] = np.select(
+        [d["Perf_1W_%"] > 0.0, d["Perf_1W_%"] < 0.0],
+        ["Positive", "Negative"],
+        default="Neutral",
+    )
+    d["Bubble_Size"] = d["Perf_1W_%"].abs()
+    d["Tooltip_Perf_1W"] = _performance_dashboard_format_values(d["Perf_1W_%"], signed=True, suffix="%")
+    d["Tooltip_Perf_1M"] = _performance_dashboard_format_values(d["Perf_1M_%"], signed=True, suffix="%")
+    d["Tooltip_Perf_3M"] = _performance_dashboard_format_values(d["Perf_3M_%"], signed=True, suffix="%")
+    x_domain = _performance_dashboard_symmetric_domain(d[x_column])
+    y_domain = _performance_dashboard_symmetric_domain(d[y_column])
+    colors = d["Performance_1W_Direction"].map(
+        {"Positive": "#22c55e", "Negative": "#ef4444", "Neutral": "#9ca3af"}
+    ).tolist()
+    max_bubble = max(float(d["Bubble_Size"].max()), 1e-9)
+    sizes = (10.0 + 18.0 * np.sqrt(d["Bubble_Size"] / max_bubble)).tolist()
+    custom_columns = [
+        "Entity_Label",
+        "Instrument_Name",
+        "Group_2",
+        "Tooltip_Perf_1W",
+        "Tooltip_Perf_1M",
+        "Tooltip_Perf_3M",
+        "Quadrant",
+        "Constituent_Count",
+        "Valid_Constituent_Count",
+    ]
+    hovertemplate = (
+        ("Group 2: %{customdata[1]}<br>" if view_mode == "Group" else "Ticker: %{customdata[1]}<br>")
+        + ("Instrument: %{customdata[2]}<br>Group 2: %{customdata[3]}<br>" if view_mode == "ETF" else "")
+        + "Performance 1W: %{customdata[4]}<br>"
+        + "Performance 1M: %{customdata[5]}<br>"
+        + "Performance 3M: %{customdata[6]}<br>"
+        + "State: %{customdata[7]}"
+        + ("<br>Constituents: %{customdata[8]:.0f}<br>Valid: %{customdata[9]:.0f}" if view_mode == "Group" else "")
+        + "<extra></extra>"
+    )
+    fig = _performance_dashboard_plotly_figure(
+        d,
+        x_column,
+        y_column,
+        x_title,
+        y_title,
+        x_domain,
+        y_domain,
+        labels,
+        0.0,
+        0.0,
+        custom_columns,
+        hovertemplate,
+        marker_colors=colors,
+        marker_sizes=sizes,
+    )
+    _performance_dashboard_render_plotly(fig, "performance_rotation_map")
+
+
+def _render_performance_directional_trend_map(data: pd.DataFrame, view_mode: str) -> None:
+    st.markdown("#### Performance vs Directional Trend")
+    control_a, control_b = st.columns(2)
+    with control_a:
+        performance_label = st.selectbox(
+            "Performance horizon",
+            ["Performance 1W", "Performance 1M", "Performance 3M"],
+            index=1,
+            key="performance_dashboard_trend_performance_horizon",
+        )
+    with control_b:
+        trend_label = st.selectbox(
+            "ADX/DI trend horizon",
+            ["ADX/DI Trend 14D", "ADX/DI Trend 14W"],
+            index=0,
+            key="performance_dashboard_trend_horizon",
+        )
+    performance_column = {
+        "Performance 1W": "Perf_1W_%",
+        "Performance 1M": "Perf_1M_%",
+        "Performance 3M": "Perf_3M_%",
+    }[performance_label]
+    trend_column = {
+        "ADX/DI Trend 14D": "Signed_ADX_DI_14D",
+        "ADX/DI Trend 14W": "Signed_ADX_DI_14W",
+    }[trend_label]
+    d = data.dropna(subset=[performance_column, trend_column]).copy()
+    if d.empty:
+        st.info("No complete performance and directional-trend data for the current filters.")
+        return
+    labels = ("Confirmed Strength", "Early Recovery", "Trend Deterioration", "Confirmed Weakness")
+    d["Selected_Performance"] = d[performance_column]
+    d["Selected_Trend_Score"] = d[trend_column]
+    for source_column, tooltip_column, signed, suffix in [
+        ("Perf_1W_%", "Tooltip_Perf_1W", True, "%"),
+        ("Perf_1M_%", "Tooltip_Perf_1M", True, "%"),
+        ("Perf_3M_%", "Tooltip_Perf_3M", True, "%"),
+        ("Signed_ADX_DI_14D", "Tooltip_ADX_DI_14D", True, ""),
+        ("Signed_ADX_DI_14W", "Tooltip_ADX_DI_14W", True, ""),
+        ("Selected_Performance", "Tooltip_Selected_Performance", True, "%"),
+        ("Selected_Trend_Score", "Tooltip_Selected_Trend", True, ""),
+    ]:
+        d[tooltip_column] = _performance_dashboard_format_values(
+            d[source_column], signed=signed, suffix=suffix
+        )
+    d["Quadrant"] = _performance_dashboard_quadrant(
+        d["Selected_Performance"], d["Selected_Trend_Score"], 0.0, 0.0, labels
+    )
+    x_domain = _performance_dashboard_symmetric_domain(d["Selected_Performance"])
+    y_domain = [-100.0, 100.0]
+    custom_columns = [
+        "Entity_Label",
+        "Tooltip_Perf_1W",
+        "Tooltip_Perf_1M",
+        "Tooltip_Perf_3M",
+        "Tooltip_ADX_DI_14D",
+        "Tooltip_ADX_DI_14W",
+        "Tooltip_Selected_Performance",
+        "Tooltip_Selected_Trend",
+        "Quadrant",
+    ]
+    hovertemplate = (
+        ("Group 2: %{customdata[1]}<br>" if view_mode == "Group" else "Ticker: %{customdata[1]}<br>")
+        + "Performance 1W: %{customdata[2]}<br>"
+        + "Performance 1M: %{customdata[3]}<br>"
+        + "Performance 3M: %{customdata[4]}<br>"
+        + "ADX/DI Trend 14D: %{customdata[5]}<br>"
+        + "ADX/DI Trend 14W: %{customdata[6]}<br>"
+        + "Selected Performance: %{customdata[7]}<br>"
+        + "Selected Trend: %{customdata[8]}<br>"
+        + "Quadrant: %{customdata[9]}<extra></extra>"
+    )
+    fig = _performance_dashboard_plotly_figure(
+        d,
+        "Selected_Performance",
+        "Selected_Trend_Score",
+        f"{performance_label} (%)",
+        trend_label,
+        x_domain,
+        y_domain,
+        labels,
+        0.0,
+        0.0,
+        custom_columns,
+        hovertemplate,
+    )
+    _performance_dashboard_render_plotly(fig, "performance_directional_trend_map")
+    if view_mode == "Group":
+        st.caption("Group ADX/DI values are medians of instrument-level signed trend scores.")
+
+
+def _render_momentum_rsi_map(data: pd.DataFrame, view_mode: str) -> None:
+    st.markdown("#### Momentum vs RSI Map")
+    control_a, control_b = st.columns(2)
+    with control_a:
+        momentum_label = st.selectbox(
+            "Momentum horizon",
+            ["Mid Term Momentum Score", "Short Term Momentum Score"],
+            index=0,
+            key="performance_dashboard_momentum_horizon",
+        )
+    with control_b:
+        rsi_label = st.selectbox(
+            "RSI horizon",
+            ["Daily RSI 14D", "Weekly RSI 14W"],
+            index=1,
+            key="performance_dashboard_rsi_horizon",
+        )
+    momentum_column = {
+        "Mid Term Momentum Score": "Momentum_Score",
+        "Short Term Momentum Score": "Short_Term_Momentum_Score",
+    }[momentum_label]
+    rsi_column = {"Daily RSI 14D": "RSI_14", "Weekly RSI 14W": "RSI_14W"}[rsi_label]
+    d = data.dropna(subset=[momentum_column, rsi_column]).copy()
+    if d.empty:
+        st.info("No complete momentum and RSI data for the current filters.")
+        return
+    labels = (
+        "Confirmed Bullish Momentum",
+        "Tactical Rebound",
+        "Momentum Under Pressure",
+        "Confirmed Bearish Momentum",
+    )
+    d["Selected_Momentum_Score"] = d[momentum_column]
+    d["Selected_RSI"] = d[rsi_column]
+    for source_column, tooltip_column, signed, suffix in [
+        ("Momentum_Score", "Tooltip_Momentum", False, ""),
+        ("Short_Term_Momentum_Score", "Tooltip_Short_Momentum", False, ""),
+        ("RSI_14", "Tooltip_RSI_14D", False, ""),
+        ("RSI_14W", "Tooltip_RSI_14W", False, ""),
+        ("Perf_1M_%", "Tooltip_Perf_1M", True, "%"),
+        ("Perf_3M_%", "Tooltip_Perf_3M", True, "%"),
+        ("Perf_6M_%", "Tooltip_Perf_6M", True, "%"),
+        ("Selected_Momentum_Score", "Tooltip_Selected_Momentum", False, ""),
+        ("Selected_RSI", "Tooltip_Selected_RSI", False, ""),
+    ]:
+        d[tooltip_column] = _performance_dashboard_format_values(
+            d[source_column], signed=signed, suffix=suffix
+        )
+    d["Quadrant"] = _performance_dashboard_quadrant(
+        d["Selected_Momentum_Score"], d["Selected_RSI"], 50.0, 50.0, labels
+    )
+    x_domain = [0.0, 100.0]
+    rsi_values = pd.to_numeric(d["Selected_RSI"], errors="coerce").dropna()
+    rsi_min = float(rsi_values.min())
+    rsi_max = float(rsi_values.max())
+    y_domain = [
+        max(0.0, min(20.0, float(np.floor(rsi_min / 5.0) * 5.0))),
+        min(100.0, max(80.0, float(np.ceil(rsi_max / 5.0) * 5.0))),
+    ]
+    custom_columns = [
+        "Entity_Label",
+        "Tooltip_Momentum",
+        "Tooltip_Short_Momentum",
+        "Tooltip_RSI_14D",
+        "Tooltip_RSI_14W",
+        "Tooltip_Perf_1M",
+        "Tooltip_Perf_3M",
+        "Tooltip_Perf_6M",
+        "Tooltip_Selected_Momentum",
+        "Tooltip_Selected_RSI",
+        "Quadrant",
+    ]
+    hovertemplate = (
+        ("Group 2: %{customdata[1]}<br>" if view_mode == "Group" else "Ticker: %{customdata[1]}<br>")
+        + "Mid Term Momentum Score: %{customdata[2]}<br>"
+        + "Short Term Momentum Score: %{customdata[3]}<br>"
+        + "RSI 14D: %{customdata[4]}<br>"
+        + "RSI 14W: %{customdata[5]}<br>"
+        + "Performance 1M: %{customdata[6]}<br>"
+        + "Performance 3M: %{customdata[7]}<br>"
+        + "Performance 6M: %{customdata[8]}<br>"
+        + "Selected Momentum: %{customdata[9]}<br>"
+        + "Selected RSI: %{customdata[10]}<br>"
+        + "Quadrant: %{customdata[11]}<extra></extra>"
+    )
+    fig = _performance_dashboard_plotly_figure(
+        d,
+        "Selected_Momentum_Score",
+        "Selected_RSI",
+        momentum_label,
+        rsi_label,
+        x_domain,
+        y_domain,
+        labels,
+        50.0,
+        50.0,
+        custom_columns,
+        hovertemplate,
+    )
+    _performance_dashboard_render_plotly(fig, "momentum_rsi_map")
+
+
+def _render_momentum_extension_risk_map(data: pd.DataFrame, view_mode: str) -> None:
+    st.markdown("#### Momentum Extension Risk Map")
+    d = data.dropna(subset=["Perf_12M_Percentile", "RSI_14W"]).copy()
+    if d.empty:
+        st.info("No complete historical percentile and weekly RSI data for the current filters.")
+        return
+    labels = ("Structural Leadership", "Tactical Strength", "Latent Risk", "Normal / Low Extension")
+    d["Quadrant"] = _performance_dashboard_quadrant(
+        d["Perf_12M_Percentile"], d["RSI_14W"], 50.0, 50.0, labels
+    )
+    d["Tooltip_RSI_14W"] = _performance_dashboard_format_values(d["RSI_14W"])
+    d["Tooltip_Perf_12M_Percentile"] = _performance_dashboard_format_values(d["Perf_12M_Percentile"])
+    d["Tooltip_Risk_Breadth"] = _performance_dashboard_format_values(d["Risk_Breadth_%"], suffix="%")
+    domain = [0.0, 100.0]
+    custom_columns = [
+        "Entity_Label",
+        "Tooltip_RSI_14W",
+        "Tooltip_Perf_12M_Percentile",
+        "Extension_Risk_Flag",
+        "Tooltip_Risk_Breadth",
+        "Risk_Valid_Constituent_Count",
+        "Quadrant",
+    ]
+    hovertemplate = (
+        ("Group 2: %{customdata[1]}<br>" if view_mode == "Group" else "Ticker: %{customdata[1]}<br>")
+        + "Weekly RSI 14W: %{customdata[2]}<br>"
+        + "Performance 12M Percentile: %{customdata[3]}<br>"
+        + "Extension Risk Flag: %{customdata[4]}"
+        + (
+            "<br>Risk Breadth: %{customdata[5]}<br>Valid Constituents: %{customdata[6]:.0f}"
+            if view_mode == "Group"
+            else ""
+        )
+        + "<br>Quadrant: %{customdata[7]}<extra></extra>"
+    )
+    colors = d["Extension_Risk_Flag"].map(
+        {"Elevated": "#ef4444", "Not Triggered": "#3b82f6", "Unavailable": "#9ca3af"}
+    ).fillna("#9ca3af").tolist()
+    fig = _performance_dashboard_plotly_figure(
+        d,
+        "Perf_12M_Percentile",
+        "RSI_14W",
+        "Performance 12M Percentile",
+        "Weekly RSI 14W",
+        domain,
+        domain,
+        labels,
+        50.0,
+        50.0,
+        custom_columns,
+        hovertemplate,
+        marker_colors=colors,
+        highlight_risk_zone=True,
+    )
+    _performance_dashboard_render_plotly(fig, "momentum_extension_risk_map")
+
+
+def _render_performance_dashboard(chart_df: pd.DataFrame, view_mode: str) -> None:
+    st.markdown("## Performance Dashboard")
+    selected_entity = st.session_state.get("performance_dashboard_selected_entity")
+    header_left, header_right = st.columns([4.5, 1.0])
+    with header_left:
+        if selected_entity:
+            st.caption(f"Selected across charts: {selected_entity.split(':', 1)[-1]}")
+        else:
+            st.caption("Click a point to highlight it across charts. Double-click a chart to reset zoom.")
+    with header_right:
+        if st.button("Clear selection", key="performance_dashboard_clear_selection", use_container_width=True):
+            st.session_state.pop("performance_dashboard_selected_entity", None)
+            st.rerun()
+
+    dashboard_data = _prepare_performance_dashboard_frame(chart_df, view_mode)
+    if dashboard_data.empty:
+        st.info("No Performance Dashboard data for the current filters and Group 2 mapping.")
+        return
+
+    _render_performance_rotation_map(dashboard_data, view_mode)
+    _render_performance_directional_trend_map(dashboard_data, view_mode)
+    _render_momentum_rsi_map(dashboard_data, view_mode)
+    _render_momentum_extension_risk_map(dashboard_data, view_mode)
+
 def _prepare_spy_weekly_regime_frame() -> pd.DataFrame:
     ohlcv = download_metrics_ohlcv("SPY", period="max")
     if ohlcv.empty:
@@ -7014,6 +7728,20 @@ def render_market_regime_tab(market: dict) -> None:
     )
 
 
+def _run_manual_weekly_market_intelligence():
+    config = WMIConfig.from_env()
+    repository = WMIRepository(os.getenv("WMI_DB_PATH", str(WMI_DEFAULT_DB_PATH)))
+    return generate_wmi(
+        week_end=wmi_latest_completed_week_end(pd.Timestamp.now(tz="UTC").to_pydatetime()),
+        group_members=PERFORMANCE_BUBBLE_GROUP_MEMBERS,
+        history_loader=lambda ticker: download_metrics_ohlcv(ticker, period="10y"),
+        weekly_builder=build_weekly_ohlcv_from_daily,
+        adx_calculator=compute_adx_dmi_wilder,
+        repository=repository,
+        config=config,
+    )
+
+
 def render_charts(df: pd.DataFrame) -> None:
     if df.empty:
         st.info("No rows to chart for current filters.")
@@ -7022,6 +7750,9 @@ def render_charts(df: pd.DataFrame) -> None:
     chart_df = _build_chart_frame(df)
 
     _render_performance_sma200w_bubble_chart(chart_df)
+    dashboard_view_mode = st.session_state.get("performance_sma200w_bubble_view_mode", "ETF")
+    _render_performance_dashboard(chart_df, dashboard_view_mode)
+    render_weekly_market_intelligence(manual_run=_run_manual_weekly_market_intelligence)
     _render_rsi_chart(chart_df)
     _render_bar_chart(
         chart_df,
@@ -7485,6 +8216,7 @@ def main():
         "Portfolio",
         "Technical Outlook",
         "Market Cycle",
+        "QQQ",
         "VIX Based Model",
         "Commodity Cycle",
         "Liquidity Cycle",
@@ -7786,6 +8518,8 @@ def main():
         render_market_regime_tab(market_snapshot)
     elif active_view == "Market Cycle":
         render_market_cycle_tab(get_fred_api_key_for_app())
+    elif active_view == "QQQ":
+        render_qqq_tab()
     elif active_view == "VIX Based Model":
         render_vix_based_model(
             current_cycle.daily if current_cycle is not None else pd.DataFrame()

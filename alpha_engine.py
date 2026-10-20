@@ -18,6 +18,9 @@ ALPHA_CONFIG = {
         "perf_1m": 0.20,
         "perf_3m": 0.45,
         "perf_6m": 0.35,
+        "short_perf_1m": 0.45,
+        "short_perf_3m": 0.35,
+        "short_perf_6m": 0.20,
     },
     "trend": {
         "adx_di": 0.55,
@@ -82,6 +85,7 @@ ALPHA_OUTPUT_COLUMNS = [
     "Alpha_Score",
     "Alpha_State",
     "Momentum_Score",
+    "Short_Term_Momentum_Score",
     "Trend_Quality_Score",
     "Persistence_Score",
     "Market_Regime",
@@ -157,6 +161,11 @@ def calculate_momentum_score(df: pd.DataFrame, config: dict | None = None) -> pd
         float(cfg["perf_1m"]) * out["Perf1M_Rank"]
         + float(cfg["perf_3m"]) * out["Perf3M_Rank"]
         + float(cfg["perf_6m"]) * out["Perf6M_Rank"]
+    )
+    out["Short_Term_Momentum_Score"] = (
+        float(cfg["short_perf_1m"]) * out["Perf1M_Rank"]
+        + float(cfg["short_perf_3m"]) * out["Perf3M_Rank"]
+        + float(cfg["short_perf_6m"]) * out["Perf6M_Rank"]
     )
     return out
 
