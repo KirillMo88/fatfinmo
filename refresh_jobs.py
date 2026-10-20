@@ -609,6 +609,9 @@ def run_scheduler() -> None:
 
     now = datetime.now(timezone.utc)
     retry_seconds = configured_timeout("SCREENER_REFRESH_RETRY_SECONDS", DEFAULT_REFRESH_RETRY_SECONDS)
+    max_concurrent_jobs = configured_timeout(
+        "SCREENER_MAX_CONCURRENT_SCHEDULED_JOBS", MAX_CONCURRENT_SCHEDULED_JOBS
+    )
     jobs = [
         ScheduledJob("nightly_analytics", "nightly-analytics", initial_daily_due(now, nightly_at, "nightly_analytics"), configured_timeout("SCREENER_NIGHTLY_TIMEOUT_SECONDS", DEFAULT_NIGHTLY_TIMEOUT_SECONDS), daily_at=nightly_at),
         ScheduledJob("liquidity_forecast", "liquidity-forecast", initial_daily_due(now, nightly_at, "liquidity_forecast"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=nightly_at),
@@ -623,7 +626,7 @@ def run_scheduler() -> None:
         ScheduledJob("weekly_market_intelligence", "weekly-market-intelligence", now, configured_timeout("SCREENER_WMI_TIMEOUT_SECONDS", 3600), interval_seconds=max(300, wmi_poll_seconds)),
     ]
     log_scheduler(
-        f"Scheduler started; max_parallel={MAX_CONCURRENT_SCHEDULED_JOBS}; "
+        f"Scheduler started; max_parallel={max_concurrent_jobs}; "
         + ", ".join(f"{job.name}={job.due_at.isoformat()}" for job in jobs)
     )
 
@@ -659,7 +662,7 @@ def run_scheduler() -> None:
         active_count = sum(job.process is not None for job in jobs)
         for job in jobs:
             if job.due_at <= now_dt and job.process is None:
-                if active_count >= MAX_CONCURRENT_SCHEDULED_JOBS:
+                if active_count >= max_concurrent_jobs:
                     break
                 launch_scheduled_job(job, retry_seconds)
                 if job.process is None and job.due_at <= now_dt:
