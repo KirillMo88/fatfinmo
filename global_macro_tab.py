@@ -457,6 +457,7 @@ def _saved_fred_macro_series(series_ids: list[str]) -> dict[str, pd.Series]:
                 series = _series_from_frame(group, "Date", "Value")
                 if not series.empty:
                     saved[series_id] = series
+                    _save_fred_macro_series(series_id, series)
                     missing.discard(series_id)
         except Exception:
             continue

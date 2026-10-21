@@ -595,3 +595,24 @@ def test_failed_refresh_preserves_saved_valid_observations():
     assert gl.raw_series(merged, "M2SL").iloc[-1] == 22_000.0
     assert gl.raw_series(merged, "WALCL").iloc[-1] == 6_755_639.0
     assert len(merged.loc[merged["series_id"].eq("WALCL")]) == 1
+
+
+def test_update_keeps_saved_fred_rows_when_new_download_fails(tmp_path, monkeypatch):
+    raw_path = tmp_path / "raw.csv"
+    monthly_path = tmp_path / "monthly.csv"
+    weekly_path = tmp_path / "weekly.csv"
+    pd.DataFrame([raw_row("2026-09-01", "M2SL", 22_000.0, source="FRED")], columns=gl.RAW_COLUMNS).to_csv(raw_path, index=False)
+    monkeypatch.setattr(gl, "RAW_STORAGE_PATH", raw_path)
+    monkeypatch.setattr(gl, "MONTHLY_STORAGE_PATH", monthly_path)
+    monkeypatch.setattr(gl, "WEEKLY_STORAGE_PATH", weekly_path)
+    monkeypatch.setattr(gl, "fetch_raw_global_liquidity", lambda _key: gl.empty_raw_row(
+        "FRED", "FRED", "", "FRED_GLOBAL_SERIES", "US", "FRED_BLOCK", "mixed", "mixed", "native", "ERROR", "Unavailable"
+    ))
+    monkeypatch.setattr(gl, "build_monthly_layer", lambda raw: pd.DataFrame({"date": [pd.Timestamp("2026-09-01")], "us_m2_usd_bn": [gl.raw_series(raw, "M2SL").iloc[-1]]}))
+    monkeypatch.setattr(gl, "build_weekly_layer", lambda _raw: pd.DataFrame({"date": [pd.Timestamp("2026-09-04")]}))
+
+    raw, monthly, _weekly = gl.update_global_liquidity(api_key="test_key", force=True)
+
+    assert gl.raw_series(raw, "M2SL").iloc[-1] == 22_000.0
+    assert monthly["us_m2_usd_bn"].iloc[-1] == 22_000.0
+    assert gl.raw_series(gl.read_frame(raw_path, gl.RAW_COLUMNS), "M2SL").iloc[-1] == 22_000.0

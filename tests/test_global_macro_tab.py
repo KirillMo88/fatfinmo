@@ -67,6 +67,7 @@ def test_fred_macro_uses_saved_archive_during_non_json_outage(tmp_path, monkeypa
     assert result["T5YIE"].iloc[-1] == 2.3
     assert result["DGS2"].iloc[-1] == 3.5
     assert result["DGS3MO"].empty
+    assert (tmp_path / "cache" / "T5YIE.csv").exists()
 
 
 def test_fred_macro_saves_successful_observation_for_future_outage(tmp_path, monkeypatch):
