@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+import httpx
 
 from fred_client import (
     FED_LIQUIDITY_SERIES_ID,
@@ -85,6 +86,32 @@ def test_download_fred_series_uses_2010_default_start(monkeypatch):
 
     assert captured["params"]["observation_start"] == "2010-01-01"
     assert parsed["Date"].iloc[0] == pd.Timestamp("2010-01-01")
+
+
+def test_download_fred_series_rejects_non_json_response_without_leaking_key(monkeypatch):
+    response = httpx.Response(
+        200,
+        text="<html>Upstream temporarily unavailable</html>",
+        request=httpx.Request("GET", "https://api.stlouisfed.org/fred/series/observations"),
+    )
+    monkeypatch.setattr("fred_client.httpx.get", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(FredApiError, match="non-JSON response for DGS2") as error:
+        download_fred_series("DGS2", api_key="secret_key")
+
+    assert "secret_key" not in str(error.value)
+
+
+def test_download_fred_series_rejects_unexpected_json_shape(monkeypatch):
+    response = httpx.Response(
+        200,
+        json=["not an observations object"],
+        request=httpx.Request("GET", "https://api.stlouisfed.org/fred/series/observations"),
+    )
+    monkeypatch.setattr("fred_client.httpx.get", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(FredApiError, match="unexpected JSON payload for DGS2"):
+        download_fred_series("DGS2", api_key="secret_key")
 
 
 def test_parse_fred_observations_converts_dates_and_missing_values():
