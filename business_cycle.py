@@ -10,6 +10,7 @@ import pandas as pd
 
 from finance_core import download_completed_ohlcv
 from fred_client import FredApiError, download_fred_series
+from historical_archive import restore_validated_file
 
 
 BUSINESS_CYCLE_MODEL_VERSION = "BUSINESS_CYCLE_V2"
@@ -420,6 +421,13 @@ def read_fred_cache() -> pd.DataFrame:
             return pd.read_parquet(BUSINESS_CYCLE_FRED_CACHE)
     except Exception:
         pass
+    if restore_validated_file(
+        "MODEL_INPUTS", "BUSINESS_CYCLE_FRED_CACHE", BUSINESS_CYCLE_FRED_CACHE
+    ):
+        try:
+            return pd.read_parquet(BUSINESS_CYCLE_FRED_CACHE)
+        except Exception:
+            pass
     return pd.DataFrame(columns=["Series_ID", "Date", "Value", "Description", "IsReleaseDated"])
 
 

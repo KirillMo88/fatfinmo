@@ -16,6 +16,8 @@ import httpx
 import numpy as np
 import pandas as pd
 
+from historical_archive import restore_validated_file
+
 
 WORLD_ECONOMY_TTL_SECONDS = 7 * 24 * 60 * 60
 WORLD_ECONOMY_STORAGE_DIR = Path(
@@ -99,6 +101,10 @@ def load_world_economy_data(
     metadata_path = cache_dir / "source_metadata.json"
     metadata = _read_json(metadata_path)
     warning: str | None = None
+
+    required_cache = (bis_path, dsr_path, weo_path, oecd_rates_path)
+    if not all(path.exists() for path in required_cache):
+        _restore_world_economy_archive(cache_dir)
 
     should_refresh = force_refresh or _cache_is_stale(
         (bis_path, dsr_path, weo_path, oecd_rates_path, cds_path, reserves_path)
@@ -203,7 +209,9 @@ def load_world_economy_data(
             if reserves_error:
                 warning = f"World Bank reserves refresh failed; using cached values if available: {reserves_error}"
         except Exception as exc:
-            if not (bis_path.exists() and weo_path.exists()):
+            if not _world_economy_cache_is_valid(bis_path, dsr_path, weo_path, oecd_rates_path):
+                _restore_world_economy_archive(cache_dir)
+            if not _world_economy_cache_is_valid(bis_path, dsr_path, weo_path, oecd_rates_path):
                 raise RuntimeError(f"Could not refresh World Economy sources and no validated cache is available: {exc}") from exc
             warning = f"Refresh failed; showing last validated BIS/IMF snapshot: {exc}"
 
@@ -243,6 +251,39 @@ def load_world_economy_data(
         "reference_year": effective_year,
         "requested_reference_year": int(reference_year),
     }
+
+
+def _restore_world_economy_archive(cache_dir: Path) -> bool:
+    restored = False
+    mapping = {
+        "BIS_TOTAL_CREDIT": cache_dir / "bis_ws_tc_csv_flat.zip",
+        "BIS_DSR": cache_dir / "bis_ws_dsr_csv_flat.zip",
+        "OECD_LONG_TERM_RATES": cache_dir / "oecd_long_term_interest_rates.csv",
+        "IMF_WEO_COUNTRIES": cache_dir / "imf_weo_countries.xlsx",
+        "WORLD_BANK_RESERVES": cache_dir / "world_bank_gold_fx_reserves.csv",
+        "SOVEREIGN_CDS": cache_dir / "world_government_bonds_sovereign_cds.html",
+        "SOURCE_METADATA": cache_dir / "source_metadata.json",
+    }
+    for dataset, destination in mapping.items():
+        if restore_validated_file("WORLD_ECONOMY", dataset, destination):
+            restored = True
+    return restored
+
+
+def _world_economy_cache_is_valid(
+    bis_path: Path,
+    dsr_path: Path,
+    weo_path: Path,
+    oecd_rates_path: Path,
+) -> bool:
+    try:
+        _parse_bis_bulk(bis_path.read_bytes())
+        _parse_bis_dsr(dsr_path.read_bytes())
+        _validate_weo_workbook(weo_path.read_bytes())
+        _parse_oecd_long_term_rates(oecd_rates_path.read_bytes())
+        return True
+    except Exception:
+        return False
 
 
 def discover_imf_weo_workbook_url(client: httpx.Client | None = None) -> str:

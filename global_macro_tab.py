@@ -36,6 +36,39 @@ FRED_MACRO_ARCHIVE_PATHS = (
     Path(__file__).with_name("persistent") / "rates_financial_conditions" / "fred_series.parquet",
     Path(__file__).with_name("persistent") / "business_cycle" / "fred_series.parquet",
 )
+GLOBAL_MACRO_FRED_SERIES = (
+    "T5YIE",
+    "T10YIE",
+    "MICH",
+    "DFII10",
+    "FEDFUNDS",
+    "DGS2",
+    "DGS10",
+    "DGS3MO",
+    "IRLTLT01DEM156N",
+    "IRLTLT01FRM156N",
+    "IRLTLT01CNM156N",
+    "IRLTLT01JPM156N",
+    "NAPM",
+    "RSAFS",
+    "NMFCI",
+    "ICSA",
+    "CFNAI",
+    "BAMLH0A0HYM2",
+    "BAMLC0A0CM",
+    "ANFCI",
+)
+GLOBAL_MACRO_MARKET_TICKERS = {
+    "SPY": "SPY",
+    "QQQ": "QQQ",
+    "GLD": "GLD",
+    "BTC-USD": "BTC-USD",
+    "DXY": "DX-Y.NYB",
+    "WTI": "CL=F",
+    "Copper": "HG=F",
+    "VIX": "^VIX",
+    "MOVE": "^MOVE",
+}
 HORIZON_WEEKS = {
     "1W": 1,
     "1M": 4,
@@ -393,28 +426,7 @@ def load_global_macro_snapshot(api_key_signature: str = "", refresh_nonce: int =
 
 
 def _download_fred_macro_series(api_key: str | None) -> dict[str, pd.Series]:
-    series_ids = [
-        "T5YIE",
-        "T10YIE",
-        "MICH",
-        "DFII10",
-        "FEDFUNDS",
-        "DGS2",
-        "DGS10",
-        "DGS3MO",
-        "IRLTLT01DEM156N",
-        "IRLTLT01FRM156N",
-        "IRLTLT01CNM156N",
-        "IRLTLT01JPM156N",
-        "NAPM",
-        "RSAFS",
-        "NMFCI",
-        "ICSA",
-        "CFNAI",
-        "BAMLH0A0HYM2",
-        "BAMLC0A0CM",
-        "ANFCI",
-    ]
+    series_ids = list(GLOBAL_MACRO_FRED_SERIES)
     out: dict[str, pd.Series] = {}
     saved = _saved_fred_macro_series(series_ids)
     service_unavailable = False
@@ -476,19 +488,8 @@ def _save_fred_macro_series(series_id: str, series: pd.Series) -> None:
 
 
 def _download_market_macro_series() -> dict[str, pd.Series]:
-    tickers = {
-        "SPY": "SPY",
-        "QQQ": "QQQ",
-        "GLD": "GLD",
-        "BTC-USD": "BTC-USD",
-        "DXY": "DX-Y.NYB",
-        "WTI": "CL=F",
-        "Copper": "HG=F",
-        "VIX": "^VIX",
-        "MOVE": "^MOVE",
-    }
     out: dict[str, pd.Series] = {}
-    for key, ticker in tickers.items():
+    for key, ticker in GLOBAL_MACRO_MARKET_TICKERS.items():
         try:
             frame, _ = download_completed_ohlcv_fresh(
                 ticker, period="max", max_business_days_old=2,

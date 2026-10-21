@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - production Docker installs beautifulso
 
 from finance_core import download_completed_ohlcv, market_business_days_old
 from fred_client import FredApiError, download_fred_series, download_fred_series_batch
+from historical_archive import read_raw_table
 
 
 CHINA_M2_SERIES_ID = "Money & Quasi-money (M2)"
@@ -2291,7 +2292,15 @@ def update_global_liquidity(api_key: str | None = None, force: bool = False) -> 
     if not force and is_storage_fresh():
         return read_global_liquidity()
     raw = fetch_raw_global_liquidity(api_key)
-    raw = preserve_saved_raw_observations(raw, read_frame(RAW_STORAGE_PATH, RAW_COLUMNS))
+    saved = read_frame(RAW_STORAGE_PATH, RAW_COLUMNS)
+    if saved.empty:
+        archived = read_raw_table("GLOBAL_LIQUIDITY", "RAW_OFFICIAL_SERIES")
+        if not archived.empty:
+            for column in RAW_COLUMNS:
+                if column not in archived:
+                    archived[column] = np.nan
+            saved = archived[RAW_COLUMNS]
+    raw = preserve_saved_raw_observations(raw, saved)
     monthly = build_monthly_layer(raw)
     weekly = build_weekly_layer(raw)
     write_frame(raw, RAW_STORAGE_PATH)
@@ -2316,7 +2325,21 @@ def preserve_saved_raw_observations(fresh: pd.DataFrame, saved: pd.DataFrame) ->
 
 
 def read_global_liquidity() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    return read_frame(RAW_STORAGE_PATH, RAW_COLUMNS), read_frame(MONTHLY_STORAGE_PATH, MONTHLY_COLUMNS), read_frame(WEEKLY_STORAGE_PATH, WEEKLY_COLUMNS)
+    raw = read_frame(RAW_STORAGE_PATH, RAW_COLUMNS)
+    if raw.empty or pd.to_numeric(raw.get("raw_value"), errors="coerce").notna().sum() == 0:
+        archived = read_raw_table("GLOBAL_LIQUIDITY", "RAW_OFFICIAL_SERIES")
+        if not archived.empty:
+            for column in RAW_COLUMNS:
+                if column not in archived:
+                    archived[column] = np.nan
+            raw = archived[RAW_COLUMNS]
+    monthly = read_frame(MONTHLY_STORAGE_PATH, MONTHLY_COLUMNS)
+    weekly = read_frame(WEEKLY_STORAGE_PATH, WEEKLY_COLUMNS)
+    if not raw.empty and monthly.empty:
+        monthly = build_monthly_layer(raw)
+    if not raw.empty and weekly.empty:
+        weekly = build_weekly_layer(raw)
+    return raw, monthly, weekly
 
 
 def is_storage_fresh() -> bool:

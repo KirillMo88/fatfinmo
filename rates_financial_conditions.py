@@ -11,6 +11,7 @@ import pandas as pd
 
 from finance_core import download_completed_ohlcv_fresh, market_business_days_old
 from fred_client import download_fred_series, get_fred_api_key
+from historical_archive import restore_validated_file
 
 
 MODEL_VERSION = "RATES_FINANCIAL_CONDITIONS_V1"
@@ -253,16 +254,32 @@ def _series_from_frame(frame: pd.DataFrame) -> pd.Series:
 
 
 def _read_fred_cache() -> pd.DataFrame:
-    return pd.read_parquet(FRED_CACHE) if FRED_CACHE.exists() else pd.DataFrame(columns=["Series_ID", "Date", "Value"])
+    frame = _read_or_restore_cache(FRED_CACHE, "RATES_FRED_CACHE")
+    return frame if not frame.empty else pd.DataFrame(columns=["Series_ID", "Date", "Value"])
+
+
+def _read_or_restore_cache(path: Path, dataset: str) -> pd.DataFrame:
+    try:
+        if path.exists():
+            return pd.read_parquet(path)
+    except Exception:
+        pass
+    if restore_validated_file("MODEL_INPUTS", dataset, path):
+        try:
+            return pd.read_parquet(path)
+        except Exception:
+            pass
+    return pd.DataFrame()
 
 
 def _load_initial_releases(api_key: str | None, refresh: bool = False) -> pd.DataFrame:
     now = pd.Timestamp.now(tz="UTC").tz_localize(None)
-    if FRED_INITIAL_CACHE.exists() and not refresh and now - pd.Timestamp(FRED_INITIAL_CACHE.stat().st_mtime, unit="s") < pd.Timedelta(days=1):
-        return pd.read_parquet(FRED_INITIAL_CACHE)
+    restored_cache = _read_or_restore_cache(FRED_INITIAL_CACHE, "RATES_FRED_INITIAL_CACHE")
+    if not restored_cache.empty and FRED_INITIAL_CACHE.exists() and not refresh and now - pd.Timestamp(FRED_INITIAL_CACHE.stat().st_mtime, unit="s") < pd.Timedelta(days=1):
+        return restored_cache
     try:
         key = get_fred_api_key(api_key)
-        cached = pd.read_parquet(FRED_INITIAL_CACHE) if FRED_INITIAL_CACHE.exists() else pd.DataFrame()
+        cached = restored_cache
         frames = [cached] if not cached.empty else []
         for series_id in INITIAL_RELEASE_IDS:
             prior = cached.loc[cached["Series_ID"].eq(series_id)] if not cached.empty else pd.DataFrame()
@@ -301,15 +318,17 @@ def _load_initial_releases(api_key: str | None, refresh: bool = False) -> pd.Dat
         initial.to_parquet(FRED_INITIAL_CACHE, index=False)
         return initial
     except Exception as exc:
-        if FRED_INITIAL_CACHE.exists():
-            return pd.read_parquet(FRED_INITIAL_CACHE)
+        cached = _read_or_restore_cache(FRED_INITIAL_CACHE, "RATES_FRED_INITIAL_CACHE")
+        if not cached.empty:
+            return cached
         raise RuntimeError(f"FRED initial-release history unavailable: {exc}") from exc
 
 
 def _load_credit_archive(refresh: bool = False) -> tuple[pd.DataFrame, str]:
     now = pd.Timestamp.now(tz="UTC").tz_localize(None)
-    if CREDIT_ARCHIVE.exists() and not refresh and now - pd.Timestamp(CREDIT_ARCHIVE.stat().st_mtime, unit="s") < pd.Timedelta(days=1):
-        return pd.read_parquet(CREDIT_ARCHIVE), "TRADINGVIEW_WEEKLY_CACHE"
+    restored_cache = _read_or_restore_cache(CREDIT_ARCHIVE, "RATES_CREDIT_WEEKLY_ARCHIVE")
+    if not restored_cache.empty and CREDIT_ARCHIVE.exists() and not refresh and now - pd.Timestamp(CREDIT_ARCHIVE.stat().st_mtime, unit="s") < pd.Timedelta(days=1):
+        return restored_cache, "TRADINGVIEW_WEEKLY_CACHE"
     try:
         from tradingview_mcp import call_tool
 
@@ -328,8 +347,9 @@ def _load_credit_archive(refresh: bool = False) -> tuple[pd.DataFrame, str]:
         archive.to_parquet(CREDIT_ARCHIVE, index=False)
         return archive, "TRADINGVIEW_WEEKLY"
     except Exception as exc:
-        if CREDIT_ARCHIVE.exists():
-            return pd.read_parquet(CREDIT_ARCHIVE), "STALE_TRADINGVIEW_CACHE"
+        cached = _read_or_restore_cache(CREDIT_ARCHIVE, "RATES_CREDIT_WEEKLY_ARCHIVE")
+        if not cached.empty:
+            return cached, "STALE_TRADINGVIEW_CACHE"
         raise RuntimeError(f"Required HY/IG OAS full history unavailable: {exc}") from exc
 
 

@@ -12,6 +12,7 @@ import pandas as pd
 from fred_client import download_fred_series
 from funding_conditions import STORAGE_DIR as FUNDING_STORAGE_DIR
 from funding_conditions import _load_initial_release, read_snapshot as read_funding_snapshot
+from historical_archive import restore_validated_file
 
 
 MODEL_VERSION = "TREASURY_FISCAL_REGIME_V1"
@@ -479,7 +480,17 @@ def _load_delayed_current_vintage(
     series_id: str, api_key: str | None, refresh: bool,
 ) -> tuple[pd.DataFrame, str]:
     path = STORAGE_DIR / f"fred_{series_id.lower()}_delayed.parquet"
-    cached = pd.read_parquet(path) if path.exists() else _empty_source()
+    try:
+        cached = pd.read_parquet(path) if path.exists() else _empty_source()
+    except Exception:
+        cached = _empty_source()
+    if cached.empty and restore_validated_file(
+        "MODEL_INPUTS", f"TREASURY_{path.stem.upper()}", path
+    ):
+        try:
+            cached = pd.read_parquet(path)
+        except Exception:
+            cached = _empty_source()
     fresh = path.exists() and pd.Timestamp.now().timestamp() - path.stat().st_mtime < 20 * 3600
     if fresh and not refresh and not cached.empty:
         return _clean_source(cached), "FRED_REVISED_HISTORY_DELAYED_CACHE"

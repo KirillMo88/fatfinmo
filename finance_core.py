@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+from historical_archive import read_model_market_history
 from ta.momentum import ROCIndicator, RSIIndicator
 from ta.trend import MACD
 
@@ -181,14 +183,21 @@ def convert_krw_ohlcv_to_usd(frame: pd.DataFrame, usd_krw: pd.DataFrame) -> pd.D
     return out
 
 
-def download_completed_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
+def download_completed_ohlcv(
+    ticker: str,
+    period: str = "10y",
+    *,
+    auto_adjust: bool = True,
+    archive_key: str | None = None,
+    allow_archive_fallback: bool = True,
+) -> pd.DataFrame:
     for attempt in range(3):
         try:
             raw = yf.download(
                 ticker,
                 period=period,
                 interval="1d",
-                auto_adjust=True,
+                auto_adjust=auto_adjust,
                 progress=False,
                 threads=False,
             )
@@ -200,6 +209,10 @@ def download_completed_ohlcv(ticker: str, period: str = "10y") -> pd.DataFrame:
         except Exception:
             pass
         time.sleep(0.5 * (attempt + 1))
+    if allow_archive_fallback:
+        archived = read_model_market_history(archive_key or ticker, period=period)
+        if not archived.empty:
+            return archived
     return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
 
