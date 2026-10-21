@@ -6311,13 +6311,6 @@ def _prepare_performance_dashboard_frame(df: pd.DataFrame, view_mode: str) -> pd
     return result
 
 
-def _performance_dashboard_symmetric_domain(values: pd.Series) -> list[float]:
-    numeric = pd.to_numeric(values, errors="coerce").dropna()
-    extent = max(float(numeric.abs().max()) if not numeric.empty else 0.0, 1.0)
-    extent *= 1.15
-    return [-extent, extent]
-
-
 PERFORMANCE_DASHBOARD_PLOTLY_CONFIG = {
     "displaylogo": False,
     "scrollZoom": False,
@@ -6381,8 +6374,6 @@ def _performance_dashboard_plotly_figure(
     y_column: str,
     x_title: str,
     y_title: str,
-    x_domain: list[float],
-    y_domain: list[float],
     quadrant_labels: tuple[str, str, str, str],
     x_divider: float,
     y_divider: float,
@@ -6471,14 +6462,14 @@ def _performance_dashboard_plotly_figure(
     )
     fig.update_xaxes(
         title=x_title,
-        range=x_domain,
+        autorange=True,
         gridcolor="#263041",
         zeroline=False,
         fixedrange=False,
     )
     fig.update_yaxes(
         title=y_title,
-        range=y_domain,
+        autorange=True,
         gridcolor="#263041",
         zeroline=False,
         fixedrange=False,
@@ -6515,8 +6506,6 @@ def _render_performance_rotation_map(data: pd.DataFrame, view_mode: str) -> None
     d["Tooltip_Perf_1W"] = _performance_dashboard_format_values(d["Perf_1W_%"], signed=True, suffix="%")
     d["Tooltip_Perf_1M"] = _performance_dashboard_format_values(d["Perf_1M_%"], signed=True, suffix="%")
     d["Tooltip_Perf_3M"] = _performance_dashboard_format_values(d["Perf_3M_%"], signed=True, suffix="%")
-    x_domain = _performance_dashboard_symmetric_domain(d[x_column])
-    y_domain = _performance_dashboard_symmetric_domain(d[y_column])
     colors = d["Performance_1W_Direction"].map(
         {"Positive": "#22c55e", "Negative": "#ef4444", "Neutral": "#9ca3af"}
     ).tolist()
@@ -6549,8 +6538,6 @@ def _render_performance_rotation_map(data: pd.DataFrame, view_mode: str) -> None
         y_column,
         x_title,
         y_title,
-        x_domain,
-        y_domain,
         labels,
         0.0,
         0.0,
@@ -6610,8 +6597,6 @@ def _render_performance_directional_trend_map(data: pd.DataFrame, view_mode: str
     d["Quadrant"] = _performance_dashboard_quadrant(
         d["Selected_Performance"], d["Selected_Trend_Score"], 0.0, 0.0, labels
     )
-    x_domain = _performance_dashboard_symmetric_domain(d["Selected_Performance"])
-    y_domain = [-100.0, 100.0]
     custom_columns = [
         "Entity_Label",
         "Tooltip_Perf_1W",
@@ -6640,8 +6625,6 @@ def _render_performance_directional_trend_map(data: pd.DataFrame, view_mode: str
         "Selected_Trend_Score",
         f"{performance_label} (%)",
         trend_label,
-        x_domain,
-        y_domain,
         labels,
         0.0,
         0.0,
@@ -6704,14 +6687,6 @@ def _render_momentum_rsi_map(data: pd.DataFrame, view_mode: str) -> None:
     d["Quadrant"] = _performance_dashboard_quadrant(
         d["Selected_Momentum_Score"], d["Selected_RSI"], 50.0, 50.0, labels
     )
-    x_domain = [0.0, 100.0]
-    rsi_values = pd.to_numeric(d["Selected_RSI"], errors="coerce").dropna()
-    rsi_min = float(rsi_values.min())
-    rsi_max = float(rsi_values.max())
-    y_domain = [
-        max(0.0, min(20.0, float(np.floor(rsi_min / 5.0) * 5.0))),
-        min(100.0, max(80.0, float(np.ceil(rsi_max / 5.0) * 5.0))),
-    ]
     custom_columns = [
         "Entity_Label",
         "Tooltip_Momentum",
@@ -6744,8 +6719,6 @@ def _render_momentum_rsi_map(data: pd.DataFrame, view_mode: str) -> None:
         "Selected_RSI",
         momentum_label,
         rsi_label,
-        x_domain,
-        y_domain,
         labels,
         50.0,
         50.0,
@@ -6768,7 +6741,6 @@ def _render_momentum_extension_risk_map(data: pd.DataFrame, view_mode: str) -> N
     d["Tooltip_RSI_14W"] = _performance_dashboard_format_values(d["RSI_14W"])
     d["Tooltip_Perf_12M_Percentile"] = _performance_dashboard_format_values(d["Perf_12M_Percentile"])
     d["Tooltip_Risk_Breadth"] = _performance_dashboard_format_values(d["Risk_Breadth_%"], suffix="%")
-    domain = [0.0, 100.0]
     custom_columns = [
         "Entity_Label",
         "Tooltip_RSI_14W",
@@ -6799,8 +6771,6 @@ def _render_momentum_extension_risk_map(data: pd.DataFrame, view_mode: str) -> N
         "RSI_14W",
         "Performance 12M Percentile",
         "Weekly RSI 14W",
-        domain,
-        domain,
         labels,
         50.0,
         50.0,
