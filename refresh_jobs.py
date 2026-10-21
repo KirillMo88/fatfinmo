@@ -22,6 +22,7 @@ from rates_financial_conditions import SNAPSHOT_PATH as RATES_FC_SNAPSHOT_PATH, 
 from funding_conditions import WEEKLY_PATH as FUNDING_SNAPSHOT_PATH, refresh_snapshot as refresh_funding_snapshot
 from treasury_fiscal_regime import SNAPSHOT_PATH as TREASURY_FISCAL_SNAPSHOT_PATH, refresh_snapshot as refresh_treasury_fiscal_snapshot
 from treasury_funding_policy import refresh_snapshot as refresh_treasury_funding_policy_snapshot
+from historical_archive_job import run_weekly_historical_archive
 from ramp_ai_index import SNAPSHOT_PATH as RAMP_AI_INDEX_SNAPSHOT_PATH, refresh_ramp_ai_index_snapshot
 from technical_outlook_simple_v3.config import (
     CONFIG_VERSION as TECHNICAL_OUTLOOK_SIMPLE_V3_CONFIG_VERSION,
@@ -47,6 +48,7 @@ JOB_LOG_PATH = JOB_DIR / "refresh_jobs.jsonl"
 DEFAULT_NIGHTLY_UTC = "02:30"
 DEFAULT_FUNDING_LATE_RETRY_UTC = "05:00"
 DEFAULT_WEEKLY_POSITIONING_UTC = "12:30"
+DEFAULT_HISTORICAL_ARCHIVE_UTC = "03:30"
 DEFAULT_RAMP_AI_INDEX_UTC = "06:15"
 DEFAULT_RAMP_AI_INDEX_DAY = 15
 DEFAULT_MARKET_PERFORMANCE_INTERVAL_SECONDS = 600
@@ -193,6 +195,30 @@ def run_weekly_positioning() -> None:
         log_job("weekly_positioning", started, "SKIPPED_LOCKED")
     except Exception as exc:
         log_job("weekly_positioning", started, "FAILED", rows_updated, source_status=source_status, error=str(exc))
+        raise
+
+
+def run_historical_archive() -> None:
+    started = time.time()
+    try:
+        with job_lock("historical_archive"):
+            report = run_weekly_historical_archive(api_key=os.getenv("FRED_API_KEY"))
+        failed = report.loc[report.get("Status", pd.Series(dtype="object")).astype(str).eq("FAILED")]
+        rows_updated = int(pd.to_numeric(report.get("Rows", pd.Series(dtype="float64")), errors="coerce").fillna(0).sum())
+        source_status = report.fillna("").to_dict(orient="records")
+        if not failed.empty:
+            message = "; ".join(
+                f"{row.get('Provider')}/{row.get('Dataset')}: {row.get('Error') or 'failed'}"
+                for row in failed.to_dict(orient="records")
+            )
+            log_job("historical_archive", started, "FAILED", rows_updated, source_status=source_status, error=message)
+            raise RuntimeError(message)
+        log_job("historical_archive", started, "CURRENT", rows_updated, source_status=source_status)
+    except FileExistsError:
+        log_job("historical_archive", started, "SKIPPED_LOCKED")
+    except Exception:
+        if _last_job_status_since("historical_archive", started) != "FAILED":
+            log_job("historical_archive", started, "FAILED", error="Historical archive refresh failed")
         raise
 
 
@@ -597,6 +623,10 @@ def run_scheduler() -> None:
         os.getenv("SCREENER_WEEKLY_POSITIONING_UTC", DEFAULT_WEEKLY_POSITIONING_UTC),
         DEFAULT_WEEKLY_POSITIONING_UTC,
     )
+    historical_archive_at = parse_utc_hhmm(
+        os.getenv("SCREENER_HISTORICAL_ARCHIVE_UTC", DEFAULT_HISTORICAL_ARCHIVE_UTC),
+        DEFAULT_HISTORICAL_ARCHIVE_UTC,
+    )
     ramp_ai_index_at = parse_utc_hhmm(
         os.getenv("SCREENER_RAMP_AI_INDEX_UTC", DEFAULT_RAMP_AI_INDEX_UTC),
         DEFAULT_RAMP_AI_INDEX_UTC,
@@ -606,6 +636,7 @@ def run_scheduler() -> None:
     wmi_poll_seconds = configured_timeout("WMI_READINESS_POLL_SECONDS", DEFAULT_WMI_READINESS_POLL_SECONDS)
     poll_seconds = int(os.getenv("SCREENER_SCHEDULER_POLL_SECONDS", str(DEFAULT_SCHEDULER_POLL_SECONDS)))
     weekly_weekday = int(os.getenv("SCREENER_WEEKLY_POSITIONING_WEEKDAY", "5"))
+    historical_archive_weekday = int(os.getenv("SCREENER_HISTORICAL_ARCHIVE_WEEKDAY", "5"))
 
     now = datetime.now(timezone.utc)
     retry_seconds = configured_timeout("SCREENER_REFRESH_RETRY_SECONDS", DEFAULT_REFRESH_RETRY_SECONDS)
@@ -621,6 +652,7 @@ def run_scheduler() -> None:
         ScheduledJob("rates_financial_conditions_late_retry", "rates-financial-conditions-late-retry", initial_daily_due(now, funding_retry_at, "rates_financial_conditions_late_retry"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=funding_retry_at),
         ScheduledJob("funding_conditions_late_retry", "funding-conditions-late-retry", initial_daily_due(now, funding_retry_at, "funding_conditions_late_retry"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), daily_at=funding_retry_at),
         ScheduledJob("weekly_positioning", "weekly-positioning", initial_weekly_due(now, weekly_weekday, weekly_at, "weekly_positioning"), configured_timeout("SCREENER_WEEKLY_POSITIONING_TIMEOUT_SECONDS", DEFAULT_WEEKLY_POSITIONING_TIMEOUT_SECONDS), weekly_weekday=weekly_weekday, weekly_at=weekly_at),
+        ScheduledJob("historical_archive", "historical-archive", initial_weekly_due(now, historical_archive_weekday, historical_archive_at, "historical_archive"), configured_timeout("SCREENER_HISTORICAL_ARCHIVE_TIMEOUT_SECONDS", DEFAULT_NIGHTLY_TIMEOUT_SECONDS), weekly_weekday=historical_archive_weekday, weekly_at=historical_archive_at),
         ScheduledJob("ramp_ai_index", "ramp-ai-index", initial_monthly_due(now, ramp_ai_index_day, ramp_ai_index_at, "ramp_ai_index"), configured_timeout("SCREENER_REFRESH_TIMEOUT_SECONDS", DEFAULT_REFRESH_TIMEOUT_SECONDS), monthly_day=ramp_ai_index_day, monthly_at=ramp_ai_index_at),
         ScheduledJob("market_performance_10m", "market-performance", now, configured_timeout("SCREENER_MARKET_PERFORMANCE_TIMEOUT_SECONDS", DEFAULT_MARKET_PERFORMANCE_TIMEOUT_SECONDS), interval_seconds=max(60, overlay_interval)),
         ScheduledJob("weekly_market_intelligence", "weekly-market-intelligence", now, configured_timeout("SCREENER_WMI_TIMEOUT_SECONDS", 3600), interval_seconds=max(300, wmi_poll_seconds)),
@@ -676,7 +708,7 @@ def run_scheduler() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screener refresh jobs")
-    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "liquidity-forecast", "rates-financial-conditions", "rates-financial-conditions-late-retry", "funding-conditions", "funding-conditions-late-retry", "treasury-fiscal-regime", "weekly-positioning", "ramp-ai-index", "weekly-market-intelligence", "scheduler"])
+    parser.add_argument("job", choices=["market-performance", "nightly-analytics", "liquidity-forecast", "rates-financial-conditions", "rates-financial-conditions-late-retry", "funding-conditions", "funding-conditions-late-retry", "treasury-fiscal-regime", "weekly-positioning", "historical-archive", "ramp-ai-index", "weekly-market-intelligence", "scheduler"])
     args = parser.parse_args()
     if args.job == "market-performance":
         update_market_performance_overlay()
@@ -696,6 +728,8 @@ def main() -> None:
         run_treasury_fiscal_regime()
     elif args.job == "weekly-positioning":
         run_weekly_positioning()
+    elif args.job == "historical-archive":
+        run_historical_archive()
     elif args.job == "ramp-ai-index":
         run_ramp_ai_index()
     elif args.job == "weekly-market-intelligence":

@@ -45,6 +45,16 @@ Refresh outcomes and source errors are recorded in
 guarantee that an upstream provider has published new data; failed CFTC source
 fetches are recorded as failures and retried while retaining the last saved data.
 
+The macro historical archive runs at 03:30 UTC every Saturday by default
+(`SCREENER_HISTORICAL_ARCHIVE_WEEKDAY=5`). It keeps only `last_good` and
+`previous_good` for each registered series. Runtime data loads remain live-first;
+FRED, Global Liquidity, and World Economy fall back to these verified versions when
+their upstream source or current cache is unavailable. The archive is stored in
+`persistent/historical_archive` and shared by `screener` and `screener-jobs`.
+Only the small, explicit set of market histories consumed by models and charts is
+included (for example SPY, VIX, DXY, MOVE, and commodity proxies); the broad Table
+universe is deliberately not archived.
+
 To roll back, run the previous release's Compose file against the same project:
 
 ```bash

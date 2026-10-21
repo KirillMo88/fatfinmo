@@ -7,7 +7,6 @@ import warnings
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from ta.momentum import RSIIndicator
 
 from correction_bottom import calculate_correction_bottom_indicator
@@ -17,7 +16,7 @@ from broker_margin_leverage import (
     build_broker_margin_leverage_history,
 )
 from current_risk import CURRENT_RISK_MODEL_VERSION, calculate_current_risk_v1
-from finance_core import drop_incomplete_daily_bar
+from finance_core import download_completed_ohlcv
 from fred_client import FredApiError, download_fred_series
 from hy_oas import combine_hy_oas_sources, weekly_archive_available_frame
 from market_model import calculate_positioning_risk_history, market_model_config
@@ -147,8 +146,7 @@ def download_market_cycle_prices(end: pd.Timestamp) -> dict[str, pd.DataFrame]:
     out: dict[str, pd.DataFrame] = {}
     for ticker in MARKET_CYCLE_TICKERS:
         try:
-            raw = yf.download(ticker, period="max", interval="1d", auto_adjust=True, progress=False, threads=False)
-            frame = drop_incomplete_daily_bar(extract_ohlcv(raw, ticker))
+            frame = download_completed_ohlcv(ticker, period="max")
             if not frame.empty:
                 frame = frame.loc[pd.to_datetime(frame.index, errors="coerce").tz_localize(None) <= end].copy()
             out[ticker] = frame
@@ -156,8 +154,12 @@ def download_market_cycle_prices(end: pd.Timestamp) -> dict[str, pd.DataFrame]:
             out[ticker] = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
     for ticker, output_key in CURRENT_RISK_RAW_TICKERS.items():
         try:
-            raw = yf.download(ticker, period="max", interval="1d", auto_adjust=False, progress=False, threads=False)
-            frame = drop_incomplete_daily_bar(extract_ohlcv(raw, ticker))
+            frame = download_completed_ohlcv(
+                ticker,
+                period="max",
+                auto_adjust=False,
+                archive_key=output_key,
+            )
             if not frame.empty:
                 frame = frame.loc[pd.to_datetime(frame.index, errors="coerce").tz_localize(None) <= end].copy()
             out[output_key] = frame

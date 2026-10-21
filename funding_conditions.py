@@ -12,6 +12,7 @@ import pandas as pd
 
 from finance_core import download_completed_ohlcv, market_business_days_old
 from fred_client import download_fred_series, get_fred_api_key
+from historical_archive import restore_validated_file
 
 
 MODEL_VERSION = "FUNDING_CONDITIONS_V1"
@@ -242,13 +243,25 @@ def _cache_path(series_id: str) -> Path:
     return STORAGE_DIR / f"fred_{series_id.lower()}_initial.parquet"
 
 
+def _read_or_restore_cache(path: Path, dataset: str) -> pd.DataFrame:
+    try:
+        if path.exists():
+            return pd.read_parquet(path)
+    except Exception:
+        pass
+    if restore_validated_file("MODEL_INPUTS", dataset, path):
+        try:
+            return pd.read_parquet(path)
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+
 def read_wresbal_history() -> pd.DataFrame:
     """Return the full cached point-in-time WRESBAL history independently of SOFR."""
     path = _cache_path("WRESBAL")
     columns = ["ObservationDate", "AvailableDate", "WRESBAL_USD_Millions", "WRESBAL_USD_Bn"]
-    if not path.exists():
-        return pd.DataFrame(columns=columns)
-    frame = pd.read_parquet(path)
+    frame = _read_or_restore_cache(path, "FUNDING_FRED_WRESBAL_INITIAL")
     required = {"ObservationDate", "AvailableDate", "Value"}
     if frame.empty or not required.issubset(frame.columns):
         return pd.DataFrame(columns=columns)
@@ -273,7 +286,8 @@ def _load_initial_release(
     cache_dir = cache_dir or STORAGE_DIR
     path = cache_dir / f"fred_{series_id.lower()}_initial.parquet"
     now = pd.Timestamp.now(tz="UTC").tz_localize(None)
-    cached = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+    prefix = "FUNDING" if Path(cache_dir) == STORAGE_DIR else "TREASURY"
+    cached = _read_or_restore_cache(path, f"{prefix}_{path.stem.upper()}")
     if not refresh and not cached.empty and now - pd.Timestamp(path.stat().st_mtime, unit="s") < pd.Timedelta(hours=20):
         return cached, "INITIAL_RELEASE_CACHE"
     try:
@@ -324,7 +338,7 @@ def _load_initial_release(
 def _load_iorb_fallback(api_key: str | None, refresh: bool = False) -> tuple[pd.DataFrame, str]:
     path = STORAGE_DIR / "fred_iorb_lagged.parquet"
     now = pd.Timestamp.now(tz="UTC").tz_localize(None)
-    cached = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+    cached = _read_or_restore_cache(path, "FUNDING_FRED_IORB_LAGGED")
     if not refresh and not cached.empty and now - pd.Timestamp(path.stat().st_mtime, unit="s") < pd.Timedelta(hours=20):
         return cached, "FRED_LAGGED_CACHE"
     try:

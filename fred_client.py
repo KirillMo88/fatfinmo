@@ -8,6 +8,8 @@ import httpx
 import numpy as np
 import pandas as pd
 
+from historical_archive import read_fred_series
+
 
 FRED_BASE_URL = "https://api.stlouisfed.org/fred"
 FRED_DEFAULT_OBSERVATION_START = "2010-01-01"
@@ -112,7 +114,7 @@ def calculate_fed_liquidity(frame: pd.DataFrame) -> pd.DataFrame:
     return out.dropna(subset=["Value"]).reset_index(drop=True)[columns]
 
 
-def download_fred_series(
+def download_fred_series_live(
     series_id: str,
     api_key: str | None = None,
     observation_start: str | None = None,
@@ -140,6 +142,47 @@ def download_fred_series(
     return parse_fred_observations(request.series_id, payload)
 
 
+def download_fred_series(
+    series_id: str,
+    api_key: str | None = None,
+    observation_start: str | None = None,
+    observation_end: str | None = None,
+    timeout: float = 20.0,
+) -> pd.DataFrame:
+    """Download a FRED series and fall back to the verified weekly archive.
+
+    Normal application refreshes remain live-first.  Only the dedicated
+    Saturday archive job writes archive versions, so a partial runtime
+    response can never replace ``last_good``.
+    """
+    normalized = normalize_fred_series_id(series_id)
+    try:
+        live = download_fred_series_live(
+            normalized,
+            api_key=api_key,
+            observation_start=observation_start,
+            observation_end=observation_end,
+            timeout=timeout,
+        )
+        if not live.empty and live["Value"].notna().any():
+            live.attrs["source_status"] = "LIVE"
+            return live
+        error = FredApiError(f"FRED returned no usable observations for {normalized}.")
+    except FredApiError as exc:
+        error = exc
+
+    archived = read_fred_series(
+        normalized,
+        observation_start=observation_start or FRED_DEFAULT_OBSERVATION_START,
+        observation_end=observation_end,
+    )
+    if not archived.empty:
+        archived.attrs["source_status"] = archived.attrs.get("archive_status", "ARCHIVED")
+        archived.attrs["live_error"] = str(error)
+        return archived
+    raise error
+
+
 def download_fred_series_batch(
     series_ids: Iterable[str] = FRED_SERIES_IDS,
     api_key: str | None = None,
@@ -147,12 +190,11 @@ def download_fred_series_batch(
     observation_end: str | None = None,
     timeout: float = 20.0,
 ) -> pd.DataFrame:
-    key = get_fred_api_key(api_key)
     normalized_series_ids = [normalize_fred_series_id(series_id) for series_id in series_ids]
     frames = [
         download_fred_series(
             series_id,
-            api_key=key,
+            api_key=api_key,
             observation_start=observation_start or FRED_DEFAULT_OBSERVATION_START,
             observation_end=observation_end,
             timeout=timeout,

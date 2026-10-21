@@ -18,6 +18,7 @@ services:
       TRADINGVIEW_MCP_REDIRECT_URI: ${TRADINGVIEW_MCP_REDIRECT_URI:-}
       TRADINGVIEW_MCP_STORAGE_DIR: /app/persistent/tradingview_mcp
       WMI_DB_PATH: /app/persistent/weekly_market_intelligence/weekly_market_intelligence.sqlite3
+      HISTORICAL_ARCHIVE_DIR: /app/persistent/historical_archive
     expose:
       - "8501"
     volumes:
@@ -41,6 +42,7 @@ services:
       - ./persistent/world_economy:/app/persistent/world_economy
       - ./persistent/ramp_ai_index:/app/persistent/ramp_ai_index
       - ./persistent/weekly_market_intelligence:/app/persistent/weekly_market_intelligence
+      - ./persistent/historical_archive:/app/persistent/historical_archive
 
   screener-jobs:
     build: .
@@ -62,6 +64,9 @@ services:
       SCREENER_REFRESH_RETRY_SECONDS: ${SCREENER_REFRESH_RETRY_SECONDS:-300}
       SCREENER_WEEKLY_POSITIONING_UTC: ${SCREENER_WEEKLY_POSITIONING_UTC:-12:30}
       SCREENER_WEEKLY_POSITIONING_WEEKDAY: ${SCREENER_WEEKLY_POSITIONING_WEEKDAY:-5}
+      SCREENER_HISTORICAL_ARCHIVE_UTC: ${SCREENER_HISTORICAL_ARCHIVE_UTC:-03:30}
+      SCREENER_HISTORICAL_ARCHIVE_WEEKDAY: ${SCREENER_HISTORICAL_ARCHIVE_WEEKDAY:-5}
+      SCREENER_HISTORICAL_ARCHIVE_TIMEOUT_SECONDS: ${SCREENER_HISTORICAL_ARCHIVE_TIMEOUT_SECONDS:-7200}
       SCREENER_RAMP_AI_INDEX_UTC: ${SCREENER_RAMP_AI_INDEX_UTC:-06:15}
       SCREENER_RAMP_AI_INDEX_DAY: ${SCREENER_RAMP_AI_INDEX_DAY:-15}
       SCREENER_MAX_CONCURRENT_SCHEDULED_JOBS: ${SCREENER_MAX_CONCURRENT_SCHEDULED_JOBS:-1}
@@ -75,6 +80,7 @@ services:
       TRADINGVIEW_MCP_ENABLED: ${TRADINGVIEW_MCP_ENABLED:-1}
       TRADINGVIEW_MCP_REDIRECT_URI: ${TRADINGVIEW_MCP_REDIRECT_URI:-}
       TRADINGVIEW_MCP_STORAGE_DIR: /app/persistent/tradingview_mcp
+      HISTORICAL_ARCHIVE_DIR: /app/persistent/historical_archive
     volumes:
       - ./persistent/custom_universe_lists.json:/app/custom_universe_lists.json
       - ./persistent/finance_cache:/app/persistent/finance_cache
@@ -96,6 +102,7 @@ services:
       - ./persistent/world_economy:/app/persistent/world_economy
       - ./persistent/ramp_ai_index:/app/persistent/ramp_ai_index
       - ./persistent/weekly_market_intelligence:/app/persistent/weekly_market_intelligence
+      - ./persistent/historical_archive:/app/persistent/historical_archive
 
   tester:
     build: .
