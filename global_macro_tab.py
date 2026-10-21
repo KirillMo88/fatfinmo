@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
 import os
+from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -16,6 +18,7 @@ from global_liquidity import (
     GLOBAL_LIQUIDITY_STORAGE_DIR,
     read_global_liquidity,
     start_background_update_if_stale as start_global_liquidity_update_if_stale,
+    stored_fred_refresh_failed,
     update_global_liquidity,
 )
 from macro_research_export import (
@@ -28,6 +31,11 @@ from macro_research_export import (
 
 
 SLOW_REFRESH_SECONDS = 21600
+FRED_MACRO_CACHE_DIR = GLOBAL_LIQUIDITY_STORAGE_DIR / "fred_macro_cache"
+FRED_MACRO_ARCHIVE_PATHS = (
+    Path(__file__).with_name("persistent") / "rates_financial_conditions" / "fred_series.parquet",
+    Path(__file__).with_name("persistent") / "business_cycle" / "fred_series.parquet",
+)
 HORIZON_WEEKS = {
     "1W": 1,
     "1M": 4,
@@ -153,6 +161,8 @@ def render_global_macro_tab(api_key: str | None = None) -> None:
     if snapshot.empty:
         st.warning("Global Macro data is not available yet.")
         return
+    if stored_fred_refresh_failed():
+        st.warning("The last FRED refresh failed. Saved FRED observations are shown where available; missing series will recover when FRED is back online.")
     if export_research:
         with st.spinner("Building weekly macro research workbook..."):
             try:
@@ -406,15 +416,63 @@ def _download_fred_macro_series(api_key: str | None) -> dict[str, pd.Series]:
         "ANFCI",
     ]
     out: dict[str, pd.Series] = {}
-    if not api_key:
-        return {series_id: pd.Series(dtype="float64") for series_id in series_ids}
+    saved = _saved_fred_macro_series(series_ids)
+    service_unavailable = False
     for series_id in series_ids:
+        if not api_key or service_unavailable:
+            out[series_id] = saved.get(series_id, pd.Series(dtype="float64"))
+            continue
         try:
             frame = download_fred_series(series_id, api_key=api_key, observation_start="2010-01-01")
             out[series_id] = _series_from_frame(frame, "Date", "Value")
-        except (FredApiError, Exception):
-            out[series_id] = pd.Series(dtype="float64")
+            if not out[series_id].empty:
+                _save_fred_macro_series(series_id, out[series_id])
+            else:
+                out[series_id] = saved.get(series_id, out[series_id])
+        except FredApiError as exc:
+            out[series_id] = saved.get(series_id, pd.Series(dtype="float64"))
+            service_unavailable = "non-JSON response" in str(exc)
+        except Exception:
+            out[series_id] = saved.get(series_id, pd.Series(dtype="float64"))
     return out
+
+
+def _saved_fred_macro_series(series_ids: list[str]) -> dict[str, pd.Series]:
+    saved: dict[str, pd.Series] = {}
+    for series_id in series_ids:
+        path = FRED_MACRO_CACHE_DIR / f"{series_id}.csv"
+        try:
+            saved[series_id] = _series_from_frame(pd.read_csv(path), "Date", "Value")
+        except (OSError, ValueError):
+            pass
+    missing = set(series_ids) - set(saved)
+    for path in FRED_MACRO_ARCHIVE_PATHS:
+        if not missing:
+            break
+        try:
+            archive = pd.read_parquet(path)
+            if not {"Series_ID", "Date", "Value"}.issubset(archive.columns):
+                continue
+            for series_id, group in archive[archive["Series_ID"].isin(missing)].groupby("Series_ID"):
+                series = _series_from_frame(group, "Date", "Value")
+                if not series.empty:
+                    saved[series_id] = series
+                    _save_fred_macro_series(series_id, series)
+                    missing.discard(series_id)
+        except Exception:
+            continue
+    return saved
+
+
+def _save_fred_macro_series(series_id: str, series: pd.Series) -> None:
+    try:
+        FRED_MACRO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        target = FRED_MACRO_CACHE_DIR / f"{series_id}.csv"
+        temporary = FRED_MACRO_CACHE_DIR / f".{series_id}.{uuid4().hex}.tmp"
+        pd.DataFrame({"Date": series.index, "Value": series.to_numpy()}).to_csv(temporary, index=False)
+        temporary.replace(target)
+    except OSError:
+        pass
 
 
 def _download_market_macro_series() -> dict[str, pd.Series]:

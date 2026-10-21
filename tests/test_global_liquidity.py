@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 import global_liquidity as gl
+from fred_client import FredApiError
 
 
 class FakeResponse:
@@ -557,3 +558,61 @@ def test_forecast_fred_series_use_completed_week_availability():
     assert gl.weekly_available_last(reserves, 2).loc["2026-09-18"] == 1000.0
     term_premium = pd.Series([0.96], index=pd.to_datetime(["2026-09-11"]))
     assert gl.weekly_available_last(term_premium, 5).loc["2026-09-18"] == 0.96
+
+
+def test_fred_raw_uses_saved_official_observations_during_outage(tmp_path, monkeypatch):
+    walcl_archive = tmp_path / "fred_walcl_initial.parquet"
+    pd.DataFrame({
+        "ObservationDate": ["2026-10-14"],
+        "Value": [6_755_639.0],
+    }).to_parquet(walcl_archive)
+    monkeypatch.setattr(gl, "FRED_ARCHIVE_PATHS", {"WALCL": walcl_archive})
+
+    def unavailable(*_args, **_kwargs):
+        raise FredApiError("FRED returned a non-JSON response for M2SL.")
+
+    monkeypatch.setattr(gl, "download_fred_series_batch", unavailable)
+    raw = gl.fred_raw("test_key")
+
+    assert raw.loc[raw["series_id"].eq("FRED_GLOBAL_SERIES"), "data_status"].iloc[0] == "ERROR"
+    walcl = raw.loc[raw["series_id"].eq("WALCL")].iloc[0]
+    assert walcl["raw_value"] == 6_755_639.0
+    assert walcl["data_status"] == "FALLBACK_SOURCE"
+
+
+def test_failed_refresh_preserves_saved_valid_observations():
+    saved = pd.DataFrame([
+        raw_row("2026-09-01", "M2SL", 22_000.0, source="FRED"),
+        raw_row("2026-10-14", "WALCL", 6_700_000.0, source="FRED"),
+    ], columns=gl.RAW_COLUMNS)
+    fresh = pd.DataFrame([
+        raw_row("2026-10-14", "WALCL", 6_755_639.0, source="FRED"),
+        raw_row("2026-10-01", "ECB_M2", 1_000.0, source="ECB"),
+    ], columns=gl.RAW_COLUMNS)
+
+    merged = gl.preserve_saved_raw_observations(fresh, saved)
+
+    assert gl.raw_series(merged, "M2SL").iloc[-1] == 22_000.0
+    assert gl.raw_series(merged, "WALCL").iloc[-1] == 6_755_639.0
+    assert len(merged.loc[merged["series_id"].eq("WALCL")]) == 1
+
+
+def test_update_keeps_saved_fred_rows_when_new_download_fails(tmp_path, monkeypatch):
+    raw_path = tmp_path / "raw.csv"
+    monthly_path = tmp_path / "monthly.csv"
+    weekly_path = tmp_path / "weekly.csv"
+    pd.DataFrame([raw_row("2026-09-01", "M2SL", 22_000.0, source="FRED")], columns=gl.RAW_COLUMNS).to_csv(raw_path, index=False)
+    monkeypatch.setattr(gl, "RAW_STORAGE_PATH", raw_path)
+    monkeypatch.setattr(gl, "MONTHLY_STORAGE_PATH", monthly_path)
+    monkeypatch.setattr(gl, "WEEKLY_STORAGE_PATH", weekly_path)
+    monkeypatch.setattr(gl, "fetch_raw_global_liquidity", lambda _key: gl.empty_raw_row(
+        "FRED", "FRED", "", "FRED_GLOBAL_SERIES", "US", "FRED_BLOCK", "mixed", "mixed", "native", "ERROR", "Unavailable"
+    ))
+    monkeypatch.setattr(gl, "build_monthly_layer", lambda raw: pd.DataFrame({"date": [pd.Timestamp("2026-09-01")], "us_m2_usd_bn": [gl.raw_series(raw, "M2SL").iloc[-1]]}))
+    monkeypatch.setattr(gl, "build_weekly_layer", lambda _raw: pd.DataFrame({"date": [pd.Timestamp("2026-09-04")]}))
+
+    raw, monthly, _weekly = gl.update_global_liquidity(api_key="test_key", force=True)
+
+    assert gl.raw_series(raw, "M2SL").iloc[-1] == 22_000.0
+    assert monthly["us_m2_usd_bn"].iloc[-1] == 22_000.0
+    assert gl.raw_series(gl.read_frame(raw_path, gl.RAW_COLUMNS), "M2SL").iloc[-1] == 22_000.0
