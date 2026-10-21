@@ -1,5 +1,7 @@
 import pandas as pd
 
+import global_macro_tab as macro
+from fred_client import FredApiError
 from global_macro_tab import MacroSeriesSpec, _macro_change_color_row, _series_row
 
 
@@ -41,3 +43,46 @@ def test_macro_change_color_row_uses_directional_rules():
     assert "#fdba74" in positive_styles[2]
     assert "#ef4444" in inverse_styles[1]
     assert "#86efac" in inverse_styles[2]
+
+
+def test_fred_macro_uses_saved_archive_during_non_json_outage(tmp_path, monkeypatch):
+    archive = tmp_path / "fred_series.parquet"
+    pd.DataFrame({
+        "Series_ID": ["T5YIE", "DGS2"],
+        "Date": ["2026-10-19", "2026-10-19"],
+        "Value": [2.3, 3.5],
+    }).to_parquet(archive)
+    monkeypatch.setattr(macro, "FRED_MACRO_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(macro, "FRED_MACRO_ARCHIVE_PATHS", (archive,))
+    calls = []
+
+    def unavailable(series_id, **_kwargs):
+        calls.append(series_id)
+        raise FredApiError(f"FRED returned a non-JSON response for {series_id}.")
+
+    monkeypatch.setattr(macro, "download_fred_series", unavailable)
+    result = macro._download_fred_macro_series("test_key")
+
+    assert calls == ["T5YIE"]
+    assert result["T5YIE"].iloc[-1] == 2.3
+    assert result["DGS2"].iloc[-1] == 3.5
+    assert result["DGS3MO"].empty
+
+
+def test_fred_macro_saves_successful_observation_for_future_outage(tmp_path, monkeypatch):
+    monkeypatch.setattr(macro, "FRED_MACRO_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(macro, "FRED_MACRO_ARCHIVE_PATHS", ())
+
+    def download(series_id, **_kwargs):
+        if series_id == "T5YIE":
+            return pd.DataFrame({"Date": ["2026-10-20"], "Value": [2.4]})
+        raise FredApiError(f"FRED returned a non-JSON response for {series_id}.")
+
+    monkeypatch.setattr(macro, "download_fred_series", download)
+    first = macro._download_fred_macro_series("test_key")
+    assert first["T5YIE"].iloc[-1] == 2.4
+    assert (tmp_path / "cache" / "T5YIE.csv").exists()
+
+    monkeypatch.setattr(macro, "download_fred_series", lambda sid, **_kwargs: (_ for _ in ()).throw(FredApiError(f"FRED returned a non-JSON response for {sid}.")))
+    second = macro._download_fred_macro_series("test_key")
+    assert second["T5YIE"].iloc[-1] == 2.4

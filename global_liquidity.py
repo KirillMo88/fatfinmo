@@ -84,6 +84,12 @@ FRED_GLOBAL_SERIES = (
     "DEXCHUS",
 )
 FRED_FORECAST_SERIES = ("THREEFYTP10", "SOFR", "EFFR", "WRESBAL")
+FRED_ARCHIVE_PATHS = {
+    "WALCL": Path(__file__).with_name("persistent") / "treasury_fiscal_regime" / "fred_walcl_initial.parquet",
+    "WTREGEN": Path(__file__).with_name("persistent") / "treasury_fiscal_regime" / "fred_wtregen_initial.parquet",
+    "RRPONTSYD": Path(__file__).with_name("persistent") / "treasury_fiscal_regime" / "fred_rrpontsyd_delayed.parquet",
+    "WRESBAL": Path(__file__).with_name("persistent") / "funding_conditions" / "fred_wresbal_initial.parquet",
+}
 
 RAW_COLUMNS = [
     "observation_date",
@@ -308,7 +314,8 @@ def fred_raw(api_key: str | None = None) -> pd.DataFrame:
     try:
         frame = download_fred_series_batch(FRED_GLOBAL_SERIES, api_key=api_key, observation_start=GLOBAL_LIQUIDITY_CONFIG["start_date"])
     except FredApiError as exc:
-        return empty_raw_row("FRED", "Federal Reserve Economic Data", "https://fred.stlouisfed.org/", "FRED_GLOBAL_SERIES", "US", "FRED_BLOCK", "mixed", "mixed", "native", "ERROR", str(exc))
+        error = empty_raw_row("FRED", "Federal Reserve Economic Data", "https://fred.stlouisfed.org/", "FRED_GLOBAL_SERIES", "US", "FRED_BLOCK", "mixed", "mixed", "native", "ERROR", str(exc))
+        return pd.concat([error, archived_fred_raw()], ignore_index=True)
     meta = {
         "M2SL": ("US", "M2", "monthly", "USD", "USD billions"),
         "WALCL": ("US", "Fed Total Assets", "weekly", "USD", "USD millions"),
@@ -358,6 +365,50 @@ def fred_raw(api_key: str | None = None) -> pd.DataFrame:
         )
     result = pd.DataFrame(rows, columns=RAW_COLUMNS)
     return pd.concat([result, *optional_errors], ignore_index=True) if optional_errors else result
+
+
+def archived_fred_raw() -> pd.DataFrame:
+    """Use already persisted FRED observations when the live API is unavailable."""
+    meta = {
+        "WALCL": ("Fed Total Assets", "weekly", "USD millions"),
+        "WTREGEN": ("Treasury General Account", "weekly", "USD millions"),
+        "RRPONTSYD": ("Overnight Reverse Repo", "daily", "USD billions"),
+        "WRESBAL": ("Bank Reserves", "weekly", "USD millions"),
+    }
+    rows: list[dict[str, Any]] = []
+    downloaded = fmt_datetime(now_utc())
+    for series_id, path in FRED_ARCHIVE_PATHS.items():
+        try:
+            frame = pd.read_parquet(path)
+            if not {"ObservationDate", "Value"}.issubset(frame.columns):
+                continue
+            dates = pd.to_datetime(frame["ObservationDate"], errors="coerce")
+            values = pd.to_numeric(frame["Value"], errors="coerce")
+            metric, frequency, unit = meta[series_id]
+            for date, value in zip(dates, values):
+                if pd.isna(date) or pd.isna(value):
+                    continue
+                rows.append({
+                    "observation_date": date,
+                    "release_date": pd.NaT,
+                    "source": "FRED_ARCHIVE",
+                    "source_name": "Saved FRED observations",
+                    "source_mode": "FALLBACK_SOURCE",
+                    "source_url": f"https://fred.stlouisfed.org/series/{series_id}",
+                    "series_id": series_id,
+                    "region": "US",
+                    "metric": metric,
+                    "frequency": frequency,
+                    "currency": "USD",
+                    "unit": unit,
+                    "raw_value": value,
+                    "download_timestamp": downloaded,
+                    "data_status": "FALLBACK_SOURCE",
+                    "notes": "Previously saved FRED release observations; not a live refresh.",
+                })
+        except Exception:
+            continue
+    return pd.DataFrame(rows, columns=RAW_COLUMNS)
 
 
 def ecb_m2_raw() -> pd.DataFrame:
@@ -1741,7 +1792,7 @@ def raw_series(raw: pd.DataFrame, series_id: str) -> pd.Series:
     d = raw[raw["series_id"].eq(series_id)].dropna(subset=["observation_date", "raw_value"]).copy()
     if d.empty:
         return pd.Series(dtype="float64")
-    return d.sort_values("observation_date").groupby("observation_date")["raw_value"].last()
+    return d.sort_values("observation_date", kind="stable").groupby("observation_date")["raw_value"].last()
 
 
 def user_provided_china_m2_raw() -> pd.DataFrame:
@@ -2240,12 +2291,28 @@ def update_global_liquidity(api_key: str | None = None, force: bool = False) -> 
     if not force and is_storage_fresh():
         return read_global_liquidity()
     raw = fetch_raw_global_liquidity(api_key)
+    raw = preserve_saved_raw_observations(raw, read_frame(RAW_STORAGE_PATH, RAW_COLUMNS))
     monthly = build_monthly_layer(raw)
     weekly = build_weekly_layer(raw)
     write_frame(raw, RAW_STORAGE_PATH)
     write_frame(monthly, MONTHLY_STORAGE_PATH)
     write_frame(weekly, WEEKLY_STORAGE_PATH)
     return raw, monthly, weekly
+
+
+def preserve_saved_raw_observations(fresh: pd.DataFrame, saved: pd.DataFrame) -> pd.DataFrame:
+    """Never discard valid historical observations because one refresh failed."""
+    if saved.empty:
+        return fresh
+    valid_saved = saved.copy()
+    valid_saved["observation_date"] = pd.to_datetime(valid_saved["observation_date"], errors="coerce")
+    valid_saved["raw_value"] = pd.to_numeric(valid_saved["raw_value"], errors="coerce")
+    valid_saved = valid_saved.dropna(subset=["observation_date", "raw_value"])
+    if valid_saved.empty:
+        return fresh
+    combined = pd.concat([valid_saved, fresh], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["source", "series_id", "observation_date"], keep="last")
+    return combined[RAW_COLUMNS]
 
 
 def read_global_liquidity() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -2256,7 +2323,19 @@ def is_storage_fresh() -> bool:
     if not MONTHLY_STORAGE_PATH.exists() or not WEEKLY_STORAGE_PATH.exists():
         return False
     age = time.time() - min(MONTHLY_STORAGE_PATH.stat().st_mtime, WEEKLY_STORAGE_PATH.stat().st_mtime)
+    if age < 900 and stored_fred_refresh_failed():
+        return True  # Retry a failed upstream source after 15 minutes, not on every page render.
     return age < int(GLOBAL_LIQUIDITY_CONFIG["ttl_seconds"]) and storage_has_requested_history()
+
+
+def stored_fred_refresh_failed() -> bool:
+    if not RAW_STORAGE_PATH.exists():
+        return False
+    try:
+        raw = pd.read_csv(RAW_STORAGE_PATH, usecols=["series_id", "data_status"])
+    except (OSError, ValueError):
+        return False
+    return bool((raw["series_id"].eq("FRED_GLOBAL_SERIES") & raw["data_status"].eq("ERROR")).any())
 
 
 def storage_has_requested_history() -> bool:
