@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import httpx
 
 from alpha_engine import classify_opportunity_state
 from market_model import (
@@ -8,6 +9,7 @@ from market_model import (
     calculate_confirmations_history,
     calculate_fast_transition_risk,
     calculate_fast_transition_risk_history,
+    download_fred_market_data,
     calculate_macro_transition_risk,
     calculate_macro_transition_risk_history,
     calculate_overall_transition_status,
@@ -23,6 +25,20 @@ from market_model import (
 
 def weekly_series(values):
     return pd.Series(values, index=pd.date_range("2020-01-03", periods=len(values), freq="W-FRI"))
+
+
+def test_market_model_uses_empty_fred_fallback_for_non_json_response(monkeypatch):
+    response = httpx.Response(
+        200,
+        text="",
+        request=httpx.Request("GET", "https://api.stlouisfed.org/fred/series/observations"),
+    )
+    monkeypatch.setattr("fred_client.httpx.get", lambda *_args, **_kwargs: response)
+
+    data = download_fred_market_data(api_key="secret_key")
+
+    assert data.empty
+    assert data.columns.tolist() == ["Series_ID", "Date", "Value"]
 
 
 def test_transition_state_bands():

@@ -131,7 +131,13 @@ def download_fred_series(
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise FredApiError(f"FRED request failed for {request.series_id}: {exc}") from exc
-    return parse_fred_observations(request.series_id, response.json())
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise FredApiError(f"FRED returned a non-JSON response for {request.series_id}.") from exc
+    if not isinstance(payload, dict):
+        raise FredApiError(f"FRED returned an unexpected JSON payload for {request.series_id}.")
+    return parse_fred_observations(request.series_id, payload)
 
 
 def download_fred_series_batch(
