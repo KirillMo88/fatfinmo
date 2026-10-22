@@ -99,6 +99,7 @@ def model_market_ticker_registry() -> tuple[str, ...]:
     from market_cycle import MARKET_CYCLE_TICKERS
     from market_model import YAHOO_MARKET_TICKERS
     from rates_financial_conditions import MARKET_TICKERS as RATES_MARKET_TICKERS
+    from qqq_current_risk_data import QQQ_CURRENT_RISK_TICKERS
 
     tickers = {
         *ASSET_TICKERS.values(),
@@ -109,6 +110,7 @@ def model_market_ticker_registry() -> tuple[str, ...]:
         *MARKET_CYCLE_TICKERS,
         *YAHOO_MARKET_TICKERS,
         *RATES_MARKET_TICKERS.values(),
+        *QQQ_CURRENT_RISK_TICKERS,
     }
     return tuple(sorted({str(ticker).strip() for ticker in tickers if str(ticker).strip()}))
 
@@ -137,7 +139,7 @@ def refresh_model_market_archive() -> list[dict[str, Any]]:
         except Exception as exc:
             results.append({"Provider": "MODEL_MARKET", "Dataset": ticker, "Status": "FAILED", "Error": str(exc)})
 
-    for ticker, archive_key in (("SPY", "SPY_RAW"), ("QQQ", "QQQ_RAW")):
+    for ticker, archive_key in (("SPY", "SPY_RAW"), ("QQQ", "QQQ_RAW"), ("IWM", "IWM_RAW")):
         try:
             frame = download_completed_ohlcv(
                 ticker,
@@ -158,6 +160,37 @@ def refresh_model_market_archive() -> list[dict[str, Any]]:
         except Exception as exc:
             results.append({"Provider": "MODEL_MARKET", "Dataset": archive_key, "Status": "FAILED", "Error": str(exc)})
     return results
+
+
+def refresh_tradingview_archive() -> list[dict[str, Any]]:
+    """Archive TradingView-only histories required by models."""
+    try:
+        from tradingview_mcp import get_ohlcv_data
+
+        frame = get_ohlcv_data("INDEX:NDFI", interval="1D", count=5000, force=True)
+        candidate = frame.copy()
+        candidate["Series_ID"] = "NDFI"
+        result = save_raw_table(
+            "TRADINGVIEW",
+            "NDFI",
+            candidate,
+            date_column="date",
+            value_column="close",
+            group_column="Series_ID",
+            min_rows=252,
+            source="TradingView INDEX:NDFI",
+        )
+        return [
+            {
+                "Provider": result.provider,
+                "Dataset": result.dataset,
+                "Status": result.status,
+                "Rows": result.rows,
+                "LastObservation": result.last_observation,
+            }
+        ]
+    except Exception as exc:
+        return [{"Provider": "TRADINGVIEW", "Dataset": "NDFI", "Status": "FAILED", "Error": str(exc)}]
 
 
 def refresh_global_liquidity_archive(api_key: str | None = None) -> list[dict[str, Any]]:
@@ -285,6 +318,7 @@ def run_weekly_historical_archive(api_key: str | None = None) -> pd.DataFrame:
     """Refresh independent provider archives; one failed provider cannot erase another."""
     results = refresh_fred_archive(api_key=api_key or os.getenv("FRED_API_KEY"))
     results.extend(refresh_model_market_archive())
+    results.extend(refresh_tradingview_archive())
     for refresh in (refresh_global_liquidity_archive, refresh_world_economy_archive):
         try:
             if refresh is refresh_global_liquidity_archive:
