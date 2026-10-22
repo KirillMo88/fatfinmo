@@ -197,7 +197,11 @@ def _validate_ndfi(frame: pd.DataFrame, end: pd.Timestamp | None) -> pd.DataFram
         return _empty_market_frame()
     attrs = dict(frame.attrs)
     out = frame.copy()
-    out.index = pd.to_datetime(out.index, errors="coerce").tz_localize(None)
+    # TradingView daily bars carry the exchange-session timestamp (for example
+    # 13:30) while Yahoo daily bars are indexed at midnight.  NDFI is a daily
+    # observation, so retain the calendar date rather than the intraday time;
+    # otherwise every exact alignment against QQQ produces NaN.
+    out.index = pd.to_datetime(out.index, errors="coerce").tz_localize(None).normalize()
     out["Close"] = pd.to_numeric(out["Close"], errors="coerce")
     out = out.loc[~out.index.isna() & out["Close"].between(0.0, 100.0)].sort_index()
     out = out.loc[~out.index.duplicated(keep="last")]
@@ -211,8 +215,11 @@ def _values_on_dates(frame: pd.DataFrame, dates: pd.Series) -> np.ndarray:
     if frame is None or frame.empty or "Close" not in frame:
         return np.full(len(dates), np.nan)
     values = pd.to_numeric(frame["Close"], errors="coerce")
-    values.index = pd.to_datetime(values.index, errors="coerce").tz_localize(None)
-    return values.reindex(pd.DatetimeIndex(dates)).to_numpy()
+    values.index = pd.to_datetime(values.index, errors="coerce").tz_localize(None).normalize()
+    values = values.loc[~values.index.isna()]
+    values = values.loc[~values.index.duplicated(keep="last")]
+    target_dates = pd.DatetimeIndex(pd.to_datetime(dates, errors="coerce")).tz_localize(None).normalize()
+    return values.reindex(target_dates).to_numpy()
 
 
 def _frame_status(frame: pd.DataFrame) -> str:
