@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 import qqq_current_risk
+from qqq_current_risk_data import _validate_ndfi, _values_on_dates
 from qqq_current_risk import (
     QQQ_CURRENT_RISK_VIX_CONFIG,
     QQQ_CURRENT_RISK_VXN_CONFIG,
@@ -57,6 +58,18 @@ def test_engine_is_independent_from_spy_current_risk() -> None:
     assert "from current_risk" not in source
     assert "import current_risk" not in source
     assert "calculate_current_risk_v1" not in source
+
+
+def test_ndfi_session_timestamps_align_to_qqq_calendar_dates() -> None:
+    ndfi = pd.DataFrame(
+        {"Close": [48.0, 56.0]},
+        index=pd.to_datetime(["2026-10-20 13:30:00", "2026-10-21 13:30:00"]),
+    )
+    validated = _validate_ndfi(ndfi, end=pd.Timestamp("2026-10-21"))
+
+    assert validated.index.equals(pd.DatetimeIndex(["2026-10-20", "2026-10-21"]))
+    aligned = _values_on_dates(validated, pd.Series(pd.to_datetime(["2026-10-20", "2026-10-21"])))
+    np.testing.assert_array_equal(aligned, np.array([48.0, 56.0]))
 
 
 def test_weekly_archive_registry_contains_qqq_risk_market_inputs() -> None:
