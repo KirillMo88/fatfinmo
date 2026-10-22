@@ -20,6 +20,7 @@ from market_cycle_tab import (
     range_domain,
 )
 from qqq_cycle import build_ndx_cycle_history
+from qqq_current_risk_tab import render_qqq_current_risk
 
 
 NDX_TICKER = "^NDX"
@@ -55,76 +56,78 @@ def render_qqq_tab() -> None:
         st.session_state["qqq_refresh_nonce"] = int(st.session_state.get("qqq_refresh_nonce", 0)) + 1
         st.rerun()
 
+    history = pd.DataFrame()
     try:
         prices = load_ndx_prices_cached(int(st.session_state.get("qqq_refresh_nonce", 0)))
         history = build_ndx_cycle_history(prices)
     except Exception as exc:
         st.error(f"QQQ / NDX cycle data is unavailable: {exc}")
-        return
 
     if history.empty:
         st.info("QQQ / NDX cycle data is unavailable.")
-        return
+    else:
+        normalize_range_state("qqq_cycle_range")
+        selected_range = st.radio(
+            "QQQ range",
+            MARKET_CYCLE_RANGE_OPTIONS,
+            index=3,
+            horizontal=True,
+            key="qqq_cycle_range",
+        )
+        range_start, range_end = range_domain(history, selected_range)
+        display_history = filter_range_domain(history, range_start, range_end)
 
-    normalize_range_state("qqq_cycle_range")
-    selected_range = st.radio(
-        "QQQ range",
-        MARKET_CYCLE_RANGE_OPTIONS,
-        index=3,
-        horizontal=True,
-        key="qqq_cycle_range",
-    )
-    range_start, range_end = range_domain(history, selected_range)
-    display_history = filter_range_domain(history, range_start, range_end)
+        st.markdown("### Structural")
+        structural_col, structural_extension_col = st.columns(2)
+        with structural_col:
+            st.plotly_chart(
+                apply_common_x_range(
+                    build_structural_momentum_cycle_fig(display_history, asset_label=NDX_LABEL),
+                    range_start,
+                    range_end,
+                ),
+                use_container_width=True,
+                config=MARKET_CYCLE_PLOTLY_CONFIG,
+            )
+        with structural_extension_col:
+            st.plotly_chart(
+                apply_common_x_range(
+                    build_sma200m_extension_fig(display_history, asset_label=NDX_LABEL),
+                    range_start,
+                    range_end,
+                ),
+                use_container_width=True,
+                config=MARKET_CYCLE_PLOTLY_CONFIG,
+            )
 
-    st.markdown("### Structural")
-    structural_col, structural_extension_col = st.columns(2)
-    with structural_col:
-        st.plotly_chart(
-            apply_common_x_range(
-                build_structural_momentum_cycle_fig(display_history, asset_label=NDX_LABEL),
-                range_start,
-                range_end,
-            ),
-            use_container_width=True,
-            config=MARKET_CYCLE_PLOTLY_CONFIG,
-        )
-    with structural_extension_col:
-        st.plotly_chart(
-            apply_common_x_range(
-                build_sma200m_extension_fig(display_history, asset_label=NDX_LABEL),
-                range_start,
-                range_end,
-            ),
-            use_container_width=True,
-            config=MARKET_CYCLE_PLOTLY_CONFIG,
-        )
+        st.markdown("### Medium Term")
+        momentum_col, momentum_extension_col = st.columns(2)
+        with momentum_col:
+            st.plotly_chart(
+                apply_common_x_range(
+                    build_momentum_cycle_fig(display_history, asset_label=NDX_LABEL),
+                    range_start,
+                    range_end,
+                ),
+                use_container_width=True,
+                config=MARKET_CYCLE_PLOTLY_CONFIG,
+            )
+        with momentum_extension_col:
+            st.plotly_chart(
+                apply_common_x_range(
+                    build_sma200w_extension_fig(display_history, asset_label=NDX_LABEL),
+                    range_start,
+                    range_end,
+                ),
+                use_container_width=True,
+                config=MARKET_CYCLE_PLOTLY_CONFIG,
+            )
 
-    st.markdown("### Medium Term")
-    momentum_col, momentum_extension_col = st.columns(2)
-    with momentum_col:
-        st.plotly_chart(
-            apply_common_x_range(
-                build_momentum_cycle_fig(display_history, asset_label=NDX_LABEL),
-                range_start,
-                range_end,
-            ),
-            use_container_width=True,
-            config=MARKET_CYCLE_PLOTLY_CONFIG,
-        )
-    with momentum_extension_col:
-        st.plotly_chart(
-            apply_common_x_range(
-                build_sma200w_extension_fig(display_history, asset_label=NDX_LABEL),
-                range_start,
-                range_end,
-            ),
-            use_container_width=True,
-            config=MARKET_CYCLE_PLOTLY_CONFIG,
-        )
+        last_date = pd.to_datetime(history["Date"], errors="coerce").max()
+        if pd.notna(last_date):
+            st.caption(
+                f"NDX data through {last_date:%Y-%m-%d}. Calculations use the same methodology and thresholds as the SPX Market Cycle charts."
+            )
 
-    last_date = pd.to_datetime(history["Date"], errors="coerce").max()
-    if pd.notna(last_date):
-        st.caption(
-            f"NDX data through {last_date:%Y-%m-%d}. Calculations use the same methodology and thresholds as the SPX Market Cycle charts."
-        )
+    st.divider()
+    render_qqq_current_risk(int(st.session_state.get("qqq_refresh_nonce", 0)))
