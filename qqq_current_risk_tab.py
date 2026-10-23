@@ -42,6 +42,27 @@ def render_qqq_current_risk(refresh_nonce: int = 0) -> None:
     current = history.iloc[-1].to_dict()
     render_status_panel(current, selected, snapshot.as_of)
 
+    st.markdown("#### Diagnostic Risk Components")
+    diagnostics = diagnostic_table(current, selected)
+    diagnostic_col, table_col = st.columns([1.45, 1.0])
+    with diagnostic_col:
+        st.plotly_chart(
+            build_diagnostic_fig(diagnostics, current, selected),
+            use_container_width=True,
+            config=MARKET_CYCLE_PLOTLY_CONFIG,
+        )
+    with table_col:
+        st.dataframe(
+            diagnostics.style.format({"Score": "{:.1f}"}, na_rep="N/A"),
+            use_container_width=True,
+            hide_index=True,
+            height=300,
+        )
+        st.caption(
+            f"Strict component average: {_number(current.get('CurrentRiskComponentAverage'))} | "
+            f"Primary drivers: {current.get('HistoricalCurrentRiskPrimaryDrivers', 'DATA INCOMPLETE')}"
+        )
+
     chart_history = history.loc[pd.to_datetime(history["Date"], errors="coerce").ge(pd.Timestamp("2015-01-01"))]
     st.plotly_chart(
         build_qqq_current_risk_signals_fig(chart_history, selected),
@@ -84,27 +105,6 @@ def render_qqq_current_risk(refresh_nonce: int = 0) -> None:
         st.caption(
             f"ESCALATION SCORE: {_number(current.get('CurrentRiskEscalationScore'), 0)} / 6 | "
             f"Raw channels: {_number(current.get('CurrentRiskEscalationScoreRaw'), 0)} / 6"
-        )
-
-    st.markdown("#### Diagnostic Risk Components")
-    diagnostics = diagnostic_table(current, selected)
-    diagnostic_col, table_col = st.columns([1.45, 1.0])
-    with diagnostic_col:
-        st.plotly_chart(
-            build_diagnostic_fig(diagnostics, current, selected),
-            use_container_width=True,
-            config=MARKET_CYCLE_PLOTLY_CONFIG,
-        )
-    with table_col:
-        st.dataframe(
-            diagnostics.style.format({"Score": "{:.1f}"}, na_rep="N/A"),
-            use_container_width=True,
-            hide_index=True,
-            height=300,
-        )
-        st.caption(
-            f"Strict component average: {_number(current.get('CurrentRiskComponentAverage'))} | "
-            f"Primary drivers: {current.get('HistoricalCurrentRiskPrimaryDrivers', 'DATA INCOMPLETE')}"
         )
 
     st.caption(
