@@ -42,6 +42,13 @@ def render_qqq_current_risk(refresh_nonce: int = 0) -> None:
     current = history.iloc[-1].to_dict()
     render_status_panel(current, selected, snapshot.as_of)
 
+    chart_history = history.loc[pd.to_datetime(history["Date"], errors="coerce").ge(pd.Timestamp("2015-01-01"))]
+    st.plotly_chart(
+        build_qqq_current_risk_signals_fig(chart_history, selected),
+        use_container_width=True,
+        config=MARKET_CYCLE_PLOTLY_CONFIG,
+    )
+
     detail_left, detail_right = st.columns(2)
     with detail_left:
         st.markdown("#### Price Cycle Vulnerability")
@@ -100,12 +107,6 @@ def render_qqq_current_risk(refresh_nonce: int = 0) -> None:
             f"Primary drivers: {current.get('HistoricalCurrentRiskPrimaryDrivers', 'DATA INCOMPLETE')}"
         )
 
-    chart_history = history.loc[pd.to_datetime(history["Date"], errors="coerce").ge(pd.Timestamp("2015-01-01"))]
-    st.plotly_chart(
-        build_qqq_current_risk_signals_fig(chart_history, selected),
-        use_container_width=True,
-        config=MARKET_CYCLE_PLOTLY_CONFIG,
-    )
     st.caption(
         f"Model: {current.get('CurrentRiskConfiguration', 'N/A')} | "
         f"Sources: {_source_caption(snapshot.source_status)}"
