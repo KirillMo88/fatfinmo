@@ -2799,7 +2799,7 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
         key="global_m2_cycle_asset_selector",
     )
     chart_title = (
-        f"Global M2 Cycle, Log {selected_asset}, M2−{selected_asset} 52W Divergence, "
+        f"Global M2 Cycle, {selected_asset} 52W Change, M2−{selected_asset} 52W Divergence, "
         f"and {selected_asset} Drawdown"
     )
 
@@ -2861,23 +2861,24 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
     close = close[~close.index.isna()].dropna().sort_index()
     close = close[~close.index.duplicated(keep="last")]
     positive_close = close.loc[close.gt(0)]
-    log_price = np.log(positive_close)
     asset_change_52w = positive_close.pct_change(52, fill_method=None) * 100.0
     drawdown = (positive_close / positive_close.cummax() - 1.0) * 100.0
-    log_price = log_price.loc[(log_price.index >= start_date) & (log_price.index <= end_date)]
+    asset_change_52w = asset_change_52w.loc[
+        (asset_change_52w.index >= start_date) & (asset_change_52w.index <= end_date)
+    ]
     drawdown = drawdown.loc[(drawdown.index >= start_date) & (drawdown.index <= end_date)]
-    if log_price.empty:
+    if asset_change_52w.empty:
         st.info("No overlapping M2 and market observations for this time range.")
         return
 
     fig.add_trace(
         go.Scatter(
-            x=log_price.index,
-            y=log_price,
+            x=asset_change_52w.index,
+            y=asset_change_52w,
             mode="lines",
-            name=f"Log {selected_asset}",
+            name=f"{selected_asset} 52W Change",
             line={"color": asset_color, "width": 2.0},
-            hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>Log {selected_asset}: %{{y:.3f}}<extra></extra>",
+            hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{selected_asset} 52W change: %{{y:.2f}}%<extra></extra>",
         ),
         row=1,
         col=1,
@@ -2957,7 +2958,7 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
     fig.update_xaxes(title_text="", showticklabels=False, row=2, col=1)
     fig.update_xaxes(title_text="Date", showticklabels=True, row=3, col=1)
     fig.update_yaxes(title_text="M2 trend gap, pp", row=1, col=1, secondary_y=False)
-    fig.update_yaxes(title_text=f"Log {selected_asset}", showgrid=False, row=1, col=1, secondary_y=True)
+    fig.update_yaxes(title_text=f"{selected_asset} 52W change, %", showgrid=False, row=1, col=1, secondary_y=True)
     fig.update_yaxes(title_text=f"M2 − {selected_asset} 52W, pp", row=2, col=1)
     fig.update_yaxes(title_text="Drawdown, %", row=3, col=1)
     st.plotly_chart(
@@ -2967,7 +2968,7 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
     )
     st.caption(
         "M2 primary axis: current 52W change minus its 200-week SMA. "
-        f"Secondary axis: natural log of {selected_asset}. Red zones run from a downward zero crossing "
+        f"Secondary axis: {selected_asset} 52W price change. Red zones run from a downward zero crossing "
         "to the minimum of that negative M2 cycle. "
         f"The middle histogram is M2 52W change minus {selected_asset} 52W change; drawdown is measured "
         "from the asset's historical price peak."
