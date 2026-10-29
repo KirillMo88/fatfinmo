@@ -2958,7 +2958,12 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
     fig.update_xaxes(title_text="", showticklabels=False, row=2, col=1)
     fig.update_xaxes(title_text="Date", showticklabels=True, row=3, col=1)
     fig.update_yaxes(title_text="M2 trend gap, pp", row=1, col=1, secondary_y=False)
-    fig.update_yaxes(title_text=f"{selected_asset} 52W change, %", showgrid=False, row=1, col=1, secondary_y=True)
+    secondary_axis = {"title_text": f"{selected_asset} 52W change, %", "showgrid": False}
+    if selected_asset == "BTC":
+        finite_changes = asset_change_52w.dropna()
+        lower_bound = min(float(finite_changes.min()), 0.0) if not finite_changes.empty else -100.0
+        secondary_axis["range"] = [lower_bound, 1000.0]
+    fig.update_yaxes(**secondary_axis, row=1, col=1, secondary_y=True)
     fig.update_yaxes(title_text=f"M2 − {selected_asset} 52W, pp", row=2, col=1)
     fig.update_yaxes(title_text="Drawdown, %", row=3, col=1)
     st.plotly_chart(
