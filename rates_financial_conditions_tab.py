@@ -254,9 +254,14 @@ def render_rates_financial_conditions_tab(api_key: str | None) -> None:
         map_weeks = st.radio("Map range", ["13W", "26W", "52W"], index=1, horizontal=True)
         st.plotly_chart(build_regime_map(history, int(map_weeks[:-1])), use_container_width=True, config=CHART_CONFIG)
     with right:
-        st.markdown("### Credit / DXY / MOVE")
+        st.markdown(
+            "### Credit / DXY / MOVE — Credit = 0.70 × `HY_OAS_Momentum` + 0.30 × `IG_OAS_Momentum`"
+        )
         st.plotly_chart(build_component_chart(view), use_container_width=True, config=CHART_CONFIG)
-        st.markdown("### Core FC vs NFCI / ANFCI")
+        st.markdown(
+            "### Core FC vs NFCI / ANFCI — Core FC = 0.45 × `CreditDirectionScore` + "
+            "0.30 × `DXYMomentum` + 0.25 × `MOVEMomentum`"
+        )
         st.plotly_chart(build_confirmation_chart(view), use_container_width=True, config=CHART_CONFIG)
         st.caption(
             "1. **NFCI** shows how tight or loose overall financial conditions in the U.S. are relative "
