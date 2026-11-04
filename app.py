@@ -2405,6 +2405,15 @@ def _build_global_liquidity_regime_frame(monthly: pd.DataFrame, weekly: pd.DataF
     )
     weekly_source = weekly.set_index("date").sort_index() if not weekly.empty and "date" in weekly.columns else pd.DataFrame()
     index = monthly_source.index.union(weekly_source.index).sort_values()
+    # Do not let a resampled monthly row create a future or incomplete week.
+    # The regime is weekly, so the latest observation must be the last fully
+    # completed Friday rather than the Friday bucket containing today's date.
+    today_utc = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    days_since_friday = (today_utc.weekday() - 4) % 7
+    last_completed_friday = today_utc - pd.Timedelta(days=days_since_friday)
+    if last_completed_friday >= today_utc:
+        last_completed_friday -= pd.Timedelta(days=7)
+    index = index[index <= last_completed_friday]
     if index.empty:
         return pd.DataFrame()
     frame = pd.DataFrame(index=index)
@@ -2504,6 +2513,14 @@ def _liquidity_weekly_from_monthly(monthly: pd.DataFrame, columns: list[str]) ->
     source = source.dropna(subset=["date"]).sort_values("date")
     source = source.set_index("date")
     weekly_index = pd.date_range(source.index.min(), source.index.max() + pd.offsets.MonthEnd(1), freq="W-FRI")
+    today_utc = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    days_since_friday = (today_utc.weekday() - 4) % 7
+    last_completed_friday = today_utc - pd.Timedelta(days=days_since_friday)
+    if last_completed_friday >= today_utc:
+        last_completed_friday -= pd.Timedelta(days=7)
+    weekly_index = weekly_index[weekly_index <= last_completed_friday]
+    if weekly_index.empty:
+        return pd.DataFrame(index=weekly_index, columns=use_cols)
     combined_index = source.index.union(weekly_index).sort_values()
     return source.reindex(combined_index).ffill().reindex(weekly_index).ffill()
 
