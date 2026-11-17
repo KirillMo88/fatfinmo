@@ -101,6 +101,7 @@ from market_cycle_tab import (
 from qqq_tab import render_qqq_tab
 from vix_based_model import render_vix_based_model
 from technical_outlook_simple_v3_tab import render_technical_outlook_simple_v3_tab
+from charts_dashboard import render_charts_dashboard
 from global_m2_cycle import (
     build_global_m2_cycle_fig,
     build_global_m2_cycle_history,
@@ -8264,6 +8265,7 @@ def main():
     view_options = [
         "Table",
         "Charts",
+        "Charts Dashboard",
         "Graphs",
         "AI Dashboard",
         "Portfolio",
@@ -8516,6 +8518,8 @@ def main():
         )
     elif active_view == "Charts":
         render_charts(filtered_df)
+    elif active_view == "Charts Dashboard":
+        render_charts_dashboard(get_fred_api_key_for_app())
     elif active_view == "Graphs":
         row_order = st.session_state.get("table_graph_row_order", None)
         base_df = filtered_df.copy().reset_index(drop=True)
