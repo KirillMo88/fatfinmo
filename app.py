@@ -2972,9 +2972,12 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
         margin={"l": 56, "r": 58, "t": 18, "b": 92},
         bargap=0,
     )
-    fig.update_xaxes(title_text="", showticklabels=False, row=1, col=1)
-    fig.update_xaxes(title_text="", showticklabels=False, row=2, col=1)
-    fig.update_xaxes(title_text="Date", showticklabels=True, row=3, col=1)
+    # Keep the three panels on the exact same selected time window, even when
+    # one of the series starts later because its rolling history is incomplete.
+    shared_x_range = [start_date, end_date]
+    fig.update_xaxes(title_text="", showticklabels=False, range=shared_x_range, row=1, col=1)
+    fig.update_xaxes(title_text="", showticklabels=False, range=shared_x_range, row=2, col=1)
+    fig.update_xaxes(title_text="Date", showticklabels=True, range=shared_x_range, row=3, col=1)
     fig.update_yaxes(title_text="M2 trend gap, pp", row=1, col=1, secondary_y=False)
     secondary_axis = {"title_text": f"{selected_asset} 52W change, %", "showgrid": False}
     if selected_asset == "BTC":
@@ -2999,7 +3002,7 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
 
 
 def _render_liquidity_52w_change_sma_charts(frame: pd.DataFrame, full_frame: pd.DataFrame) -> None:
-    """Render 52-week changes and their 200-week trend for CB assets and USNL."""
+    """Render 52-week-change-minus-200-week-SMA gaps for CB assets and USNL."""
     if frame.empty or full_frame.empty or "date" not in full_frame.columns:
         return
     visible_dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
@@ -3023,31 +3026,21 @@ def _render_liquidity_52w_change_sma_charts(frame: pd.DataFrame, full_frame: pd.
         change = weekly.pct_change(52, fill_method=None).mul(100.0)
         sma = change.rolling(200, min_periods=200).mean()
         chart_df = pd.concat([change.rename("change"), sma.rename("sma")], axis=1)
+        chart_df["gap"] = chart_df["change"] - chart_df["sma"]
         chart_df = chart_df.loc[(chart_df.index >= start_date) & (chart_df.index <= end_date)]
-        if chart_df.dropna(how="all").empty:
+        if chart_df["gap"].dropna().empty:
             continue
 
         fig = go.Figure()
-        change_df = chart_df.dropna(subset=["change"])
-        sma_df = chart_df.dropna(subset=["sma"])
+        gap_df = chart_df.dropna(subset=["gap"])
         fig.add_trace(
             go.Scatter(
-                x=change_df.index,
-                y=change_df["change"],
+                x=gap_df.index,
+                y=gap_df["gap"],
                 mode="lines",
-                name=f"{label} 52W change",
+                name=f"{label} 52W change − 200W SMA",
                 line={"color": color, "width": 1.7},
-                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{label} 52W change: %{{y:.2f}}%<extra></extra>",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=sma_df.index,
-                y=sma_df["sma"],
-                mode="lines",
-                name="200W SMA",
-                line={"color": "#f59e0b", "width": 2.2},
-                hovertemplate="Date: %{x|%Y-%m-%d}<br>200W SMA: %{y:.2f}%<extra></extra>",
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{label} 52W change − 200W SMA: %{{y:.2f}} pp<extra></extra>",
             )
         )
         fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
@@ -3055,7 +3048,8 @@ def _render_liquidity_52w_change_sma_charts(frame: pd.DataFrame, full_frame: pd.
             legend={"orientation": "h", "yanchor": "top", "y": -0.14, "x": 0},
             margin={"l": 58, "r": 40, "t": 50, "b": 72},
         )
-        fig.update_yaxes(title_text="Change, %", zeroline=False)
+        fig.update_xaxes(range=[start_date, end_date], title_text="Date")
+        fig.update_yaxes(title_text="52W change − 200W SMA, pp", zeroline=False)
         st.plotly_chart(
             _style_liquidity_plotly(fig, 320, f"{label} 52W Change − 200W SMA"),
             use_container_width=True,
