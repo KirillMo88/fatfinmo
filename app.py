@@ -2290,6 +2290,7 @@ def render_global_liquidity_dashboard_tab() -> None:
     st.markdown("### Global M2")
     _render_global_m2_level_growth(chart_frame, regime, global_m2_cycle)
     _render_global_m2_market_52w_chart(chart_frame, regime)
+    _render_liquidity_52w_change_sma_charts(chart_frame, regime)
     if global_m2_cycle.empty:
         st.info("No monthly Global M2 history is available for the cycle layer.")
     else:
@@ -2995,6 +2996,71 @@ def _render_global_m2_market_52w_chart(frame: pd.DataFrame, full_frame: pd.DataF
         f"The middle histogram is M2 52W change minus {selected_asset} 52W change; drawdown is measured "
         "from the asset's historical price peak."
     )
+
+
+def _render_liquidity_52w_change_sma_charts(frame: pd.DataFrame, full_frame: pd.DataFrame) -> None:
+    """Render 52-week changes and their 200-week trend for CB assets and USNL."""
+    if frame.empty or full_frame.empty or "date" not in full_frame.columns:
+        return
+    visible_dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
+    if visible_dates.empty:
+        return
+    start_date, end_date = visible_dates.min(), visible_dates.max()
+
+    for column, label, color in (
+        ("global_cb_assets_usd_bn", "Global CB Assets", "#38bdf8"),
+        ("us_net_liquidity_usd_bn", "US Net Liquidity", "#22c55e"),
+    ):
+        if column not in full_frame.columns:
+            continue
+        source = full_frame[["date", column]].copy()
+        source["date"] = pd.to_datetime(source["date"], errors="coerce")
+        source[column] = pd.to_numeric(source[column], errors="coerce")
+        source = source.dropna(subset=["date", column]).sort_values("date").drop_duplicates("date", keep="last")
+        if source.empty:
+            continue
+        weekly = source.set_index("date")[column].resample("W-FRI").last().ffill()
+        change = weekly.pct_change(52, fill_method=None).mul(100.0)
+        sma = change.rolling(200, min_periods=200).mean()
+        chart_df = pd.concat([change.rename("change"), sma.rename("sma")], axis=1)
+        chart_df = chart_df.loc[(chart_df.index >= start_date) & (chart_df.index <= end_date)]
+        if chart_df.dropna(how="all").empty:
+            continue
+
+        fig = go.Figure()
+        change_df = chart_df.dropna(subset=["change"])
+        sma_df = chart_df.dropna(subset=["sma"])
+        fig.add_trace(
+            go.Scatter(
+                x=change_df.index,
+                y=change_df["change"],
+                mode="lines",
+                name=f"{label} 52W change",
+                line={"color": color, "width": 1.7},
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{label} 52W change: %{{y:.2f}}%<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=sma_df.index,
+                y=sma_df["sma"],
+                mode="lines",
+                name="200W SMA",
+                line={"color": "#f59e0b", "width": 2.2},
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>200W SMA: %{y:.2f}%<extra></extra>",
+            )
+        )
+        fig.add_hline(y=0, line={"color": "#94a3b8", "dash": "dot", "width": 1})
+        fig.update_layout(
+            legend={"orientation": "h", "yanchor": "top", "y": -0.14, "x": 0},
+            margin={"l": 58, "r": 40, "t": 50, "b": 72},
+        )
+        fig.update_yaxes(title_text="Change, %", zeroline=False)
+        st.plotly_chart(
+            _style_liquidity_plotly(fig, 320, f"{label} 52W Change − 200W SMA"),
+            use_container_width=True,
+            config=LIQUIDITY_PLOTLY_CONFIG,
+        )
 
 
 def _liquidity_phase_bands(full_frame: pd.DataFrame, visible_frame: pd.DataFrame) -> pd.DataFrame:
