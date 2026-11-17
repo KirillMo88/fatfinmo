@@ -204,6 +204,7 @@ def _figure(
     title: str,
     timeframe: str,
     *,
+    title_font_size: float = 14,
     percentile: pd.Series | None = None,
     percentile_title: str = "5Y Percentile",
     extra_series: dict[str, pd.Series] | None = None,
@@ -235,7 +236,7 @@ def _figure(
         fig.update_xaxes(showticklabels=False, row=2, col=1)
     fig.update_xaxes(showticklabels=True, title_text="Date", tickformat="%Y", nticks=6, row=rows, col=1)
     fig.update_layout(
-        title={"text": title, "x": 0, "xanchor": "left", "font": {"size": 14}},
+        title={"text": title, "x": 0, "xanchor": "left", "font": {"size": title_font_size}},
         height=470 if rows == 3 else 390,
         margin={"l": 38, "r": 10, "t": 52, "b": 34},
         template="plotly_dark",
@@ -274,6 +275,7 @@ def _render_grid(items: list[dict[str, Any]], timeframe: str, *, columns: int = 
                     }
                 fig = _figure(
                     plot_item["frame"], plot_item["title"], timeframe,
+                    title_font_size=plot_item.get("title_font_size", 14),
                     percentile=plot_item.get("percentile"),
                     percentile_title=plot_item.get("percentile_title", "5Y Percentile"),
                     extra_series=plot_item.get("extra_series"),
@@ -513,6 +515,8 @@ def render_charts_dashboard(fred_api_key: str | None = None) -> None:
 
     st.markdown("### Assets")
     asset_items = [_market_item(label, ticker, timeframe, percentile_mode="asset", key=f"asset_{ticker}") for label, ticker, _ in ASSETS]
+    for item in asset_items:
+        item["title_font_size"] = 21
     _render_grid(asset_items, timeframe)
 
     st.markdown("### Risk")
