@@ -327,8 +327,8 @@ def _breadth_item(title: str, symbol: str, timeframe: str, *, key: str) -> dict[
         try:
             archived = _load_tv_economic(symbol)
             if not archived.empty:
-                values = pd.to_numeric(archived["value"], errors="coerce")
-                dates = pd.to_datetime(archived["date"], errors="coerce")
+                values = pd.to_numeric(archived["value"], errors="coerce").to_numpy()
+                dates = pd.to_datetime(archived["date"], errors="coerce").to_numpy()
                 raw = pd.DataFrame(
                     {"Open": values, "High": values, "Low": values, "Close": values, "Volume": np.nan},
                     index=dates,
@@ -343,8 +343,8 @@ def _breadth_item(title: str, symbol: str, timeframe: str, *, key: str) -> dict[
             snapshot = load_market_cycle_snapshot_cached(int(st.session_state.get("market_cycle_refresh_nonce", 0)))
             history = snapshot.history
             date_column = "Date" if "Date" in history.columns else "date"
-            dates = pd.to_datetime(history[date_column], errors="coerce")
-            values = pd.to_numeric(history[column], errors="coerce")
+            dates = pd.to_datetime(history[date_column], errors="coerce").to_numpy()
+            values = pd.to_numeric(history[column], errors="coerce").to_numpy()
             raw = pd.DataFrame(
                 {"Open": values, "High": values, "Low": values, "Close": values, "Volume": np.nan},
                 index=dates,
