@@ -90,9 +90,28 @@ def _load_tv_economic(symbol: str) -> pd.DataFrame:
         from tradingview_mcp import get_economic_data
 
         result = get_economic_data(symbol, date_from="2000-01-01")
-        return result.frame.copy()
+        if not result.frame.empty:
+            return result.frame.copy()
     except Exception:
-        return pd.DataFrame(columns=["date", "value"])
+        pass
+    # The archive is intentionally usable even when the live MCP endpoint is
+    # unavailable or its short cache has expired.  This preserves the full
+    # history needed by Dashboard charts without pretending the latest point
+    # is live.
+    try:
+        from tradingview_mcp import ECONOMIC_CACHE_PATH
+
+        path = ECONOMIC_CACHE_PATH
+        if path.exists():
+            cached = pd.read_csv(path)
+            cached = cached.loc[cached["symbol"].astype(str).eq(symbol)].copy()
+            if not cached.empty:
+                cached["date"] = pd.to_datetime(cached["date"], errors="coerce")
+                cached["value"] = pd.to_numeric(cached["value"], errors="coerce")
+                return cached.dropna(subset=["date", "value"])[["date", "value"]].sort_values("date")
+    except Exception:
+        pass
+    return pd.DataFrame(columns=["date", "value"])
 
 
 def _price_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -225,7 +244,7 @@ def _figure(
         legend={"orientation": "h", "y": -0.14, "x": 0, "font": {"size": 9}},
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
-        annotations=[{"text": _change_block(frame["close"], timeframe), "xref": "paper", "yref": "paper", "x": 1, "y": 1.06, "xanchor": "right", "yanchor": "bottom", "showarrow": False, "align": "right", "font": {"size": 11, "color": "#cbd5e1"}}],
+        annotations=[{"text": _change_block(frame["close"], timeframe), "xref": "paper", "yref": "paper", "x": 1, "y": 1.06, "xanchor": "right", "yanchor": "bottom", "showarrow": False, "align": "right", "font": {"size": 16.5, "color": "#cbd5e1"}}],
     )
     fig.update_xaxes(gridcolor="#263041")
     fig.update_yaxes(gridcolor="#263041", zeroline=False)
@@ -304,6 +323,18 @@ def _breadth_item(title: str, symbol: str, timeframe: str, *, key: str) -> dict[
         raw = load_tradingview_breadth_series(symbol, pd.Timestamp.now(tz="UTC").tz_localize(None))
     except Exception:
         raw = _empty_ohlcv()
+    if raw.empty:
+        try:
+            archived = _load_tv_economic(symbol)
+            if not archived.empty:
+                values = pd.to_numeric(archived["value"], errors="coerce")
+                dates = pd.to_datetime(archived["date"], errors="coerce")
+                raw = pd.DataFrame(
+                    {"Open": values, "High": values, "Low": values, "Close": values, "Volume": np.nan},
+                    index=dates,
+                ).dropna(subset=["Close"])
+        except Exception:
+            raw = _empty_ohlcv()
     if raw.empty:
         try:
             from market_cycle_tab import load_market_cycle_snapshot_cached
