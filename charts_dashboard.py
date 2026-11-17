@@ -53,7 +53,7 @@ MAP_UNIVERSES: dict[str, dict[str, str]] = {
         "TRX/BTC": "TRX-USD::BTC-USD", "SUI/BTC": "SUI-USD::BTC-USD", "ETH": "ETH-USD",
     },
     "Currency Map": {
-        "USDX": "DX-Y.NYB", "GBP/USD": "GBPUSD=X", "JPY/USD": "JPY=X", "CHF/USD": "CHF=X",
+        "USDX": "DX-Y.NYB", "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "JPY/USD": "JPY=X", "CHF/USD": "CHF=X",
         "CAD/USD": "CAD=X", "AUD/USD": "AUD=X",
     },
     "Yield Map": {
@@ -177,7 +177,7 @@ def _change_block(series: pd.Series, timeframe: str) -> str:
     for label, period in periods.items():
         change = values.pct_change(periods=period, fill_method=None).iloc[-1] * 100.0
         lines.append(f"{label} change: {change:+.2f}%" if np.isfinite(change) else f"{label} change: n/a")
-    return "<br>".join(lines)
+    return " · ".join(lines)
 
 
 def _figure(
@@ -212,8 +212,9 @@ def _figure(
         fig.update_yaxes(title_text="5Y pctl", range=[0, 100], row=3, col=1)
     fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
     fig.update_xaxes(showticklabels=False, row=1, col=1)
-    fig.update_xaxes(showticklabels=False, row=2, col=1)
-    fig.update_xaxes(title_text="Date", row=rows, col=1)
+    if rows > 2:
+        fig.update_xaxes(showticklabels=False, row=2, col=1)
+    fig.update_xaxes(showticklabels=True, title_text="Date", tickformat="%Y", nticks=6, row=rows, col=1)
     fig.update_layout(
         title={"text": title, "x": 0, "xanchor": "left", "font": {"size": 14}},
         height=470 if rows == 3 else 390,
@@ -224,7 +225,7 @@ def _figure(
         legend={"orientation": "h", "y": -0.14, "x": 0, "font": {"size": 9}},
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
-        annotations=[{"text": _change_block(frame["close"], timeframe), "xref": "paper", "yref": "paper", "x": 1, "y": 1.06, "xanchor": "right", "yanchor": "bottom", "showarrow": False, "align": "right", "font": {"size": 9, "color": "#cbd5e1"}}],
+        annotations=[{"text": _change_block(frame["close"], timeframe), "xref": "paper", "yref": "paper", "x": 1, "y": 1.06, "xanchor": "right", "yanchor": "bottom", "showarrow": False, "align": "right", "font": {"size": 11, "color": "#cbd5e1"}}],
     )
     fig.update_xaxes(gridcolor="#263041")
     fig.update_yaxes(gridcolor="#263041", zeroline=False)
@@ -242,17 +243,16 @@ def _render_grid(items: list[dict[str, Any]], timeframe: str, *, columns: int = 
                     continue
                 plot_item = dict(item)
                 frame = item["frame"].copy()
-                end_date = pd.to_datetime(frame.index, errors="coerce").max()
-                start_date = end_date - pd.DateOffset(years=5) if pd.notna(end_date) else None
-                if start_date is not None:
-                    plot_item["frame"] = frame.loc[frame.index >= start_date]
-                    if item.get("percentile") is not None:
-                        plot_item["percentile"] = item["percentile"].loc[item["percentile"].index >= start_date]
-                    if item.get("extra_series"):
-                        plot_item["extra_series"] = {
-                            label: values.loc[values.index >= start_date]
-                            for label, values in item["extra_series"].items()
-                        }
+                display_frame = frame.tail(250)
+                display_index = display_frame.index
+                plot_item["frame"] = display_frame
+                if item.get("percentile") is not None:
+                    plot_item["percentile"] = item["percentile"].reindex(display_index)
+                if item.get("extra_series"):
+                    plot_item["extra_series"] = {
+                        label: values.reindex(display_index)
+                        for label, values in item["extra_series"].items()
+                    }
                 fig = _figure(
                     plot_item["frame"], plot_item["title"], timeframe,
                     percentile=plot_item.get("percentile"),
@@ -304,11 +304,65 @@ def _breadth_item(title: str, symbol: str, timeframe: str, *, key: str) -> dict[
         raw = load_tradingview_breadth_series(symbol, pd.Timestamp.now(tz="UTC").tz_localize(None))
     except Exception:
         raw = _empty_ohlcv()
+    if raw.empty:
+        try:
+            from market_cycle_tab import load_market_cycle_snapshot_cached
+
+            column = {"S5FI": "SPXAboveSMA50D", "S5TH": "SPXAboveSMA200D"}[symbol]
+            snapshot = load_market_cycle_snapshot_cached(int(st.session_state.get("market_cycle_refresh_nonce", 0)))
+            history = snapshot.history
+            date_column = "Date" if "Date" in history.columns else "date"
+            dates = pd.to_datetime(history[date_column], errors="coerce")
+            values = pd.to_numeric(history[column], errors="coerce")
+            raw = pd.DataFrame(
+                {"Open": values, "High": values, "Low": values, "Close": values, "Volume": np.nan},
+                index=dates,
+            ).dropna(subset=["Close"])
+        except Exception:
+            raw = _empty_ohlcv()
     bars = _aggregate_price(raw, timeframe, "INDEX")
     if bars.empty:
         return {"title": title, "frame": pd.DataFrame(), "key": key}
     indicators = _indicator_frame(bars["Close"], timeframe)
     return {"title": title, "frame": indicators, "candlesticks": False, "key": key}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_ism_services_series() -> pd.DataFrame:
+    try:
+        from business_cycle import load_ism_services_history, load_investing_ism_services_releases
+
+        frames = [load_ism_services_history("1990-01-01"), load_investing_ism_services_releases("1990-01-01")]
+        frames = [frame for frame in frames if isinstance(frame, pd.DataFrame) and not frame.empty]
+        if not frames:
+            return pd.DataFrame(columns=["Date", "Value"])
+        out = pd.concat(frames, ignore_index=True)
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out["Value"] = pd.to_numeric(out["Value"], errors="coerce")
+        return out.dropna(subset=["Date", "Value"]).sort_values("Date").drop_duplicates("Date", keep="last")[["Date", "Value"]]
+    except Exception:
+        return pd.DataFrame(columns=["Date", "Value"])
+
+
+def _ism_services_item(timeframe: str, *, key: str) -> dict[str, Any]:
+    raw = _load_ism_services_series()
+    values = _aggregate_series(raw, timeframe)
+    if values.empty:
+        return _tv_item("U.S. ISM Services PMI", "ECONOMICS:USNMI", timeframe, key=key)
+    return {"title": "U.S. ISM Services PMI", "frame": _indicator_frame(values["Close"], timeframe), "candlesticks": False, "key": key}
+
+
+def _spread_item(title: str, left: pd.Series, right: pd.Series, timeframe: str, *, key: str) -> dict[str, Any]:
+    spread = pd.concat(
+        [pd.to_numeric(left, errors="coerce").rename("left"), pd.to_numeric(right, errors="coerce").rename("right")],
+        axis=1,
+    ).sort_index().ffill().dropna()
+    if spread.empty:
+        return {"title": title, "frame": pd.DataFrame(), "key": key}
+    values = _aggregate_series(pd.DataFrame({"Date": spread.index, "Value": spread["left"] - spread["right"]}), timeframe)
+    if values.empty:
+        return {"title": title, "frame": pd.DataFrame(), "key": key}
+    return {"title": title, "frame": _indicator_frame(values["Close"], timeframe), "candlesticks": False, "key": key}
 
 
 def _liquidity_item(title: str, series: pd.Series, timeframe: str, key: str) -> dict[str, Any]:
@@ -388,24 +442,35 @@ def _liquidity_series() -> dict[str, pd.Series]:
         _, monthly, weekly = read_global_liquidity()
     except Exception:
         return {}
-    frame = weekly.copy() if isinstance(weekly, pd.DataFrame) and not weekly.empty else monthly.copy()
-    if frame.empty or "date" not in frame.columns:
+    def as_indexed(frame: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame) or frame.empty or "date" not in frame.columns:
+            return pd.DataFrame()
+        out = frame.copy()
+        out["date"] = pd.to_datetime(out["date"], errors="coerce")
+        return out.dropna(subset=["date"]).set_index("date").sort_index()
+
+    monthly_frame = as_indexed(monthly)
+    weekly_frame = as_indexed(weekly)
+    if monthly_frame.empty and weekly_frame.empty:
         return {}
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.dropna(subset=["date"]).set_index("date").sort_index()
     output: dict[str, pd.Series] = {}
     for column, label in (("global_m2_usd_bn", "Global M2 52W change − 200W SMA"), ("global_cb_assets_usd_bn", "Global CB Assets 52W change − 200W SMA"), ("us_net_liquidity_usd_bn", "US Net Liquidity 52W change − 200W SMA")):
-        if column not in frame:
-            continue
-        value = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if column in weekly_frame:
+            value = pd.to_numeric(weekly_frame[column], errors="coerce").dropna()
+        else:
+            value = pd.Series(dtype="float64")
+        if value.empty and column in monthly_frame:
+            value = pd.to_numeric(monthly_frame[column], errors="coerce").dropna().resample("W-FRI").last().ffill()
         if value.empty:
             continue
         change = value.pct_change(52, fill_method=None).mul(100.0)
         gap = change - change.rolling(200, min_periods=200).mean()
         output[label] = gap.dropna()
     for column, label in (("WTREGEN", "WTREGEN"), ("RRPONTSYD", "RRPONTSYD")):
-        if column in frame:
-            output[label] = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if column in weekly_frame:
+            output[label] = pd.to_numeric(weekly_frame[column], errors="coerce").dropna()
+        elif column in monthly_frame:
+            output[label] = pd.to_numeric(monthly_frame[column], errors="coerce").dropna()
     return output
 
 
@@ -413,7 +478,7 @@ def render_charts_dashboard(fred_api_key: str | None = None) -> None:
     st.markdown("## Charts Dashboard")
     timeframe_label = st.radio("Candles", list(TIMEFRAME_OPTIONS), index=0, horizontal=True, key="charts_dashboard_timeframe")
     timeframe = TIMEFRAME_OPTIONS[timeframe_label]
-    st.caption("Yahoo Finance market history, FRED macro series and existing Liquidity Cycle calculations. History: 5Y view; indicators use the full available history.")
+    st.caption("Yahoo Finance market history, FRED macro series and existing Liquidity Cycle calculations. Each chart displays the latest 250 bars; indicators use the full available history.")
 
     st.markdown("### Assets")
     asset_items = [_market_item(label, ticker, timeframe, percentile_mode="asset", key=f"asset_{ticker}") for label, ticker, _ in ASSETS]
@@ -433,20 +498,18 @@ def render_charts_dashboard(fred_api_key: str | None = None) -> None:
             weekly = weekly.dropna(subset=["date"]).set_index("date")
             sofr = pd.to_numeric(weekly["SOFR"], errors="coerce").dropna()
             effr = pd.to_numeric(weekly["EFFR"], errors="coerce").dropna()
-            values = _aggregate_series(pd.DataFrame({"Date": weekly.index, "Value": sofr}), timeframe)
-            if not values.empty:
-                indicators = _indicator_frame(values["Close"], timeframe)
-                extra = _aggregate_series(pd.DataFrame({"Date": weekly.index, "Value": effr}), timeframe)["Close"]
-                funding_items.append({"title": "SOFR + EFFR", "frame": indicators, "extra_series": {"EFFR": extra}, "candlesticks": False, "key": "risk_sofr_effr"})
+            funding_items.append(_spread_item("SOFR − EFFR", sofr, effr, timeframe, key="risk_sofr_effr"))
+            if funding_items[-1]["frame"].empty:
+                funding_items.clear()
     except Exception:
         pass
     if not funding_items:
-        sofr_item = _fred_item("SOFR + EFFR", "SOFR", fred_api_key, timeframe, key="risk_sofr_effr")
+        sofr_item = _fred_item("SOFR", "SOFR", fred_api_key, timeframe, key="risk_sofr")
         effr_item = _fred_item("EFFR", "EFFR", fred_api_key, timeframe, key="risk_effr_overlay")
         if not sofr_item["frame"].empty and not effr_item["frame"].empty:
-            sofr_item["extra_series"] = {"EFFR": effr_item["frame"]["close"]}
-            sofr_item["candlesticks"] = False
-        funding_items.append(sofr_item)
+            funding_items.append(_spread_item("SOFR − EFFR", sofr_item["frame"]["close"], effr_item["frame"]["close"], timeframe, key="risk_sofr_effr"))
+        else:
+            funding_items.append({"title": "SOFR − EFFR", "frame": pd.DataFrame(), "key": "risk_sofr_effr"})
     risk_items.extend(funding_items)
     _render_grid(risk_items, timeframe)
 
@@ -457,7 +520,7 @@ def render_charts_dashboard(fred_api_key: str | None = None) -> None:
     st.markdown("### Economy")
     economy_items: list[dict[str, Any]] = []
     economy_items.append(_tv_item("USBCOI", "ECONOMICS:USBCOI", timeframe, key="economy_usbcoi"))
-    economy_items.append(_tv_item("U.S. ISM Services PMI", "ECONOMICS:USNMI", timeframe, key="economy_ism_services"))
+    economy_items.append(_ism_services_item(timeframe, key="economy_ism_services"))
     economy_items.append(_fred_item("US10Y", "DGS10", fred_api_key, timeframe, key="economy_us10y"))
     us02y = _fred_item("US02Y", "DGS2", fred_api_key, timeframe, key="economy_us02y")
     fedfunds = _fred_item("FEDFUNDS", "FEDFUNDS", fred_api_key, timeframe, key="economy_fedfunds")
