@@ -19,6 +19,7 @@ from business_cycle import (
     BusinessCycleSnapshot,
     build_business_cycle_snapshot,
 )
+from finance_core import download_completed_ohlcv
 from cpi_components import (
     CPI_CACHE_TTL_SECONDS,
     CPI_HORIZONS,
@@ -32,6 +33,7 @@ from macro_surprises import MacroSurprisesSnapshot, build_macro_surprises_snapsh
 
 BUSINESS_CYCLE_TTL_SECONDS = 21600
 BUSINESS_CYCLE_PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
+PRIMARY_ASSET_TICKERS = {"SPX": "^GSPC", "Gold": "GC=F", "BTC": "BTC-USD"}
 RETURN_HORIZONS = ("3M", "6M", "12M")
 
 REGIME_COLORS = {
@@ -75,6 +77,31 @@ def load_business_cycle_snapshot_cached(api_key: str | None, refresh_nonce: int 
 @st.cache_data(show_spinner=True, ttl=BUSINESS_CYCLE_TTL_SECONDS)
 def load_macro_surprises_snapshot_cached(history: pd.DataFrame, refresh_nonce: int = 0) -> MacroSurprisesSnapshot:
     return build_macro_surprises_snapshot(history, refresh_live=refresh_nonce > 0)
+
+
+@st.cache_data(show_spinner=False, ttl=BUSINESS_CYCLE_TTL_SECONDS)
+def load_primary_asset_52w_changes_cached(start_date: str, end_date: str) -> pd.DataFrame:
+    """Load weekly 52-week changes for the single asset overlay selector."""
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    calendar = pd.date_range(start, end, freq="W-FRI")
+    out = pd.DataFrame({"date": calendar})
+    for asset, ticker in PRIMARY_ASSET_TICKERS.items():
+        try:
+            daily = download_completed_ohlcv(ticker, period="max")
+            close = pd.to_numeric(daily.get("Close", pd.Series(dtype="float64")), errors="coerce").dropna()
+            if close.empty:
+                raise ValueError("empty close series")
+            dates = pd.to_datetime(close.index, errors="coerce")
+            if getattr(dates, "tz", None) is not None:
+                dates = dates.tz_localize(None)
+            close.index = dates
+            weekly = close.sort_index().resample("W-FRI").last().dropna()
+            aligned = weekly.reindex(calendar).ffill()
+            out[f"{asset}_52W"] = aligned.pct_change(52, fill_method=None).mul(100.0).to_numpy()
+        except Exception:
+            out[f"{asset}_52W"] = np.nan
+    return out
 
 
 @st.cache_data(show_spinner=False, ttl=CPI_CACHE_TTL_SECONDS)
@@ -123,7 +150,19 @@ def render_business_cycle_tab(api_key: str | None) -> None:
         key="business_cycle_chart_range",
     )
     d = filter_history_range(history, chart_range)
-    st.plotly_chart(build_primary_macro_fig(d), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
+    asset_choice = st.radio(
+        "52W asset change",
+        options=list(PRIMARY_ASSET_TICKERS),
+        index=0,
+        horizontal=True,
+        key="business_cycle_primary_asset",
+    )
+    asset_history = load_primary_asset_52w_changes_cached(
+        str(history["date"].min().date()),
+        str(history["date"].max().date()),
+    )
+    d = d.merge(asset_history, on="date", how="left")
+    st.plotly_chart(build_primary_macro_fig(d, asset_choice), use_container_width=True, config=BUSINESS_CYCLE_PLOTLY_CONFIG)
 
     st.markdown("### Regime Dynamics")
     map_col, lm_col = st.columns(2)
@@ -587,8 +626,15 @@ def render_status_card(title: str, headline: str, rows: list[tuple[str, str]]) -
     )
 
 
-def build_primary_macro_fig(d: pd.DataFrame) -> go.Figure:
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.82, 0.18], vertical_spacing=0.04)
+def build_primary_macro_fig(d: pd.DataFrame, asset_choice: str = "SPX") -> go.Figure:
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.82, 0.18],
+        vertical_spacing=0.04,
+        specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
+    )
     add_background_bands(fig, d, "EconomyRegime", REGIME_COLORS, opacity=0.16, row=1)
     pmi = pd.to_numeric(d.get("ISM_3MMA"), errors="coerce")
     custom = np.stack(
@@ -621,7 +667,23 @@ def build_primary_macro_fig(d: pd.DataFrame) -> go.Figure:
         ),
         row=1,
         col=1,
+        secondary_y=False,
     )
+    asset_column = f"{asset_choice}_52W"
+    if asset_column in d.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=d["date"],
+                y=pd.to_numeric(d[asset_column], errors="coerce"),
+                mode="lines",
+                name=f"{asset_choice} 52W change",
+                line={"color": "#38bdf8", "width": 1.7},
+                hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>{asset_choice} 52W change: %{{y:.1f}}%<extra></extra>",
+            ),
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
     fig.add_hline(y=50, line={"color": "#94a3b8", "dash": "dot", "width": 1}, row=1, col=1)
     strip_colors = d["BusinessCycleState"].astype(str).map(lambda state: PHASE_COLORS.get(state, "#64748b"))
     fig.add_trace(
@@ -636,9 +698,18 @@ def build_primary_macro_fig(d: pd.DataFrame) -> go.Figure:
         row=2,
         col=1,
     )
-    fig.update_yaxes(title_text="PMI", row=1, col=1)
+    fig.update_yaxes(title_text="PMI", secondary_y=False, row=1, col=1)
+    fig.update_yaxes(
+        title_text=f"{asset_choice} 52W change (%)",
+        secondary_y=True,
+        showgrid=False,
+        zeroline=True,
+        zerolinecolor="#64748b",
+        row=1,
+        col=1,
+    )
     fig.update_yaxes(showticklabels=False, range=[0, 1], row=2, col=1)
-    return style_business_fig(fig, "PMI with Economy Regime Background and Business Cycle Phase Strip", 430)
+    return style_business_fig(fig, f"PMI with {asset_choice} 52W Change, Economy Regime Background and Business Cycle Phase Strip", 430)
 
 
 def build_level_momentum_fig(d: pd.DataFrame, show_components: bool) -> go.Figure:
