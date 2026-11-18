@@ -70,8 +70,6 @@ MAP_UNIVERSES: dict[str, dict[str, str | tuple[str, ...]]] = {
     },
     "US Sectors Map": {
         **{symbol: symbol for symbol in ("XLK", "XLV", "XLF", "XLI", "XLB", "XLE", "XLU", "XLC", "XLY", "XLP")},
-        "US Sectors Aggressive": US_SECTORS_AGGRESSIVE,
-        "US Sectors Defensive": US_SECTORS_DEFENSIVE,
     },
     "Commodity Map": {
         "Gold": "GC=F", "HG1": "HG=F", "WTI": "CL=F", "RBOB": "RB=F", "NatGas": "NG=F", "DBA": "DBA",
