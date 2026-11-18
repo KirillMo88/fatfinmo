@@ -74,7 +74,7 @@ MAP_UNIVERSES: dict[str, dict[str, str | tuple[str, ...]]] = {
         "US Sectors Defensive": US_SECTORS_DEFENSIVE,
     },
     "Commodity Map": {
-        "Gold": "GC=F", "HG1": "HG=F", "WTI": "CL=F", "RBOB": "RB=F", "NatGas": "NG=F", "DBA": "DBA", "IAU": "IAU",
+        "Gold": "GC=F", "HG1": "HG=F", "WTI": "CL=F", "RBOB": "RB=F", "NatGas": "NG=F", "DBA": "DBA",
     },
     "Crypto Map": {
         "BTC": "BTC-USD", "ETH/BTC": "ETH-USD::BTC-USD", "SOL/BTC": "SOL-USD::BTC-USD", "XRP/BTC": "XRP-USD::BTC-USD",
