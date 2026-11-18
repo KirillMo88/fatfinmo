@@ -190,6 +190,29 @@ def test_gold_mcp_history_starts_in_1960(monkeypatch):
     assert history.iloc[-1] == 4284.13
 
 
+def test_gold_mcp_history_uses_stale_cache_when_refresh_fails(tmp_path, monkeypatch):
+    import gold_regime.service as service
+
+    cache_path = tmp_path / "TVC_GOLD_1W.csv"
+    pd.DataFrame(
+        {
+            "date": ["1960-01-04", "2026-11-15"],
+            "close": [35.0, 3861.011],
+        }
+    ).to_csv(cache_path, index=False)
+    monkeypatch.setattr(service, "OHLCV_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(
+        service,
+        "get_ohlcv_data",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("TradingView unavailable")),
+    )
+
+    history = service.load_gold_mcp_weekly()
+
+    assert history.iloc[-1] == 3861.011
+    assert history.index.min() == pd.Timestamp("1960-01-04")
+
+
 def test_macro2_percentile_is_point_in_time_and_inclusive():
     dates = pd.date_range("2020-01-03", periods=106, freq="W-FRI")
     values = pd.Series([0.0] * 103 + [1.0, 2.0, 3.0], index=dates)

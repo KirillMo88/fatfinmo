@@ -12,7 +12,7 @@ from finance_core import drop_incomplete_daily_bar
 from fred_client import download_fred_series_batch
 from business_cycle import build_business_cycle_snapshot
 from global_liquidity import read_global_liquidity
-from tradingview_mcp import get_ohlcv_data
+from tradingview_mcp import OHLCV_CACHE_DIR, get_ohlcv_data
 from .aisc import aisc_config, build_gold_aisc_valuation
 
 from .config import GOLD_REGIME_CONFIG
@@ -32,7 +32,7 @@ from .regime import (
 from .utils import freshness_from_date, weekly_close
 
 
-YAHOO_GOLD_REGIME_TICKERS = ["GLD", "DX-Y.NYB", "CL=F"]
+YAHOO_GOLD_REGIME_TICKERS = ["GC=F", "DX-Y.NYB", "CL=F"]
 FRED_GOLD_REGIME_SERIES = ["DFII10", "DGS2", "DGS10", "T5YIE", "T10YIE", "IRLTLT01JPM156N"]
 GOLD_MCP_SYMBOL = "TVC:GOLD"
 GOLD_HISTORY_START = pd.Timestamp("1960-01-04")
@@ -69,7 +69,10 @@ def build_gold_regime_snapshot(
     )
     gold_price = load_gold_mcp_weekly()
     if gold_price.empty:
-        gold_price = weekly_close(yahoo_weekly.get("GLD", pd.DataFrame()))
+        # GLD is an ETF share price, not a USD/oz gold price.  It must never
+        # be used as the Gold/AISC numerator because it produces a false
+        # ~0.1-0.2x multiple.  GC=F is the unit-compatible Yahoo fallback.
+        gold_price = weekly_close(yahoo_weekly.get("GC=F", pd.DataFrame()))
     gold_price = gold_price.rename("gold_price")
     price_history = pd.DataFrame({"date": gold_price.index, "gold_price": gold_price.values})
 
@@ -178,7 +181,7 @@ def build_gold_structural_macro2_snapshot(
     except Exception:
         business_state = pd.Series(dtype="object")
 
-    selected_gold_price = gold_price if gold_price is not None and not gold_price.empty else weekly_close(yahoo_weekly.get("GLD", pd.DataFrame()))
+    selected_gold_price = gold_price if gold_price is not None and not gold_price.empty else weekly_close(yahoo_weekly.get("GC=F", pd.DataFrame()))
     history = calculate_gold_structural_macro2_history(
         gold_price=_series_from_start(selected_gold_price, GOLD_MACRO_START),
         dxy=_series_from_start(weekly_close(yahoo_weekly.get("DX-Y.NYB", pd.DataFrame())), GOLD_MACRO_START),
@@ -202,7 +205,14 @@ def load_gold_mcp_weekly() -> pd.Series:
     try:
         frame = get_ohlcv_data(GOLD_MCP_SYMBOL, interval="1W", count=5000)
     except Exception:
-        return pd.Series(dtype="float64", name="gold_price")
+        # A refresh can fail while the previous TVC:GOLD history is still
+        # valid for the valuation.  Recover the stale cache before falling
+        # back to Yahoo GC=F so an outage cannot switch the model to GLD.
+        cache_path = OHLCV_CACHE_DIR / "TVC_GOLD_1W.csv"
+        try:
+            frame = pd.read_csv(cache_path) if cache_path.exists() else pd.DataFrame()
+        except Exception:
+            frame = pd.DataFrame()
     if frame is None or frame.empty or not {"date", "close"}.issubset(frame.columns):
         return pd.Series(dtype="float64", name="gold_price")
 
