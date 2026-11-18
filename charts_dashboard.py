@@ -20,6 +20,25 @@ TIMEFRAME_OPTIONS = {"Daily": "1D", "Weekly": "1W", "Monthly": "1M"}
 US_SECTORS_AGGRESSIVE = ("XLC", "XLF", "XLI", "XLK", "XLY")
 US_SECTORS_DEFENSIVE = ("XLP", "XLU", "XLV")
 
+MAP_POINT_COLORS = {
+    "Commodities": "#3b82f6",
+    "Bonds": "#facc15",
+    "BTC": "#a855f7",
+    "Equities": "#22c55e",
+}
+MAP_POINT_CATEGORY = {
+    "Gold": "Commodities",
+    "GOLD": "Commodities",
+    "HG1": "Commodities",
+    "WTI": "Commodities",
+    "DBA": "Commodities",
+    "TLT": "Bonds",
+    "HYG": "Bonds",
+    "EMB": "Bonds",
+    "IEF": "Bonds",
+    "BTC": "BTC",
+}
+
 ASSETS = (
     ("ES1!", "ES=F", "Yahoo Finance"),
     ("NQ1!", "NQ=F", "Yahoo Finance"),
@@ -36,9 +55,9 @@ RISK_MARKET = (
 
 MAP_UNIVERSES: dict[str, dict[str, str | tuple[str, ...]]] = {
     "Assets Map": {
-        "SPY": "SPY", "QQQ": "QQQ", "GOLD": "GC=F", "WTI": "CL=F", "HYG": "HYG",
-        "TLT": "TLT", "BTC": "BTC-USD", "IEUR": "IEUR", "MCHI": "MCHI", "INDA": "INDA",
-        "EWJ": "EWJ", "EWZ": "EWZ", "ASEA": "ASEA", "AI": "BOTZ", "HG1": "HG=F",
+        "SPY": "SPY", "QQQ": "QQQ", "GOLD": "GC=F", "HG1": "HG=F", "WTI": "CL=F", "DBA": "DBA",
+        "TLT": "TLT", "HYG": "HYG", "EMB": "EMB", "IEF": "IEF", "BTC": "BTC-USD", "IEUR": "IEUR", "MCHI": "MCHI", "INDA": "INDA",
+        "EWJ": "EWJ", "EWZ": "EWZ", "ASEA": "ASEA", "AI": "BOTZ",
         "US Sectors Aggressive": US_SECTORS_AGGRESSIVE,
         "US Sectors Defensive": US_SECTORS_DEFENSIVE,
     },
@@ -551,11 +570,44 @@ def _render_map(mapping_name: str, horizons: str, api_key: str | None) -> None:
         st.info(f"{mapping_name}: insufficient history")
         return
     fig = go.Figure()
-    colors = np.where(points["short"].ge(0), "#22c55e", "#ef4444")
-    fig.add_trace(go.Scatter(x=points["long"], y=points["short"], mode="markers+text", text=points["label"], textposition="top center", marker={"size": 10, "color": colors}, hovertemplate="%{text}<br>Long: %{x:.2f}%<br>Short: %{y:.2f}%<extra></extra>"))
+    categories = points["label"].map(MAP_POINT_CATEGORY).fillna("Equities")
+    colors = categories.map(MAP_POINT_COLORS).tolist()
+    fig.add_trace(
+        go.Scatter(
+            x=points["long"],
+            y=points["short"],
+            mode="markers+text",
+            text=points["label"],
+            textposition="top center",
+            marker={"size": 10, "color": colors},
+            hovertemplate="%{text}<br>Long: %{x:.2f}%<br>Short: %{y:.2f}%<extra></extra>",
+            showlegend=False,
+        )
+    )
+    for category, color in MAP_POINT_COLORS.items():
+        if category not in set(categories):
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker={"size": 10, "color": color},
+                name=category,
+                hoverinfo="skip",
+                showlegend=True,
+            )
+        )
     fig.add_hline(y=0, line={"color": "#64748b", "dash": "dot"})
     fig.add_vline(x=0, line={"color": "#64748b", "dash": "dot"})
-    fig.update_layout(title=f"{mapping_name} — {horizons}", height=520, template="plotly_dark", margin={"l": 42, "r": 18, "t": 52, "b": 50}, showlegend=False)
+    fig.update_layout(
+        title=f"{mapping_name} — {horizons}",
+        height=520,
+        template="plotly_dark",
+        margin={"l": 42, "r": 18, "t": 52, "b": 50},
+        showlegend=True,
+        legend={"orientation": "h", "y": -0.16, "x": 0.0},
+    )
     fig.update_xaxes(title=f"Performance {horizons.split(' / ')[1]} (%)", autorange=True)
     fig.update_yaxes(title=f"Performance {horizons.split(' / ')[0]} (%)", autorange=True)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"charts_dashboard_map_{mapping_name}")
