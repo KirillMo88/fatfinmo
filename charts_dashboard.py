@@ -549,27 +549,29 @@ def render_charts_dashboard(fred_api_key: str | None = None) -> None:
     _render_grid(risk_items, timeframe)
 
     st.markdown("### Liquidity")
-    liquidity_items = [_liquidity_item(label, values, timeframe, f"liquidity_{index}") for index, (label, values) in enumerate(_liquidity_series().items())]
-    _render_grid(liquidity_items, timeframe)
+    liquidity_timeframe = "1M"
+    liquidity_items = [_liquidity_item(label, values, liquidity_timeframe, f"liquidity_{index}") for index, (label, values) in enumerate(_liquidity_series().items())]
+    _render_grid(liquidity_items, liquidity_timeframe)
 
     st.markdown("### Economy")
+    economy_timeframe = "1M"
     economy_items: list[dict[str, Any]] = []
-    economy_items.append(_tv_item("USBCOI", "ECONOMICS:USBCOI", timeframe, key="economy_usbcoi"))
-    economy_items.append(_ism_services_item(timeframe, key="economy_ism_services"))
-    economy_items.append(_fred_item("US10Y", "DGS10", fred_api_key, timeframe, key="economy_us10y"))
-    us02y = _fred_item("US02Y", "DGS2", fred_api_key, timeframe, key="economy_us02y")
-    fedfunds = _fred_item("FEDFUNDS", "FEDFUNDS", fred_api_key, timeframe, key="economy_fedfunds")
+    economy_items.append(_tv_item("USBCOI", "ECONOMICS:USBCOI", economy_timeframe, key="economy_usbcoi"))
+    economy_items.append(_ism_services_item(economy_timeframe, key="economy_ism_services"))
+    economy_items.append(_fred_item("US10Y", "DGS10", fred_api_key, economy_timeframe, key="economy_us10y"))
+    us02y = _fred_item("US02Y", "DGS2", fred_api_key, economy_timeframe, key="economy_us02y")
+    fedfunds = _fred_item("FEDFUNDS", "FEDFUNDS", fred_api_key, economy_timeframe, key="economy_fedfunds")
     if not us02y["frame"].empty:
         extra = {"FEDFUNDS": fedfunds["frame"]["close"]} if not fedfunds["frame"].empty else {}
         us02y["title"] = "US02Y + FEDFUNDS"
         us02y["extra_series"] = extra
         us02y["key"] = "economy_us02y_fedfunds"
     economy_items.append(us02y)
-    economy_items.append(_fred_item("EXPINF1YR", "EXPINF1YR", fred_api_key, timeframe, key="economy_expinf1yr"))
-    economy_items.append(_fred_item("EXPINF5YR", "EXPINF5YR", fred_api_key, timeframe, key="economy_expinf5yr"))
-    economy_items.append(_tv_item("USIRYY", "ECONOMICS:USIRYY", timeframe, key="economy_usiryy"))
-    economy_items.append(_fred_item("PPIACO", "PPIACO", fred_api_key, timeframe, key="economy_ppiaco"))
-    _render_grid(economy_items, timeframe)
+    economy_items.append(_fred_item("EXPINF1YR", "EXPINF1YR", fred_api_key, economy_timeframe, key="economy_expinf1yr"))
+    economy_items.append(_fred_item("EXPINF5YR", "EXPINF5YR", fred_api_key, economy_timeframe, key="economy_expinf5yr"))
+    economy_items.append(_tv_item("USIRYY", "ECONOMICS:USIRYY", economy_timeframe, key="economy_usiryy"))
+    economy_items.append(_fred_item("PPIACO", "PPIACO", fred_api_key, economy_timeframe, key="economy_ppiaco"))
+    _render_grid(economy_items, economy_timeframe)
 
     st.markdown("### Maps")
     map_col, horizon_col = st.columns([1.4, 1])
