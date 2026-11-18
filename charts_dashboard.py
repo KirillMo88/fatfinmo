@@ -17,6 +17,9 @@ from market_cycle import load_tradingview_breadth_series
 
 TIMEFRAME_OPTIONS = {"Daily": "1D", "Weekly": "1W", "Monthly": "1M"}
 
+US_SECTORS_AGGRESSIVE = ("XLC", "XLF", "XLI", "XLK", "XLY")
+US_SECTORS_DEFENSIVE = ("XLP", "XLU", "XLV")
+
 ASSETS = (
     ("ES1!", "ES=F", "Yahoo Finance"),
     ("NQ1!", "NQ=F", "Yahoo Finance"),
@@ -31,19 +34,25 @@ RISK_MARKET = (
     ("MOVE", "^MOVE"),
 )
 
-MAP_UNIVERSES: dict[str, dict[str, str]] = {
+MAP_UNIVERSES: dict[str, dict[str, str | tuple[str, ...]]] = {
     "Assets Map": {
         "SPY": "SPY", "QQQ": "QQQ", "GOLD": "GC=F", "WTI": "CL=F", "HYG": "HYG",
         "TLT": "TLT", "BTC": "BTC-USD", "IEUR": "IEUR", "MCHI": "MCHI", "INDA": "INDA",
-        "EWJ": "EWJ", "EWZ": "EWZ", "ASEA": "ASEA", "AI": "BOTZ",
+        "EWJ": "EWJ", "EWZ": "EWZ", "ASEA": "ASEA", "AI": "BOTZ", "HG1": "HG=F",
+        "US Sectors Aggressive": US_SECTORS_AGGRESSIVE,
+        "US Sectors Defensive": US_SECTORS_DEFENSIVE,
     },
     "Equity Map": {
         "SPY": "SPY", "QQQ": "QQQ", "IWM": "IWM", "EFA": "EFA", "EEM": "EEM",
         "IEUR": "IEUR", "MCHI": "MCHI", "INDA": "INDA", "EWJ": "EWJ", "EWZ": "EWZ",
         "ASEA": "ASEA", "AI": "BOTZ",
+        "US Sectors Aggressive": US_SECTORS_AGGRESSIVE,
+        "US Sectors Defensive": US_SECTORS_DEFENSIVE,
     },
     "US Sectors Map": {
-        symbol: symbol for symbol in ("XLK", "XLV", "XLF", "XLI", "XLB", "XLE", "XLU", "XLC", "XLY", "XLP")
+        **{symbol: symbol for symbol in ("XLK", "XLV", "XLF", "XLI", "XLB", "XLE", "XLU", "XLC", "XLY", "XLP")},
+        "US Sectors Aggressive": US_SECTORS_AGGRESSIVE,
+        "US Sectors Defensive": US_SECTORS_DEFENSIVE,
     },
     "Commodity Map": {
         "Gold": "GC=F", "HG1": "HG=F", "WTI": "CL=F", "RBOB": "RB=F", "NatGas": "NG=F", "DBA": "DBA", "IAU": "IAU",
@@ -468,30 +477,35 @@ def _liquidity_item(title: str, series: pd.Series, timeframe: str, key: str) -> 
     return {"title": title, "frame": indicators, "candlesticks": False, "key": key}
 
 
-def _load_map_data(mapping: dict[str, str], api_key: str | None) -> dict[str, pd.Series]:
-    result: dict[str, pd.Series] = {}
+def _load_map_data(mapping: dict[str, str | tuple[str, ...]], api_key: str | None) -> dict[str, list[pd.Series]]:
+    """Load map members, keeping grouped constituents separate for median returns."""
+    result: dict[str, list[pd.Series]] = {}
 
-    def load(item: tuple[str, str]) -> tuple[str, pd.Series]:
-        label, ticker = item
+    def load_series(ticker: str) -> pd.Series:
         if ticker.startswith("FRED:"):
             raw = _load_fred(ticker.split(":", 1)[1], api_key)
-            return label, _series_frame(raw)["Close"] if not raw.empty else pd.Series(dtype="float64")
+            return _series_frame(raw)["Close"] if not raw.empty else pd.Series(dtype="float64")
         if "::" in ticker:
             numerator_ticker, denominator_ticker = ticker.split("::", 1)
             numerator = _price_frame(_load_yahoo(numerator_ticker))
             denominator = _price_frame(_load_yahoo(denominator_ticker))
             if numerator.empty or denominator.empty:
-                return label, pd.Series(dtype="float64")
+                return pd.Series(dtype="float64")
             ratio = numerator["Close"].div(denominator["Close"]).dropna()
-            return label, ratio
+            return ratio
         frame = _price_frame(_load_yahoo(ticker))
-        return label, frame["Close"] if not frame.empty else pd.Series(dtype="float64")
+        return frame["Close"] if not frame.empty else pd.Series(dtype="float64")
+
+    def load(item: tuple[str, str | tuple[str, ...]]) -> tuple[str, list[pd.Series]]:
+        label, instrument = item
+        tickers = instrument if isinstance(instrument, tuple) else (instrument,)
+        return label, [series for series in (load_series(ticker) for ticker in tickers) if not series.empty]
 
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(mapping)))) as executor:
         futures = [executor.submit(load, item) for item in mapping.items()]
         for future in as_completed(futures):
             label, values = future.result()
-            if not values.empty:
+            if values:
                 result[label] = values
     return result
 
@@ -504,17 +518,34 @@ def _render_map(mapping_name: str, horizons: str, api_key: str | None) -> None:
         return
     short_period, long_period = {"1W / 1M": (7, 30), "1M / 3M": (30, 91), "1M / 6M": (30, 182), "1M / 12M": (30, 365)}[horizons]
     rows = []
-    for label, series in data.items():
-        series = series.dropna().sort_index()
-        if series.empty:
+    for label, member_series in data.items():
+        member_returns = []
+        for series in member_series:
+            series = series.dropna().sort_index()
+            if series.empty:
+                continue
+            end = series.index[-1]
+            latest = float(series.iloc[-1])
+            short_base = series.loc[: end - pd.Timedelta(days=short_period)]
+            long_base = series.loc[: end - pd.Timedelta(days=long_period)]
+            if short_base.empty or long_base.empty:
+                continue
+            member_returns.append(
+                {
+                    "short": (latest / float(short_base.iloc[-1]) - 1.0) * 100.0,
+                    "long": (latest / float(long_base.iloc[-1]) - 1.0) * 100.0,
+                }
+            )
+        if not member_returns:
             continue
-        end = series.index[-1]
-        latest = float(series.iloc[-1])
-        short_base = series.loc[: end - pd.Timedelta(days=short_period)]
-        long_base = series.loc[: end - pd.Timedelta(days=long_period)]
-        if short_base.empty or long_base.empty:
-            continue
-        rows.append({"label": label, "short": (latest / float(short_base.iloc[-1]) - 1.0) * 100.0, "long": (latest / float(long_base.iloc[-1]) - 1.0) * 100.0})
+        returns = pd.DataFrame(member_returns)
+        rows.append(
+            {
+                "label": label,
+                "short": float(returns["short"].median()),
+                "long": float(returns["long"].median()),
+            }
+        )
     points = pd.DataFrame(rows)
     if points.empty:
         st.info(f"{mapping_name}: insufficient history")
