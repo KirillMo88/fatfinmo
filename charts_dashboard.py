@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from finance_core import download_completed_ohlcv
+from finance_core import download_completed_ohlcv, extract_ohlcv_frame
 from fred_client import download_fred_series
 from global_liquidity import read_global_liquidity
 from market_cycle import load_tradingview_breadth_series
@@ -74,6 +74,57 @@ def _load_yahoo(ticker: str) -> pd.DataFrame:
     except Exception:
         return _empty_ohlcv()
     return frame.copy() if isinstance(frame, pd.DataFrame) else _empty_ohlcv()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_yahoo_intraday(ticker: str) -> dict[str, Any]:
+    """Load the latest Yahoo intraday bar and the preceding completed close."""
+    try:
+        import yfinance as yf
+
+        daily = _load_yahoo(ticker)
+        intraday_raw = yf.download(
+            ticker,
+            period="1d",
+            interval="5m",
+            auto_adjust=False,
+            prepost=False,
+            progress=False,
+            threads=False,
+        )
+        intraday = extract_ohlcv_frame(intraday_raw, ticker)
+        if daily.empty or intraday.empty:
+            return {}
+        daily_close = pd.to_numeric(daily["Close"], errors="coerce").dropna()
+        intraday = intraday.dropna(subset=["Close"]).sort_index()
+        if daily_close.empty or intraday.empty:
+            return {}
+        previous_close = float(daily_close.iloc[-1])
+        latest = intraday.iloc[-1]
+        current = float(latest["Close"])
+        if not np.isfinite(previous_close) or not np.isfinite(current):
+            return {}
+        timestamp = pd.Timestamp(intraday.index[-1])
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_localize(None)
+        return {
+            "timestamp": timestamp,
+            "current": current,
+            "previous_close": previous_close,
+            "change_pct": (current / previous_close - 1.0) * 100.0,
+            "bar": pd.DataFrame(
+                {
+                    "Open": [previous_close],
+                    "High": [max(previous_close, float(latest.get("High", current)))],
+                    "Low": [min(previous_close, float(latest.get("Low", current)))],
+                    "Close": [current],
+                    "Volume": [float(latest.get("Volume", np.nan))],
+                },
+                index=[timestamp],
+            ),
+        }
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -181,7 +232,7 @@ def _percentile_frame(indicators: pd.DataFrame, timeframe: str, *, versus_sma200
     return distance.rolling(window, min_periods=max(20, window // 2)).rank(pct=True).mul(100.0)
 
 
-def _change_block(series: pd.Series, timeframe: str) -> str:
+def _change_block(series: pd.Series, timeframe: str, *, live_change_pct: float | None = None) -> str:
     values = pd.to_numeric(series, errors="coerce").dropna().sort_index()
     if values.empty:
         return "1D change: n/a<br>1W change: n/a<br>1M change: n/a"
@@ -194,7 +245,10 @@ def _change_block(series: pd.Series, timeframe: str) -> str:
         periods = {"1D": 1, "1W": 1, "1M": 1}
     lines = []
     for label, period in periods.items():
-        change = values.pct_change(periods=period, fill_method=None).iloc[-1] * 100.0
+        if label == "1D" and live_change_pct is not None and np.isfinite(live_change_pct):
+            change = live_change_pct
+        else:
+            change = values.pct_change(periods=period, fill_method=None).iloc[-1] * 100.0
         lines.append(f"{label} change: {change:+.2f}%" if np.isfinite(change) else f"{label} change: n/a")
     return " · ".join(lines)
 
@@ -205,6 +259,7 @@ def _figure(
     timeframe: str,
     *,
     title_font_size: float = 14,
+    live_change_pct: float | None = None,
     percentile: pd.Series | None = None,
     percentile_title: str = "5Y Percentile",
     extra_series: dict[str, pd.Series] | None = None,
@@ -245,7 +300,7 @@ def _figure(
         legend={"orientation": "h", "y": -0.14, "x": 0, "font": {"size": 9}},
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
-        annotations=[{"text": _change_block(frame["close"], timeframe), "xref": "paper", "yref": "paper", "x": 1, "y": 1.06, "xanchor": "right", "yanchor": "bottom", "showarrow": False, "align": "right", "font": {"size": 16.5, "color": "#cbd5e1"}}],
+        annotations=[{"text": _change_block(frame["close"], timeframe, live_change_pct=live_change_pct), "xref": "paper", "yref": "paper", "x": 1, "y": 1.06, "xanchor": "right", "yanchor": "bottom", "showarrow": False, "align": "right", "font": {"size": 16.5, "color": "#cbd5e1"}}],
     )
     fig.update_xaxes(gridcolor="#263041")
     fig.update_yaxes(gridcolor="#263041", zeroline=False)
@@ -276,6 +331,7 @@ def _render_grid(items: list[dict[str, Any]], timeframe: str, *, columns: int = 
                 fig = _figure(
                     plot_item["frame"], plot_item["title"], timeframe,
                     title_font_size=plot_item.get("title_font_size", 14),
+                    live_change_pct=plot_item.get("live_change_pct"),
                     percentile=plot_item.get("percentile"),
                     percentile_title=plot_item.get("percentile_title", "5Y Percentile"),
                     extra_series=plot_item.get("extra_series"),
@@ -286,6 +342,10 @@ def _render_grid(items: list[dict[str, Any]], timeframe: str, *, columns: int = 
 
 def _market_item(title: str, ticker: str, timeframe: str, *, percentile_mode: str | None = None, key: str | None = None) -> dict[str, Any]:
     daily = _load_yahoo(ticker)
+    live = _load_yahoo_intraday(ticker)
+    if live.get("bar") is not None and not live["bar"].empty:
+        daily = pd.concat([daily, live["bar"]]).sort_index()
+        daily = daily.loc[~daily.index.duplicated(keep="last")]
     bars = _aggregate_price(daily, timeframe, ticker)
     if bars.empty:
         return {"title": title, "frame": pd.DataFrame(), "key": key or title}
@@ -297,7 +357,7 @@ def _market_item(title: str, ticker: str, timeframe: str, *, percentile_mode: st
     percentile = None
     if percentile_mode:
         percentile = _percentile_frame(indicators, timeframe, versus_sma200=percentile_mode == "asset")
-    return {"title": title, "frame": frame, "percentile": percentile, "percentile_title": "5Y Percentile vs SMA200" if percentile_mode == "asset" else "5Y Percentile", "key": key or ticker}
+    return {"title": title, "frame": frame, "percentile": percentile, "percentile_title": "5Y Percentile vs SMA200" if percentile_mode == "asset" else "5Y Percentile", "live_change_pct": live.get("change_pct"), "key": key or ticker}
 
 
 def _fred_item(title: str, series_id: str, api_key: str | None, timeframe: str, *, percentile_mode: str | None = None, key: str | None = None) -> dict[str, Any]:
