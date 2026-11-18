@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from finance_core import download_completed_ohlcv
+from finance_core import download_completed_ohlcv, extract_ohlcv_frame
 from fred_client import download_fred_series
 from global_liquidity import read_global_liquidity
 from market_cycle import load_tradingview_breadth_series
@@ -74,6 +74,57 @@ def _load_yahoo(ticker: str) -> pd.DataFrame:
     except Exception:
         return _empty_ohlcv()
     return frame.copy() if isinstance(frame, pd.DataFrame) else _empty_ohlcv()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_yahoo_intraday(ticker: str) -> dict[str, Any]:
+    """Load the latest Yahoo intraday bar and the preceding completed close."""
+    try:
+        import yfinance as yf
+
+        daily = _load_yahoo(ticker)
+        intraday_raw = yf.download(
+            ticker,
+            period="1d",
+            interval="5m",
+            auto_adjust=False,
+            prepost=False,
+            progress=False,
+            threads=False,
+        )
+        intraday = extract_ohlcv_frame(intraday_raw, ticker)
+        if daily.empty or intraday.empty:
+            return {}
+        daily_close = pd.to_numeric(daily["Close"], errors="coerce").dropna()
+        intraday = intraday.dropna(subset=["Close"]).sort_index()
+        if daily_close.empty or intraday.empty:
+            return {}
+        previous_close = float(daily_close.iloc[-1])
+        latest = intraday.iloc[-1]
+        current = float(latest["Close"])
+        if not np.isfinite(previous_close) or not np.isfinite(current):
+            return {}
+        timestamp = pd.Timestamp(intraday.index[-1])
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_localize(None)
+        return {
+            "timestamp": timestamp,
+            "current": current,
+            "previous_close": previous_close,
+            "change_pct": (current / previous_close - 1.0) * 100.0,
+            "bar": pd.DataFrame(
+                {
+                    "Open": [previous_close],
+                    "High": [max(previous_close, float(latest.get("High", current)))],
+                    "Low": [min(previous_close, float(latest.get("Low", current)))],
+                    "Close": [current],
+                    "Volume": [float(latest.get("Volume", np.nan))],
+                },
+                index=[timestamp],
+            ),
+        }
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -181,7 +232,7 @@ def _percentile_frame(indicators: pd.DataFrame, timeframe: str, *, versus_sma200
     return distance.rolling(window, min_periods=max(20, window // 2)).rank(pct=True).mul(100.0)
 
 
-def _change_block(series: pd.Series, timeframe: str) -> str:
+def _change_block(series: pd.Series, timeframe: str, *, live_change_pct: float | None = None) -> str:
     values = pd.to_numeric(series, errors="coerce").dropna().sort_index()
     if values.empty:
         return "1D change: n/a<br>1W change: n/a<br>1M change: n/a"
@@ -194,7 +245,10 @@ def _change_block(series: pd.Series, timeframe: str) -> str:
         periods = {"1D": 1, "1W": 1, "1M": 1}
     lines = []
     for label, period in periods.items():
-        change = values.pct_change(periods=period, fill_method=None).iloc[-1] * 100.0
+        if label == "1D" and live_change_pct is not None and np.isfinite(live_change_pct):
+            change = live_change_pct
+        else:
+            change = values.pct_change(periods=period, fill_method=None).iloc[-1] * 100.0
         lines.append(f"{label} change: {change:+.2f}%" if np.isfinite(change) else f"{label} change: n/a")
     return " · ".join(lines)
 
@@ -204,6 +258,8 @@ def _figure(
     title: str,
     timeframe: str,
     *,
+    title_font_size: float = 14,
+    live_change_pct: float | None = None,
     percentile: pd.Series | None = None,
     percentile_title: str = "5Y Percentile",
     extra_series: dict[str, pd.Series] | None = None,
@@ -235,7 +291,7 @@ def _figure(
         fig.update_xaxes(showticklabels=False, row=2, col=1)
     fig.update_xaxes(showticklabels=True, title_text="Date", tickformat="%Y", nticks=6, row=rows, col=1)
     fig.update_layout(
-        title={"text": title, "x": 0, "xanchor": "left", "font": {"size": 14}},
+        title={"text": title, "x": 0, "xanchor": "left", "font": {"size": title_font_size}},
         height=470 if rows == 3 else 390,
         margin={"l": 38, "r": 10, "t": 52, "b": 34},
         template="plotly_dark",
@@ -244,7 +300,7 @@ def _figure(
         legend={"orientation": "h", "y": -0.14, "x": 0, "font": {"size": 9}},
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
-        annotations=[{"text": _change_block(frame["close"], timeframe), "xref": "paper", "yref": "paper", "x": 1, "y": 1.06, "xanchor": "right", "yanchor": "bottom", "showarrow": False, "align": "right", "font": {"size": 16.5, "color": "#cbd5e1"}}],
+        annotations=[{"text": _change_block(frame["close"], timeframe, live_change_pct=live_change_pct), "xref": "paper", "yref": "paper", "x": 1, "y": 1.06, "xanchor": "right", "yanchor": "bottom", "showarrow": False, "align": "right", "font": {"size": 16.5, "color": "#cbd5e1"}}],
     )
     fig.update_xaxes(gridcolor="#263041")
     fig.update_yaxes(gridcolor="#263041", zeroline=False)
@@ -274,6 +330,8 @@ def _render_grid(items: list[dict[str, Any]], timeframe: str, *, columns: int = 
                     }
                 fig = _figure(
                     plot_item["frame"], plot_item["title"], timeframe,
+                    title_font_size=plot_item.get("title_font_size", 14),
+                    live_change_pct=plot_item.get("live_change_pct"),
                     percentile=plot_item.get("percentile"),
                     percentile_title=plot_item.get("percentile_title", "5Y Percentile"),
                     extra_series=plot_item.get("extra_series"),
@@ -284,6 +342,10 @@ def _render_grid(items: list[dict[str, Any]], timeframe: str, *, columns: int = 
 
 def _market_item(title: str, ticker: str, timeframe: str, *, percentile_mode: str | None = None, key: str | None = None) -> dict[str, Any]:
     daily = _load_yahoo(ticker)
+    live = _load_yahoo_intraday(ticker)
+    if live.get("bar") is not None and not live["bar"].empty:
+        daily = pd.concat([daily, live["bar"]]).sort_index()
+        daily = daily.loc[~daily.index.duplicated(keep="last")]
     bars = _aggregate_price(daily, timeframe, ticker)
     if bars.empty:
         return {"title": title, "frame": pd.DataFrame(), "key": key or title}
@@ -295,7 +357,7 @@ def _market_item(title: str, ticker: str, timeframe: str, *, percentile_mode: st
     percentile = None
     if percentile_mode:
         percentile = _percentile_frame(indicators, timeframe, versus_sma200=percentile_mode == "asset")
-    return {"title": title, "frame": frame, "percentile": percentile, "percentile_title": "5Y Percentile vs SMA200" if percentile_mode == "asset" else "5Y Percentile", "key": key or ticker}
+    return {"title": title, "frame": frame, "percentile": percentile, "percentile_title": "5Y Percentile vs SMA200" if percentile_mode == "asset" else "5Y Percentile", "live_change_pct": live.get("change_pct"), "key": key or ticker}
 
 
 def _fred_item(title: str, series_id: str, api_key: str | None, timeframe: str, *, percentile_mode: str | None = None, key: str | None = None) -> dict[str, Any]:
@@ -513,6 +575,8 @@ def render_charts_dashboard(fred_api_key: str | None = None) -> None:
 
     st.markdown("### Assets")
     asset_items = [_market_item(label, ticker, timeframe, percentile_mode="asset", key=f"asset_{ticker}") for label, ticker, _ in ASSETS]
+    for item in asset_items:
+        item["title_font_size"] = 21
     _render_grid(asset_items, timeframe)
 
     st.markdown("### Risk")
@@ -545,27 +609,29 @@ def render_charts_dashboard(fred_api_key: str | None = None) -> None:
     _render_grid(risk_items, timeframe)
 
     st.markdown("### Liquidity")
-    liquidity_items = [_liquidity_item(label, values, timeframe, f"liquidity_{index}") for index, (label, values) in enumerate(_liquidity_series().items())]
-    _render_grid(liquidity_items, timeframe)
+    liquidity_timeframe = "1M"
+    liquidity_items = [_liquidity_item(label, values, liquidity_timeframe, f"liquidity_{index}") for index, (label, values) in enumerate(_liquidity_series().items())]
+    _render_grid(liquidity_items, liquidity_timeframe)
 
     st.markdown("### Economy")
+    economy_timeframe = "1M"
     economy_items: list[dict[str, Any]] = []
-    economy_items.append(_tv_item("USBCOI", "ECONOMICS:USBCOI", timeframe, key="economy_usbcoi"))
-    economy_items.append(_ism_services_item(timeframe, key="economy_ism_services"))
-    economy_items.append(_fred_item("US10Y", "DGS10", fred_api_key, timeframe, key="economy_us10y"))
-    us02y = _fred_item("US02Y", "DGS2", fred_api_key, timeframe, key="economy_us02y")
-    fedfunds = _fred_item("FEDFUNDS", "FEDFUNDS", fred_api_key, timeframe, key="economy_fedfunds")
+    economy_items.append(_tv_item("USBCOI", "ECONOMICS:USBCOI", economy_timeframe, key="economy_usbcoi"))
+    economy_items.append(_ism_services_item(economy_timeframe, key="economy_ism_services"))
+    economy_items.append(_fred_item("US10Y", "DGS10", fred_api_key, economy_timeframe, key="economy_us10y"))
+    us02y = _fred_item("US02Y", "DGS2", fred_api_key, economy_timeframe, key="economy_us02y")
+    fedfunds = _fred_item("FEDFUNDS", "FEDFUNDS", fred_api_key, economy_timeframe, key="economy_fedfunds")
     if not us02y["frame"].empty:
         extra = {"FEDFUNDS": fedfunds["frame"]["close"]} if not fedfunds["frame"].empty else {}
         us02y["title"] = "US02Y + FEDFUNDS"
         us02y["extra_series"] = extra
         us02y["key"] = "economy_us02y_fedfunds"
     economy_items.append(us02y)
-    economy_items.append(_fred_item("EXPINF1YR", "EXPINF1YR", fred_api_key, timeframe, key="economy_expinf1yr"))
-    economy_items.append(_fred_item("EXPINF5YR", "EXPINF5YR", fred_api_key, timeframe, key="economy_expinf5yr"))
-    economy_items.append(_tv_item("USIRYY", "ECONOMICS:USIRYY", timeframe, key="economy_usiryy"))
-    economy_items.append(_fred_item("PPIACO", "PPIACO", fred_api_key, timeframe, key="economy_ppiaco"))
-    _render_grid(economy_items, timeframe)
+    economy_items.append(_fred_item("EXPINF1YR", "EXPINF1YR", fred_api_key, economy_timeframe, key="economy_expinf1yr"))
+    economy_items.append(_fred_item("EXPINF5YR", "EXPINF5YR", fred_api_key, economy_timeframe, key="economy_expinf5yr"))
+    economy_items.append(_tv_item("USIRYY", "ECONOMICS:USIRYY", economy_timeframe, key="economy_usiryy"))
+    economy_items.append(_fred_item("PPIACO", "PPIACO", fred_api_key, economy_timeframe, key="economy_ppiaco"))
+    _render_grid(economy_items, economy_timeframe)
 
     st.markdown("### Maps")
     map_col, horizon_col = st.columns([1.4, 1])
