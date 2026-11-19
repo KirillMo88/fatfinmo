@@ -42,7 +42,9 @@ INVESTING_BREADTH_SPECS = {
         "page_url": "https://pt.investing.com/indices/sp-500-stocks-above-200-day-average",
     },
 }
-INVESTING_BREADTH_HISTORY_YEARS = 20
+# Five years is comfortably below Investing's 4,999-row cap for daily bars
+# and still exceeds the breadth-risk model's historical lookback needs.
+INVESTING_BREADTH_HISTORY_YEARS = 5
 FORWARD_HORIZONS = {"3M": 13, "6M": 26, "12M": 52}
 ANALOG_FEATURE_WEIGHTS = {
     "StructuralSimilarity": 0.15,
