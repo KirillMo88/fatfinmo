@@ -11,6 +11,7 @@ from market_cycle import (
     forward_max_drawdown_from_low,
     latest_current_risk_signal,
     overlay_latest_daily_current_risk,
+    _parse_investing_breadth_payload,
 )
 from market_cycle_tab import (
     build_top_level_analytics,
@@ -27,6 +28,25 @@ def monthly_fixture() -> pd.DataFrame:
     trend = np.linspace(100.0, 500.0, len(dates))
     cycle = 15.0 * np.sin(np.arange(len(dates)) / 9.0)
     return pd.DataFrame({"Date": dates, "SPX_Close": trend + cycle})
+
+
+def test_investing_breadth_payload_parser_normalizes_rows() -> None:
+    frame = _parse_investing_breadth_payload(
+        {
+            "data": [
+                {
+                    "rowDateTimestamp": 1_767_312_000,
+                    "last_openRaw": "52.0",
+                    "last_maxRaw": "54.0",
+                    "last_minRaw": "51.0",
+                    "last_closeRaw": "53.0",
+                }
+            ]
+        }
+    )
+    assert len(frame) == 1
+    assert frame.iloc[0]["Close"] == 53.0
+    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"]
 
 
 def test_forward_drawdown_windows_match_reference_with_missing_bars() -> None:
