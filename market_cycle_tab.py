@@ -123,6 +123,19 @@ CYCLE_RISK_REGIME_ORDER = [
     "HIGH VOLATILITY / BOTTOMING",
 ]
 
+
+def _market_cycle_snapshot_is_usable(snapshot: MarketCycleSnapshot | None) -> bool:
+    """Reject process/persistent snapshots missing the current risk inputs."""
+    if snapshot is None or not isinstance(getattr(snapshot, "current", None), dict):
+        return False
+    current = snapshot.current
+    required = (
+        "CurrentRiskPriceCycleVulnerabilityRisk",
+        "CurrentRiskBreadthRisk",
+        "SPXAboveSMA50D",
+    )
+    return all(np.isfinite(pd.to_numeric(current.get(key), errors="coerce")) for key in required)
+
 CYCLE_RISK_REGIME_COLORS = {
     "RISK ON": "#22C55E",
     "SHORT-CYCLE CORRECTION RISK": "#F59E0B",
@@ -137,7 +150,7 @@ def load_market_cycle_snapshot_cached(refresh_nonce: int = 0) -> MarketCycleSnap
     cache_path = MARKET_CYCLE_PERSISTENT_CACHE_DIR / f"{MARKET_CYCLE_CACHE_SCHEMA}.pkl"
     if refresh_nonce == 0:
         cached = read_persistent_snapshot_cache(cache_path, MARKET_CYCLE_CACHE_SCHEMA, "full")
-        if cached is not None:
+        if _market_cycle_snapshot_is_usable(cached):
             return cached
     snapshot = build_market_cycle_snapshot()
     write_persistent_snapshot_cache(cache_path, MARKET_CYCLE_CACHE_SCHEMA, "full", snapshot)
@@ -611,6 +624,10 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
     with c2:
         st.caption("Model: MARKET_CYCLE_V1")
     if refresh:
+        # Drop every in-process cache key, including the default nonce=0 key.
+        # Otherwise a newly persisted snapshot can be hidden by an older
+        # Streamlit cache_resource object in another rerun/session.
+        load_market_cycle_snapshot_cached.clear()
         st.session_state["market_cycle_refresh_nonce"] = int(st.session_state.get("market_cycle_refresh_nonce", 0)) + 1
         st.rerun()
 
