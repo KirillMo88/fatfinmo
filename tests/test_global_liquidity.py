@@ -215,6 +215,7 @@ def test_pboc_m2_partial_official_history_falls_back(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr(gl, "tradingview_mcp_china_m2_raw", lambda: (_ for _ in ()).throw(RuntimeError("stale")))
+    monkeypatch.setattr(gl, "china_m2_chinadata_raw", lambda api_key=None: (_ for _ in ()).throw(RuntimeError("chinadata unavailable")))
     monkeypatch.setattr(gl, "RAW_STORAGE_PATH", tmp_path / "missing_raw.csv")
     monkeypatch.setattr(gl, "discover_pboc_money_supply_links", lambda url: [url])
     monkeypatch.setattr(gl, "parse_pboc_money_supply_page", lambda url: [raw_row("2026-08-01", gl.CHINA_M2_SERIES_ID, 3_567_027.0)])

@@ -70,6 +70,7 @@ GLOBAL_LIQUIDITY_CONFIG = {
     "tradingview_scanner_url": "https://scanner.tradingview.com/global/scan",
     "tradingview_cnm2_reports_url": "https://www.tradingview.com/symbols/ECONOMICS-CNM2/reports-history/",
     "tradingview_cncbbs_url": "https://www.tradingview.com/symbols/ECONOMICS-CNCBBS/",
+    "chinadata_cnm2_url": "https://chinadata.live/api/v2/data/china-m2-money-supply",
     "investing_china_m2_url": "https://www.investing.com/economic-calendar/chinese-m2-money-stock-463",
     "tradingeconomics_cncbbs_url": "https://tradingeconomics.com/china/banks-balance-sheet",
 }
@@ -779,8 +780,26 @@ def tradingview_mcp_pboc_total_assets_raw() -> pd.DataFrame:
 
 def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
     source_url = str(GLOBAL_LIQUIDITY_CONFIG["pboc_money_supply_url"])
+    chinadata_error = ""
     investing_error = ""
     mcp_error = ""
+    try:
+        mcp_frame = tradingview_mcp_china_m2_raw()
+        if frame_reaches_requested_start(mcp_frame):
+            return mcp_frame
+        if not mcp_frame.empty:
+            mcp_error = "TradingView MCP source does not reach requested historical start"
+    except Exception as exc:
+        mcp_error = str(exc)
+    try:
+        chinadata_frame = china_m2_chinadata_raw(api_key=api_key)
+        if frame_reaches_requested_start(chinadata_frame):
+            chinadata_frame["source_mode"] = "FALLBACK_SOURCE"
+            return chinadata_frame[RAW_COLUMNS]
+        if not chinadata_frame.empty:
+            chinadata_error = "ChinaData source does not reach requested historical start"
+    except Exception as exc:
+        chinadata_error = str(exc)
     try:
         investing_frame = china_m2_investing_update_raw(api_key=api_key)
         if frame_reaches_requested_start(investing_frame):
@@ -790,14 +809,6 @@ def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
             investing_error = "Investing source does not reach requested historical start"
     except Exception as exc:
         investing_error = str(exc)
-    try:
-        mcp_frame = tradingview_mcp_china_m2_raw()
-        if frame_reaches_requested_start(mcp_frame):
-            return mcp_frame
-        if not mcp_frame.empty:
-            mcp_error = "TradingView MCP source does not reach requested historical start"
-    except Exception as exc:
-        mcp_error = str(exc)
     try:
         links = discover_pboc_money_supply_links(source_url)
         rows: list[dict[str, Any]] = []
@@ -830,7 +841,7 @@ def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
         fallback = china_m2_fred_tradingview_fallback_raw(api_key=api_key, official_error=str(exc))
         if not fallback.empty:
             if "notes" in fallback.columns and mcp_error:
-                fallback["notes"] = fallback["notes"].astype(str) + f"; TradingView MCP primary unavailable: {mcp_error}; Investing fallback unavailable: {investing_error}"
+                fallback["notes"] = fallback["notes"].astype(str) + f"; TradingView MCP primary unavailable: {mcp_error}; ChinaData fallback unavailable: {chinadata_error}; Investing fallback unavailable: {investing_error}"
             if "source_mode" in fallback.columns:
                 fallback["source_mode"] = "FALLBACK_SOURCE"
             return fallback
@@ -845,7 +856,7 @@ def pboc_m2_raw(api_key: str | None = None) -> pd.DataFrame:
             "CNY",
             "CNY 100 million",
             "ERROR",
-            f"TradingView MCP primary unavailable: {mcp_error}; Investing fallback unavailable: {investing_error}; Official PBoC parser unavailable: {exc}. Missing data is not filled with zero.",
+            f"TradingView MCP primary unavailable: {mcp_error}; ChinaData fallback unavailable: {chinadata_error}; Investing fallback unavailable: {investing_error}; Official PBoC parser unavailable: {exc}. Missing data is not filled with zero.",
         )
 
 
@@ -1125,6 +1136,121 @@ def china_m2_investing_update_raw(api_key: str | None = None) -> pd.DataFrame:
     combined["raw_value"] = pd.to_numeric(combined["raw_value"], errors="coerce")
     combined["_priority"] = np.where(combined["source"].eq("INVESTING_COM"), 2, 1)
     return combined.dropna(subset=["observation_date", "raw_value"]).sort_values(["observation_date", "_priority", "download_timestamp"]).drop_duplicates(["observation_date", "series_id"], keep="last")[RAW_COLUMNS].reset_index(drop=True)
+
+
+def china_m2_chinadata_raw(api_key: str | None = None) -> pd.DataFrame:
+    """Load China M2 levels from ChinaData as a fallback source.
+
+    ChinaData publishes the PBoC M2 level in ``100 Million CNY``. The
+    endpoint currently starts in 2005, so preserve the application's saved
+    history (or the FRED/IMF legacy base when no saved history exists) and
+    let ChinaData take precedence only for overlapping months.
+    """
+    url = str(GLOBAL_LIQUIDITY_CONFIG["chinadata_cnm2_url"])
+    response = get_with_retries(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    payload = response.json()
+    dataset = payload.get("data") if isinstance(payload, dict) else None
+    observations = dataset.get("data") if isinstance(dataset, dict) else None
+    if not isinstance(observations, list):
+        raise RuntimeError("ChinaData CNM2 response contains no data array")
+
+    downloaded = fmt_datetime(now_utc())
+    incoming_rows: list[dict[str, Any]] = []
+    for item in observations:
+        if not isinstance(item, dict):
+            continue
+        date = pd.to_datetime(item.get("date"), errors="coerce")
+        value = pd.to_numeric(item.get("value"), errors="coerce")
+        if pd.isna(date) or pd.isna(value) or not np.isfinite(float(value)):
+            continue
+        incoming_rows.append(
+            {
+                "observation_date": pd.Timestamp(date).to_period("M").to_timestamp(),
+                "release_date": pd.NaT,
+                "source": "CHINADATA",
+                "source_name": "ChinaData / PBoC China M2 Money Supply",
+                "source_mode": "FALLBACK_SOURCE",
+                "source_url": url,
+                "series_id": CHINA_M2_SERIES_ID,
+                "region": "China",
+                "metric": "M2",
+                "frequency": str((dataset or {}).get("frequency") or "monthly"),
+                "currency": "CNY",
+                "unit": "CNY 100 million",
+                "raw_value": float(value),
+                "download_timestamp": downloaded,
+                "data_status": "CURRENT",
+                "notes": "ChinaData cleaned dataset sourced from People's Bank of China releases; values are in CNY 100 million.",
+            }
+        )
+    incoming = pd.DataFrame(incoming_rows, columns=RAW_COLUMNS)
+    incoming = incoming.dropna(subset=["observation_date", "raw_value"])
+    if incoming.empty:
+        raise RuntimeError("ChinaData CNM2 returned no numeric observations")
+
+    existing = _existing_raw_series_frame(CHINA_M2_SERIES_ID)
+    if existing.empty:
+        try:
+            fred = download_fred_series_batch(
+                (FRED_CHINA_M2_LEGACY_SERIES,),
+                api_key=api_key,
+                observation_start=GLOBAL_LIQUIDITY_CONFIG["start_date"],
+            )
+            base = fred.dropna(subset=["Date", "Value"])[["Date", "Value"]].copy()
+            base["Date"] = pd.to_datetime(base["Date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+            base["Value"] = pd.to_numeric(base["Value"], errors="coerce") / 100_000_000.0
+            base = base.dropna(subset=["Date", "Value"]).sort_values("Date").drop_duplicates("Date", keep="last")
+            existing = pd.DataFrame(
+                [
+                    {
+                        "observation_date": row["Date"],
+                        "release_date": pd.NaT,
+                        "source": "FRED_IMF",
+                        "source_name": "FRED / IMF International Financial Statistics",
+                        "source_mode": "FALLBACK_SOURCE",
+                        "source_url": f"https://fred.stlouisfed.org/series/{FRED_CHINA_M2_LEGACY_SERIES}",
+                        "series_id": CHINA_M2_SERIES_ID,
+                        "region": "China",
+                        "metric": "M2",
+                        "frequency": "monthly",
+                        "currency": "CNY",
+                        "unit": "CNY 100 million",
+                        "raw_value": float(row["Value"]),
+                        "download_timestamp": downloaded,
+                        "data_status": "FALLBACK_SOURCE",
+                        "notes": "Preserved FRED/IMF legacy CNM2 base; ChinaData supplies newer monthly levels.",
+                    }
+                    for _, row in base.iterrows()
+                ],
+                columns=RAW_COLUMNS,
+            )
+        except Exception:
+            existing = pd.DataFrame(columns=RAW_COLUMNS)
+
+    # Keep the supplied 1990-1998 base attached to this fallback path as well;
+    # otherwise the ChinaData endpoint (which starts in 2005) would be rejected
+    # by the application's full-history validation before it could be used.
+    try:
+        user_history = user_provided_china_m2_raw()
+        if not user_history.empty:
+            existing = pd.concat([existing, user_history], ignore_index=True)
+    except Exception:
+        pass
+
+    combined = pd.concat([existing, incoming], ignore_index=True)
+    combined["observation_date"] = pd.to_datetime(combined["observation_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    combined["raw_value"] = pd.to_numeric(combined["raw_value"], errors="coerce")
+    combined["_priority"] = np.select(
+        [combined["source"].eq("CHINADATA"), combined["source"].eq("INVESTING_COM")],
+        [3, 2],
+        default=1,
+    )
+    return (
+        combined.dropna(subset=["observation_date", "raw_value"])
+        .sort_values(["observation_date", "_priority", "download_timestamp"])
+        .drop_duplicates(["observation_date", "series_id"], keep="last")[RAW_COLUMNS]
+        .reset_index(drop=True)
+    )
 
 
 def tradingview_china_m2_yoy_raw(start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:

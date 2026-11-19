@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 import warnings
 
+import httpx
 import numpy as np
 import pandas as pd
 from ta.momentum import RSIIndicator
@@ -31,6 +32,16 @@ MARKET_CYCLE_FRED_SERIES = ("PPIACO", BROKER_MARGIN_LOANS_SERIES, US_EQUITY_MARK
 MARKET_CYCLE_SPX_REFERENCE_PATH = Path(__file__).with_name("data") / "SPCFD_SPX_1W_reference.csv"
 CURRENT_RISK_RAW_TICKERS = {"SPY": "SPY_RAW", "QQQ": "QQQ_RAW"}
 MARKET_CYCLE_TRADINGVIEW_BREADTH = {"S5FI": "SPXAboveSMA50D", "S5TH": "SPXAboveSMA200D"}
+INVESTING_BREADTH_SPECS = {
+    "S5FI": {
+        "instrument_id": "1225324",
+        "page_url": "https://pt.investing.com/indices/s-p-500-stocks-above-50-day-average",
+    },
+    "S5TH": {
+        "instrument_id": "1225364",
+        "page_url": "https://pt.investing.com/indices/sp-500-stocks-above-200-day-average",
+    },
+}
 FORWARD_HORIZONS = {"3M": 13, "6M": 26, "12M": 52}
 ANALOG_FEATURE_WEIGHTS = {
     "StructuralSimilarity": 0.15,
@@ -193,7 +204,11 @@ def load_fred_market_series(series_id: str, end: pd.Timestamp) -> pd.DataFrame:
 
 def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
     frame = load_tradingview_ohlcv_frame(f"INDEX:{symbol}", end)
-    if not frame.empty:
+    if (
+        not frame.empty
+        and len(frame) >= 52
+        and pd.to_datetime(frame.index, errors="coerce").max() >= pd.Timestamp(end).normalize() - pd.Timedelta(days=30)
+    ):
         return frame
 
     try:
@@ -216,7 +231,87 @@ def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFr
         frame["Volume"] = np.nan
         return frame.loc[frame.index <= end, ["Open", "High", "Low", "Close", "Volume"]].copy()
     except Exception:
+        pass
+    return load_investing_breadth_series(symbol, end)
+
+
+def _parse_investing_breadth_payload(payload: Any) -> pd.DataFrame:
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    parsed: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        timestamp = pd.to_datetime(item.get("rowDateTimestamp"), unit="s", errors="coerce", utc=True)
+        if pd.isna(timestamp):
+            timestamp = pd.to_datetime(item.get("rowDate"), errors="coerce", utc=True)
+        close = pd.to_numeric(item.get("last_closeRaw", item.get("last_close")), errors="coerce")
+        if pd.isna(timestamp) or pd.isna(close) or not np.isfinite(float(close)):
+            continue
+        parsed.append(
+            {
+                "Date": pd.Timestamp(timestamp).tz_localize(None).normalize(),
+                "Open": pd.to_numeric(item.get("last_openRaw", item.get("last_open")), errors="coerce"),
+                "High": pd.to_numeric(item.get("last_maxRaw", item.get("last_max")), errors="coerce"),
+                "Low": pd.to_numeric(item.get("last_minRaw", item.get("last_min")), errors="coerce"),
+                "Close": float(close),
+                "Volume": pd.to_numeric(item.get("volumeRaw", item.get("volume")), errors="coerce"),
+            }
+        )
+    if not parsed:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    frame = pd.DataFrame(parsed).set_index("Date").sort_index()
+    for column in ["Open", "High", "Low"]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(frame["Close"])
+    frame["Volume"] = pd.to_numeric(frame["Volume"], errors="coerce")
+    return frame[["Open", "High", "Low", "Close", "Volume"]].loc[
+        ~frame.index.duplicated(keep="last")
+    ]
+
+
+def load_investing_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
+    """Load S5FI/S5TH from Investing.com when TradingView has no usable series."""
+    spec = INVESTING_BREADTH_SPECS.get(str(symbol).upper())
+    empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    if not spec:
+        return empty
+    try:
+        page_url = str(spec["page_url"])
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            page = client.get(page_url, headers=headers)
+            page.raise_for_status()
+            api_url = f"https://api.investing.com/api/financialdata/historical/{spec['instrument_id']}"
+            response = client.get(
+                api_url,
+                params={
+                    "start-date": "1990-01-01",
+                    "end-date": pd.Timestamp(end).date().isoformat(),
+                    "interval": "P1D",
+                    "time-frame": "Daily",
+                },
+                headers={
+                    **headers,
+                    "Accept": "application/json, text/plain, */*",
+                    "Origin": "https://pt.investing.com",
+                    "Referer": page_url,
+                    "domain-id": "www",
+                },
+            )
+            response.raise_for_status()
+            frame = _parse_investing_breadth_payload(response.json())
+        if frame.empty or len(frame) < 52:
+            return empty
+        frame = frame.loc[frame.index <= pd.Timestamp(end).normalize()]
+        if frame.empty or frame.index.max() < pd.Timestamp(end).normalize() - pd.Timedelta(days=30):
+            return empty
+        return frame
+    except Exception:
+        return empty
 
 
 def load_tradingview_ohlcv_frame(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
@@ -2198,7 +2293,7 @@ def add_breadth_risk(w: pd.DataFrame) -> None:
         w["Breadth50MomentumRisk"] = 100.0 - expanding_percentile(delta50, min_periods=52)
         w["Breadth200MomentumRisk"] = 100.0 - expanding_percentile(delta200, min_periods=52)
         w["BreadthMomentumRisk"] = (0.60 * w["Breadth50MomentumRisk"] + 0.40 * w["Breadth200MomentumRisk"]).clip(0.0, 100.0)
-        w["BreadthRiskSource"] = "TradingView MCP / S5FI,S5TH"
+        w["BreadthRiskSource"] = "TradingView MCP / Investing.com fallback / S5FI,S5TH"
     else:
         rsp_13 = pd.to_numeric(w.get("RSP_SPX_RS_13W_Pctl"), errors="coerce")
         iwm_13 = pd.to_numeric(w.get("IWM_SPX_RS_13W_Pctl"), errors="coerce")
