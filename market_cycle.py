@@ -219,20 +219,18 @@ def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFr
 
         result = get_economic_data(symbol, date_from="1990-01-01")
         valid, _ = validate_economic_result(result, min_observations=52, max_stale_days=30)
-        if not valid or result.frame.empty:
-            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-        dates = pd.to_datetime(result.frame["date"], errors="coerce")
-        values = pd.to_numeric(result.frame["value"], errors="coerce")
-        frame = pd.DataFrame({"Close": values.to_numpy()}, index=dates)
-        frame = frame.dropna(subset=["Close"]).sort_index()
-        if frame.empty:
-            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-        frame.index = pd.to_datetime(frame.index, errors="coerce").tz_localize(None)
-        frame["Open"] = frame["Close"]
-        frame["High"] = frame["Close"]
-        frame["Low"] = frame["Close"]
-        frame["Volume"] = np.nan
-        return frame.loc[frame.index <= end, ["Open", "High", "Low", "Close", "Volume"]].copy()
+        if valid and not result.frame.empty:
+            dates = pd.to_datetime(result.frame["date"], errors="coerce")
+            values = pd.to_numeric(result.frame["value"], errors="coerce")
+            frame = pd.DataFrame({"Close": values.to_numpy()}, index=dates)
+            frame = frame.dropna(subset=["Close"]).sort_index()
+            if not frame.empty:
+                frame.index = pd.to_datetime(frame.index, errors="coerce").tz_localize(None)
+                frame["Open"] = frame["Close"]
+                frame["High"] = frame["Close"]
+                frame["Low"] = frame["Close"]
+                frame["Volume"] = np.nan
+                return frame.loc[frame.index <= end, ["Open", "High", "Low", "Close", "Volume"]].copy()
     except Exception:
         pass
     return load_investing_breadth_series(symbol, end)
