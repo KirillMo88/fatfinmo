@@ -42,6 +42,7 @@ INVESTING_BREADTH_SPECS = {
         "page_url": "https://pt.investing.com/indices/sp-500-stocks-above-200-day-average",
     },
 }
+INVESTING_BREADTH_HISTORY_YEARS = 20
 FORWARD_HORIZONS = {"3M": 13, "6M": 26, "12M": 52}
 ANALOG_FEATURE_WEIGHTS = {
     "StructuralSimilarity": 0.15,
@@ -289,7 +290,13 @@ def load_investing_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFram
             response = client.get(
                 api_url,
                 params={
-                    "start-date": "1990-01-01",
+                    # Investing caps this endpoint at 4,999 rows. A fixed
+                    # 1990 start therefore returned the oldest rows and
+                    # silently omitted the current observations. Keep a
+                    # rolling window so the latest daily bar is retained.
+                    "start-date": (
+                        pd.Timestamp(end).normalize() - pd.DateOffset(years=INVESTING_BREADTH_HISTORY_YEARS)
+                    ).date().isoformat(),
                     "end-date": pd.Timestamp(end).date().isoformat(),
                     "interval": "P1D",
                     "time-frame": "Daily",
