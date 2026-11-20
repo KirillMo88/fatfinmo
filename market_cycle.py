@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
+import re
 from typing import Any
 import warnings
 
@@ -35,11 +37,11 @@ MARKET_CYCLE_TRADINGVIEW_BREADTH = {"S5FI": "SPXAboveSMA50D", "S5TH": "SPXAboveS
 INVESTING_BREADTH_SPECS = {
     "S5FI": {
         "instrument_id": "1225324",
-        "page_url": "https://pt.investing.com/indices/s-p-500-stocks-above-50-day-average",
+        "page_url": "https://www.investing.com/indices/s-p-500-stocks-above-50-day-average-historical-data",
     },
     "S5TH": {
         "instrument_id": "1225364",
-        "page_url": "https://pt.investing.com/indices/sp-500-stocks-above-200-day-average",
+        "page_url": "https://www.investing.com/indices/sp-500-stocks-above-200-day-average-historical-data",
     },
 }
 # Five years is comfortably below Investing's 4,999-row cap for daily bars
@@ -214,26 +216,61 @@ def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFr
     ):
         return frame
 
+    history_candidates = [frame] if not frame.empty else []
     try:
         from tradingview_mcp import get_economic_data, validate_economic_result
 
         result = get_economic_data(symbol, date_from="1990-01-01")
         valid, _ = validate_economic_result(result, min_observations=52, max_stale_days=30)
-        if valid and not result.frame.empty:
+        if not result.frame.empty:
             dates = pd.to_datetime(result.frame["date"], errors="coerce")
             values = pd.to_numeric(result.frame["value"], errors="coerce")
-            frame = pd.DataFrame({"Close": values.to_numpy()}, index=dates)
-            frame = frame.dropna(subset=["Close"]).sort_index()
-            if not frame.empty:
-                frame.index = pd.to_datetime(frame.index, errors="coerce").tz_localize(None)
-                frame["Open"] = frame["Close"]
-                frame["High"] = frame["Close"]
-                frame["Low"] = frame["Close"]
-                frame["Volume"] = np.nan
-                return frame.loc[frame.index <= end, ["Open", "High", "Low", "Close", "Volume"]].copy()
+            economic = pd.DataFrame({"Close": values.to_numpy()}, index=dates)
+            economic = economic.dropna(subset=["Close"]).sort_index()
+            if not economic.empty:
+                economic.index = pd.to_datetime(economic.index, errors="coerce").tz_localize(None)
+                economic["Open"] = economic["Close"]
+                economic["High"] = economic["Close"]
+                economic["Low"] = economic["Close"]
+                economic["Volume"] = np.nan
+                economic = economic.loc[
+                    economic.index <= end, ["Open", "High", "Low", "Close", "Volume"]
+                ].copy()
+                history_candidates.append(economic)
+                if valid:
+                    return _merge_breadth_frames(*history_candidates)
     except Exception:
         pass
-    return load_investing_breadth_series(symbol, end)
+    investing = load_investing_breadth_series(symbol, end)
+    if not investing.empty:
+        history_candidates.append(investing)
+    return _merge_breadth_frames(*history_candidates)
+
+
+def _merge_breadth_frames(*frames: pd.DataFrame) -> pd.DataFrame:
+    """Merge historical and live breadth data, with later sources winning."""
+    usable: list[pd.DataFrame] = []
+    columns = ["Open", "High", "Low", "Close", "Volume"]
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        candidate = frame.copy()
+        candidate.index = pd.to_datetime(candidate.index, errors="coerce").tz_localize(None)
+        candidate = candidate.loc[candidate.index.notna()]
+        for column in columns:
+            if column not in candidate:
+                candidate[column] = np.nan
+        candidate["Close"] = pd.to_numeric(candidate["Close"], errors="coerce")
+        candidate = candidate.dropna(subset=["Close"])
+        if not candidate.empty:
+            usable.append(candidate[columns])
+    if not usable:
+        return pd.DataFrame(columns=columns)
+    return (
+        pd.concat(usable)
+        .sort_index(kind="stable")
+        .loc[lambda value: ~value.index.duplicated(keep="last")]
+    )
 
 
 def _parse_investing_breadth_payload(payload: Any) -> pd.DataFrame:
@@ -244,7 +281,14 @@ def _parse_investing_breadth_payload(payload: Any) -> pd.DataFrame:
     for item in rows:
         if not isinstance(item, dict):
             continue
-        timestamp = pd.to_datetime(item.get("rowDateTimestamp"), unit="s", errors="coerce", utc=True)
+        raw_timestamp = item.get("rowDateTimestamp")
+        numeric_timestamp = pd.to_numeric(raw_timestamp, errors="coerce")
+        timestamp = pd.to_datetime(
+            numeric_timestamp if pd.notna(numeric_timestamp) else raw_timestamp,
+            unit="s" if pd.notna(numeric_timestamp) else None,
+            errors="coerce",
+            utc=True,
+        )
         if pd.isna(timestamp):
             timestamp = pd.to_datetime(item.get("rowDate"), errors="coerce", utc=True)
         close = pd.to_numeric(item.get("last_closeRaw", item.get("last_close")), errors="coerce")
@@ -271,6 +315,35 @@ def _parse_investing_breadth_payload(payload: Any) -> pd.DataFrame:
     ]
 
 
+def _parse_investing_breadth_page(page_text: str) -> pd.DataFrame:
+    """Extract the recent daily table embedded in Investing's Next.js page."""
+    match = re.search(
+        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+        str(page_text),
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    try:
+        payload = json.loads(match.group(1))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+    stack: list[Any] = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            store = node.get("historicalDataStore")
+            if isinstance(store, dict):
+                historical = store.get("historicalData")
+                if isinstance(historical, dict) and isinstance(historical.get("data"), list):
+                    return _parse_investing_breadth_payload({"data": historical["data"]})
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+
 def load_investing_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
     """Load S5FI/S5TH from Investing.com when TradingView has no usable series."""
     spec = INVESTING_BREADTH_SPECS.get(str(symbol).upper())
@@ -286,32 +359,38 @@ def load_investing_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFram
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             page = client.get(page_url, headers=headers)
             page.raise_for_status()
+            page_frame = _parse_investing_breadth_page(page.text)
             api_url = f"https://api.investing.com/api/financialdata/historical/{spec['instrument_id']}"
-            response = client.get(
-                api_url,
-                params={
-                    # Investing caps this endpoint at 4,999 rows. A fixed
-                    # 1990 start therefore returned the oldest rows and
-                    # silently omitted the current observations. Keep a
-                    # rolling window so the latest daily bar is retained.
-                    "start-date": (
-                        pd.Timestamp(end).normalize() - pd.DateOffset(years=INVESTING_BREADTH_HISTORY_YEARS)
-                    ).date().isoformat(),
-                    "end-date": pd.Timestamp(end).date().isoformat(),
-                    "interval": "P1D",
-                    "time-frame": "Daily",
-                },
-                headers={
-                    **headers,
-                    "Accept": "application/json, text/plain, */*",
-                    "Origin": "https://pt.investing.com",
-                    "Referer": page_url,
-                    "domain-id": "www",
-                },
-            )
-            response.raise_for_status()
-            frame = _parse_investing_breadth_payload(response.json())
-        if frame.empty or len(frame) < 52:
+            api_frame = empty
+            try:
+                response = client.get(
+                    api_url,
+                    params={
+                        # Investing caps this endpoint at 4,999 rows. A fixed
+                        # 1990 start therefore returned the oldest rows and
+                        # silently omitted the current observations. Keep a
+                        # rolling window so the latest daily bar is retained.
+                        "start-date": (
+                            pd.Timestamp(end).normalize() - pd.DateOffset(years=INVESTING_BREADTH_HISTORY_YEARS)
+                        ).date().isoformat(),
+                        "end-date": pd.Timestamp(end).date().isoformat(),
+                        "interval": "P1D",
+                        "time-frame": "Daily",
+                    },
+                    headers={
+                        **headers,
+                        "Accept": "application/json, text/plain, */*",
+                        "Origin": "https://www.investing.com",
+                        "Referer": page_url,
+                        "domain-id": "www",
+                    },
+                )
+                response.raise_for_status()
+                api_frame = _parse_investing_breadth_payload(response.json())
+            except Exception:
+                pass
+            frame = _merge_breadth_frames(page_frame, api_frame)
+        if frame.empty or len(frame) < 5:
             return empty
         frame = frame.loc[frame.index <= pd.Timestamp(end).normalize()]
         if frame.empty or frame.index.max() < pd.Timestamp(end).normalize() - pd.Timedelta(days=30):

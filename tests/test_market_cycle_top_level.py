@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -11,7 +13,9 @@ from market_cycle import (
     forward_max_drawdown_from_low,
     latest_current_risk_signal,
     overlay_latest_daily_current_risk,
+    _merge_breadth_frames,
     _parse_investing_breadth_payload,
+    _parse_investing_breadth_page,
 )
 from market_cycle_tab import (
     build_top_level_analytics,
@@ -47,6 +51,49 @@ def test_investing_breadth_payload_parser_normalizes_rows() -> None:
     assert len(frame) == 1
     assert frame.iloc[0]["Close"] == 53.0
     assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"]
+
+
+def test_investing_breadth_page_parser_reads_next_data() -> None:
+    payload = {
+        "props": {
+            "pageProps": {
+                "historicalDataStore": {
+                    "historicalData": {
+                        "data": [
+                            {
+                                "rowDateTimestamp": "2026-11-19T00:00:00Z",
+                                "last_closeRaw": "49.10",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    html = f'<script id="__NEXT_DATA__" type="application/json">{json.dumps(payload)}</script>'
+
+    frame = _parse_investing_breadth_page(html)
+
+    assert len(frame) == 1
+    assert frame.index.max() == pd.Timestamp("2026-11-19")
+    assert frame.iloc[-1]["Close"] == 49.10
+
+
+def test_breadth_merge_keeps_archive_and_live_overrides_overlap() -> None:
+    archive = pd.DataFrame(
+        {"Close": [40.0, 45.0]},
+        index=pd.to_datetime(["2006-12-01", "2026-11-18"]),
+    )
+    live = pd.DataFrame(
+        {"Close": [56.26, 49.10]},
+        index=pd.to_datetime(["2026-11-18", "2026-11-19"]),
+    )
+
+    merged = _merge_breadth_frames(archive, live)
+
+    assert merged.index.min() == pd.Timestamp("2006-12-01")
+    assert merged.index.max() == pd.Timestamp("2026-11-19")
+    assert merged.loc[pd.Timestamp("2026-11-18"), "Close"] == 56.26
 
 
 def test_forward_drawdown_windows_match_reference_with_missing_bars() -> None:
