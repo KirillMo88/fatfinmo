@@ -262,7 +262,11 @@ def _change_block(series: pd.Series, timeframe: str, *, live_change_pct: float |
     values = pd.to_numeric(series, errors="coerce").dropna().sort_index()
     if values.empty:
         return "1D change: n/a<br>1W change: n/a<br>1M change: n/a"
-    frequency = values.index.to_series().diff().median()
+    # Older TradingView archive rows can be monthly while the live overlay is
+    # daily.  Infer frequency from the recent tail so the change block uses
+    # 1/5/21 daily observations after a live refresh instead of treating every
+    # horizon as one monthly period.
+    frequency = values.index.to_series().diff().dropna().tail(30).median()
     if pd.isna(frequency) or frequency <= pd.Timedelta(days=2):
         periods = {"1D": 1, "1W": 5, "1M": 21}
     elif frequency <= pd.Timedelta(days=8):
