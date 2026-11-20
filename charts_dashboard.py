@@ -29,9 +29,11 @@ MAP_POINT_COLORS = {
 MAP_POINT_CATEGORY = {
     "Gold": "Commodities",
     "GOLD": "Commodities",
+    "Silver": "Commodities",
     "HG1": "Commodities",
     "WTI": "Commodities",
     "DBA": "Commodities",
+    "URNM": "Commodities",
     "TLT": "Bonds",
     "HYG": "Bonds",
     "EMB": "Bonds",
@@ -72,7 +74,8 @@ MAP_UNIVERSES: dict[str, dict[str, str | tuple[str, ...]]] = {
         **{symbol: symbol for symbol in ("XLK", "XLV", "XLF", "XLI", "XLB", "XLE", "XLU", "XLC", "XLY", "XLP")},
     },
     "Commodity Map": {
-        "Gold": "GC=F", "HG1": "HG=F", "WTI": "CL=F", "RBOB": "RB=F", "NatGas": "NG=F", "DBA": "DBA",
+        "Gold": "GC=F", "Silver": "SI=F", "HG1": "HG=F", "WTI": "CL=F", "RBOB": "RB=F", "NatGas": "NG=F", "DBA": "DBA",
+        "URNM": "URNM",
     },
     "Crypto Map": {
         "BTC": "BTC-USD", "ETH/BTC": "ETH-USD::BTC-USD", "SOL/BTC": "SOL-USD::BTC-USD", "XRP/BTC": "XRP-USD::BTC-USD",
@@ -319,7 +322,14 @@ def _figure(
     fig.update_xaxes(showticklabels=False, row=1, col=1)
     if rows > 2:
         fig.update_xaxes(showticklabels=False, row=2, col=1)
-    fig.update_xaxes(showticklabels=True, title_text="Date", tickformat="%Y", nticks=6, row=rows, col=1)
+    fig.update_xaxes(
+        showticklabels=True,
+        title_text="Date",
+        tickformat="%b %Y",
+        nticks=8,
+        row=rows,
+        col=1,
+    )
     fig.update_layout(
         title={"text": title, "x": 0, "xanchor": "left", "font": {"size": title_font_size}},
         height=470 if rows == 3 else 390,
