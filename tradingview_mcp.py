@@ -363,6 +363,22 @@ def get_economic_data(symbol: str, date_from: str = "2010-01-01", date_to: str |
     if result.frame.empty:
         raise TradingViewMcpError(f"{symbol} returned no economic observations.")
     append_cached_economic(result)
+    # The live MCP response can be a rolling/partial window even when the
+    # local cache contains older observations.  Return the merged history so
+    # callers do not silently lose the archived part of the series.
+    merged = _read_cached_economic_rows(symbol)
+    if not merged.empty:
+        result = TradingViewEconomicResult(
+            symbol=result.symbol,
+            frame=merged,
+            description=result.description,
+            unit=result.unit,
+            scale=result.scale,
+            frequency=result.frequency,
+            data_status=result.data_status,
+            source_mode=result.source_mode,
+            notes=result.notes,
+        )
     return result
 
 
@@ -424,30 +440,40 @@ def get_ohlcv_data(
     return out.reset_index(drop=True)
 
 
-def read_cached_economic(symbol: str) -> TradingViewEconomicResult | None:
-    if not ECONOMIC_CACHE_PATH.exists() or now_ts() - ECONOMIC_CACHE_PATH.stat().st_mtime > ECONOMIC_HISTORY_TTL_SECONDS:
-        return None
+def _read_cached_economic_rows(symbol: str) -> pd.DataFrame:
+    """Read all cached observations for a symbol, regardless of cache age."""
     try:
         frame = pd.read_csv(ECONOMIC_CACHE_PATH)
     except Exception:
-        return None
+        return pd.DataFrame(columns=["date", "value"])
     if frame.empty or "symbol" not in frame.columns:
-        return None
+        return pd.DataFrame(columns=["date", "value"])
     rows = frame[frame["symbol"].eq(symbol)].copy()
     if rows.empty:
-        return None
+        return pd.DataFrame(columns=["date", "value"])
     rows["date"] = pd.to_datetime(rows["date"], errors="coerce")
     values = rows.dropna(subset=["date", "value"]).sort_values("date")
     if values.empty:
-        return None
-    meta = values.iloc[-1]
+        return pd.DataFrame(columns=["date", "value"])
+    values["value"] = pd.to_numeric(values["value"], errors="coerce")
+    values = values.dropna(subset=["value"]).drop_duplicates("date", keep="last")
     output_columns = ["date", "value"]
     if "release_date" in values.columns:
         values["release_date"] = pd.to_datetime(values["release_date"], errors="coerce")
         output_columns.append("release_date")
+    return values[output_columns].sort_values("date").reset_index(drop=True)
+
+
+def read_cached_economic(symbol: str) -> TradingViewEconomicResult | None:
+    if not ECONOMIC_CACHE_PATH.exists() or now_ts() - ECONOMIC_CACHE_PATH.stat().st_mtime > ECONOMIC_HISTORY_TTL_SECONDS:
+        return None
+    values = _read_cached_economic_rows(symbol)
+    if values.empty:
+        return None
+    meta = values.iloc[-1]
     return TradingViewEconomicResult(
         symbol=symbol,
-        frame=values[output_columns].copy(),
+        frame=values.copy(),
         description=str(meta.get("description", "")),
         unit=str(meta.get("unit", "")),
         scale=str(meta.get("scale", "")),
