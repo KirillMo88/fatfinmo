@@ -34,6 +34,7 @@ MAP_POINT_CATEGORY = {
     "WTI": "Commodities",
     "DBA": "Commodities",
     "URNM": "Commodities",
+    "REMX": "Commodities",
     "TLT": "Bonds",
     "HYG": "Bonds",
     "EMB": "Bonds",
@@ -75,7 +76,7 @@ MAP_UNIVERSES: dict[str, dict[str, str | tuple[str, ...]]] = {
     },
     "Commodity Map": {
         "Gold": "GC=F", "Silver": "SI=F", "HG1": "HG=F", "WTI": "CL=F", "RBOB": "RB=F", "NatGas": "NG=F", "DBA": "DBA",
-        "URNM": "URNM",
+        "URNM": "URNM", "REMX": "REMX",
     },
     "Crypto Map": {
         "BTC": "BTC-USD", "ETH/BTC": "ETH-USD::BTC-USD", "SOL/BTC": "SOL-USD::BTC-USD", "XRP/BTC": "XRP-USD::BTC-USD",
