@@ -80,7 +80,9 @@ def render_us_coverage_model(snapshot: LukeGromenGoldSnapshot) -> None:
     st.dataframe(pd.DataFrame(target_rows), hide_index=True, use_container_width=True)
     st.caption(
         f"As of {_date(current.get('date'))} · debt source: {current.get('foreign_debt_source', 'n/a')} · "
-        f"gold reserve source: {current.get('us_gold_source', 'n/a')} · price source: TradingView TVC:GOLD"
+        "gold reserve source: "
+        f"{current.get('us_gold_source', 'n/a')} · price source: "
+        f"{current.get('gold_price_source', 'TradingView fixed register through 2025 + Yahoo GC=F from 2026')}"
     )
 
 
@@ -160,7 +162,7 @@ def render_methodology() -> None:
     with st.expander("Methodology and source rules"):
         st.markdown(
             """
-- Gold price: the existing long weekly TradingView `TVC:GOLD` series, USD per troy ounce.
+- Gold price: fixed weekly TradingView `TVC:GOLD` register through 2025, continued with Yahoo `GC=F` from 2026, USD per troy ounce.
 - Foreign-held U.S. Treasury debt: `FDHBFIN` through January 2003 (billions × 1e9), then `FORTREASPOS69995` from February 2003 (millions × 1e6); forward-filled, never interpolated.
 - U.S. official gold: 261,499,000 fine troy oz before 2012; from January 2012, the sum of all eight Treasury/FRED components only when every component is present.
 - GlobalPositiveCA primary source: IMF WEO `BCA` on the Countries sheet, summed as `MAX(BCA, 0)` across individual economies. Missing values remain missing; Country Groups are never loaded.

@@ -35,8 +35,16 @@ from .utils import freshness_from_date, weekly_close
 YAHOO_GOLD_REGIME_TICKERS = ["GC=F", "DX-Y.NYB", "CL=F"]
 FRED_GOLD_REGIME_SERIES = ["DFII10", "DGS2", "DGS10", "T5YIE", "T10YIE", "IRLTLT01JPM156N"]
 GOLD_MCP_SYMBOL = "TVC:GOLD"
-GOLD_HISTORY_START = pd.Timestamp("1960-01-04")
+GOLD_HISTORY_START = pd.Timestamp("1960-01-01")
 GOLD_MACRO_START = pd.Timestamp("2016-01-01")
+GOLD_PRICE_ARCHIVE_END = pd.Timestamp("2025-12-31 23:59:59")
+GOLD_YAHOO_START = pd.Timestamp("2026-01-01")
+GOLD_PRICE_ARCHIVE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "data"
+    / "gold_regime"
+    / "gold_price_weekly_1960_2025.csv"
+)
 
 
 def build_gold_regime_snapshot(
@@ -67,12 +75,7 @@ def build_gold_regime_snapshot(
         fred_data=fred_data,
         config=cfg,
     )
-    gold_price = load_gold_mcp_weekly()
-    if gold_price.empty:
-        # GLD is an ETF share price, not a USD/oz gold price.  It must never
-        # be used as the Gold/AISC numerator because it produces a false
-        # ~0.1-0.2x multiple.  GC=F is the unit-compatible Yahoo fallback.
-        gold_price = weekly_close(yahoo_weekly.get("GC=F", pd.DataFrame()))
+    gold_price = load_gold_price_weekly(yahoo_weekly)
     gold_price = gold_price.rename("gold_price")
     price_history = pd.DataFrame({"date": gold_price.index, "gold_price": gold_price.values})
 
@@ -231,6 +234,45 @@ def load_gold_mcp_weekly() -> pd.Series:
         .set_index("date")["close"]
         .rename("gold_price")
     )
+
+
+def load_gold_price_archive_weekly(path: Path | None = None) -> pd.Series:
+    """Read the immutable TradingView weekly gold register through 2025."""
+    archive_path = path or GOLD_PRICE_ARCHIVE_PATH
+    try:
+        frame = pd.read_csv(archive_path, usecols=["date", "close"])
+    except (OSError, ValueError):
+        return pd.Series(dtype="float64", name="gold_price")
+
+    dates = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_localize(None)
+    closes = pd.to_numeric(frame["close"], errors="coerce")
+    values = pd.DataFrame({"date": dates, "close": closes}).dropna()
+    values = values.loc[
+        (values["date"] >= pd.Timestamp("1960-01-01"))
+        & (values["date"] <= GOLD_PRICE_ARCHIVE_END)
+    ]
+    if values.empty:
+        return pd.Series(dtype="float64", name="gold_price")
+    return (
+        values.sort_values("date")
+        .drop_duplicates("date", keep="last")
+        .set_index("date")["close"]
+        .rename("gold_price")
+    )
+
+
+def load_gold_price_weekly(yahoo_weekly: dict[str, pd.DataFrame]) -> pd.Series:
+    """Combine the fixed 1960-2025 register with Yahoo GC=F from 2026."""
+    archive = load_gold_price_archive_weekly()
+    yahoo = weekly_close(yahoo_weekly.get("GC=F", pd.DataFrame())).rename("gold_price")
+    if not yahoo.empty:
+        yahoo.index = pd.DatetimeIndex(pd.to_datetime(yahoo.index, errors="coerce")).tz_localize(None)
+        yahoo = yahoo.loc[yahoo.index >= GOLD_YAHOO_START]
+
+    combined = pd.concat([archive, yahoo]).dropna().sort_index()
+    if combined.empty:
+        return pd.Series(dtype="float64", name="gold_price")
+    return combined.loc[~combined.index.duplicated(keep="last")].rename("gold_price")
 
 
 def _series_from_start(series: pd.Series | None, start: pd.Timestamp) -> pd.Series | None:

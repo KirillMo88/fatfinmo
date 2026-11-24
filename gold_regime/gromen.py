@@ -115,7 +115,7 @@ def build_luke_gromen_snapshot(
         "gold_price": spot_gold_price,
         "gold_price_date": latest_date(gold_price),
         "spot_gold_price": spot_gold_price,
-        "gold_price_source": "TradingView TVC:GOLD (weekly)",
+        "gold_price_source": "TradingView TVC:GOLD fixed register through 2025 + Yahoo GC=F from 2026",
         "calibration_year": calibration_year,
         "wgc_latest_completed_year": latest_completed_wgc_year(wgc_annual),
         "wgc_data_as_of": wgc_metadata.get("data_as_of"),
