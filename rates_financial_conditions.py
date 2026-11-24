@@ -12,6 +12,7 @@ import pandas as pd
 from finance_core import download_completed_ohlcv_fresh, market_business_days_old
 from fred_client import download_fred_series, get_fred_api_key
 from historical_archive import restore_validated_file
+from hy_oas import CREDIT_ARCHIVE_END, frozen_credit_archive_frame
 
 
 MODEL_VERSION = "RATES_FINANCIAL_CONDITIONS_V1"
@@ -325,6 +326,9 @@ def _load_initial_releases(api_key: str | None, refresh: bool = False) -> pd.Dat
 
 
 def _load_credit_archive(refresh: bool = False) -> tuple[pd.DataFrame, str]:
+    frozen = frozen_credit_archive_frame()
+    if not frozen.empty:
+        return frozen, "FROZEN_ARCHIVE_2015_2025"
     now = pd.Timestamp.now(tz="UTC").tz_localize(None)
     restored_cache = _read_or_restore_cache(CREDIT_ARCHIVE, "RATES_CREDIT_WEEKLY_ARCHIVE")
     if not restored_cache.empty and CREDIT_ARCHIVE.exists() and not refresh and now - pd.Timestamp(CREDIT_ARCHIVE.stat().st_mtime, unit="s") < pd.Timedelta(days=1):
@@ -343,14 +347,38 @@ def _load_credit_archive(refresh: bool = False) -> tuple[pd.DataFrame, str]:
             values = pd.to_numeric(frame["c"], errors="coerce")
             # TradingView weekly bars are Monday-labelled; the value is not known until the week ends.
             parts.append(pd.DataFrame({"Series_ID": series_id, "Date": dates + pd.Timedelta(days=7), "Value": values}).dropna())
-        archive = pd.concat(parts, ignore_index=True).sort_values(["Series_ID", "Date"])
+        archive = pd.concat(parts, ignore_index=True)
+        archive = archive.loc[archive["Date"].le(CREDIT_ARCHIVE_END)].sort_values(["Series_ID", "Date"])
         archive.to_parquet(CREDIT_ARCHIVE, index=False)
         return archive, "TRADINGVIEW_WEEKLY"
     except Exception as exc:
         cached = _read_or_restore_cache(CREDIT_ARCHIVE, "RATES_CREDIT_WEEKLY_ARCHIVE")
         if not cached.empty:
+            cached["Date"] = pd.to_datetime(cached["Date"], errors="coerce")
+            cached = cached.loc[cached["Date"].le(CREDIT_ARCHIVE_END)]
             return cached, "STALE_TRADINGVIEW_CACHE"
         raise RuntimeError(f"Required HY/IG OAS full history unavailable: {exc}") from exc
+
+
+def _load_credit_tradingview_live() -> pd.DataFrame:
+    """Load post-2025 TradingView values only when FRED has no current data."""
+    try:
+        from tradingview_mcp import call_tool
+
+        parts = []
+        for series_id in ("BAMLH0A0HYM2", "BAMLC0A0CM"):
+            payload = call_tool("get_ohlcv", {"symbol": f"FRED:{series_id}", "interval": "1W", "count": 5000, "summary": False})
+            bars = payload.get("bars") or payload.get("data") or payload.get("candles") or []
+            frame = pd.DataFrame(bars)
+            if not {"t", "c"}.issubset(frame.columns):
+                continue
+            dates = pd.to_datetime(frame["t"], unit="s", errors="coerce", utc=True).dt.tz_localize(None).dt.normalize() + pd.Timedelta(days=7)
+            values = pd.to_numeric(frame["c"], errors="coerce")
+            part = pd.DataFrame({"Series_ID": series_id, "Date": dates, "Value": values}).dropna()
+            parts.append(part.loc[part["Date"].gt(CREDIT_ARCHIVE_END)])
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["Series_ID", "Date", "Value"])
+    except Exception:
+        return pd.DataFrame(columns=["Series_ID", "Date", "Value"])
 
 
 def load_sources(api_key: str | None, refresh: bool = False) -> tuple[dict[str, pd.Series], dict[str, pd.Series], dict]:
@@ -382,6 +410,13 @@ def load_sources(api_key: str | None, refresh: bool = False) -> tuple[dict[str, 
     initial = _load_initial_releases(api_key, refresh)
     initial_stale = now - pd.Timestamp(FRED_INITIAL_CACHE.stat().st_mtime, unit="s") >= pd.Timedelta(days=1)
     archive, archive_status = _load_credit_archive(refresh)
+    credit_live_fallback = pd.DataFrame(columns=["Series_ID", "Date", "Value"])
+    for series_id in ("BAMLH0A0HYM2", "BAMLC0A0CM"):
+        current = all_fred.loc[all_fred["Series_ID"].eq(series_id), "Date"]
+        current = pd.to_datetime(current, errors="coerce")
+        if current.dropna().empty or current.max() <= CREDIT_ARCHIVE_END:
+            credit_live_fallback = _load_credit_tradingview_live()
+            break
     fred = {}
     for series_id in FRED_IDS:
         source = all_fred.loc[all_fred["Series_ID"].eq(series_id)]
@@ -389,12 +424,21 @@ def load_sources(api_key: str | None, refresh: bool = False) -> tuple[dict[str, 
             older = archive.loc[archive["Series_ID"].eq(series_id)]
             if older.empty:
                 raise RuntimeError(f"Required {series_id} historical archive is empty")
-            source = (
-                pd.concat([older.assign(_priority=1), source.assign(_priority=2)], ignore_index=True)
-                .sort_values(["Date", "_priority"])
-                .drop_duplicates("Date", keep="last")
-            )
+            tv_part = credit_live_fallback.loc[credit_live_fallback["Series_ID"].eq(series_id)]
+            fred_part = source.copy()
+            fred_part["Date"] = pd.to_datetime(fred_part["Date"], errors="coerce")
+            fred_part["_priority"] = np.where(fred_part["Date"].gt(CREDIT_ARCHIVE_END), 3, 0)
+            source = pd.concat(
+                [
+                    older.assign(_priority=1),
+                    tv_part.assign(_priority=2),
+                    fred_part,
+                ],
+                ignore_index=True,
+            ).sort_values(["Date", "_priority"]).drop_duplicates("Date", keep="last")
             status[series_id] += "+" + archive_status
+            if not tv_part.empty:
+                status[series_id] += "+TRADINGVIEW_FALLBACK"
         elif series_id in INITIAL_RELEASE_IDS:
             source = initial.loc[initial["Series_ID"].eq(series_id)]
             status[series_id] = "STALE_INITIAL_RELEASE_CACHE" if initial_stale else "FRED_INITIAL_RELEASE"

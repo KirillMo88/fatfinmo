@@ -21,7 +21,12 @@ from broker_margin_leverage import (
 from current_risk import CURRENT_RISK_MODEL_VERSION, calculate_current_risk_v1
 from finance_core import download_completed_ohlcv
 from fred_client import FredApiError, download_fred_series
-from hy_oas import combine_hy_oas_sources, weekly_archive_available_frame
+from hy_oas import (
+    combine_hy_oas_sources,
+    frozen_credit_archive_frame,
+    restrict_credit_live_frame,
+    weekly_archive_available_frame,
+)
 from market_model import calculate_positioning_risk_history, market_model_config
 from positioning import read_processed
 
@@ -875,8 +880,24 @@ def load_hy_oas_daily(end_date: Any) -> pd.DataFrame:
         try:
             raw = pd.read_csv(baseline_path, usecols=["time", "close"])
             baseline = weekly_archive_available_frame(raw)
+            baseline = baseline.loc[baseline["Date"].lt(pd.Timestamp("2015-01-01"))]
         except Exception:
             baseline = pd.DataFrame(columns=["Date", "HY_OAS", "HYOASSourceFrequency"])
+    frozen = frozen_credit_archive_frame("BAMLH0A0HYM2")
+    if not frozen.empty:
+        baseline = pd.concat(
+            [
+                baseline,
+                pd.DataFrame(
+                    {
+                        "Date": frozen["Date"],
+                        "HY_OAS": frozen["Value"],
+                        "HYOASSourceFrequency": "WEEKLY_ARCHIVE",
+                    }
+                ),
+            ],
+            ignore_index=True,
+        ).drop_duplicates("Date", keep="last").sort_values("Date")
 
     tv_frame = load_tradingview_ohlcv_frame(
         "FRED:BAMLH0A0HYM2",
@@ -906,6 +927,8 @@ def load_hy_oas_daily(end_date: Any) -> pd.DataFrame:
         result["HY_OAS"] = pd.to_numeric(result["Value"], errors="coerce")
         result["HYOASSourceFrequency"] = "DAILY_FRED"
         result = result.dropna(subset=["Date", "HY_OAS"])[["Date", "HY_OAS", "HYOASSourceFrequency"]]
+    tradingview = restrict_credit_live_frame(tradingview)
+    result = restrict_credit_live_frame(result)
     return combine_hy_oas_sources(baseline, tradingview, result, end_date=end_date)
 
 

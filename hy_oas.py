@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 
 import pandas as pd
 
@@ -8,9 +9,44 @@ import pandas as pd
 HY_OAS_COLUMNS = ["Date", "HY_OAS", "HYOASSourceFrequency"]
 HY_OAS_SOURCE_PRIORITY = {
     "WEEKLY_ARCHIVE": 1,
-    "DAILY_FRED": 2,
-    "DAILY_TRADINGVIEW": 3,
+    "DAILY_TRADINGVIEW": 2,
+    "DAILY_FRED": 3,
 }
+CREDIT_ARCHIVE_START = pd.Timestamp("2015-01-01")
+CREDIT_ARCHIVE_END = pd.Timestamp("2025-12-31")
+CREDIT_ARCHIVE_PATH = Path(__file__).resolve().parent / "data" / "credit" / "credit_oas_weekly_2015_2025.csv"
+
+
+def frozen_credit_archive_frame(series_id: str | None = None) -> pd.DataFrame:
+    """Read the immutable 2015–2025 weekly credit archive.
+
+    The archive is deliberately separate from the refreshable runtime cache so
+    current-source outages cannot rewrite the historical model inputs.
+    """
+    columns = ["Series_ID", "Date", "Value"]
+    try:
+        if not CREDIT_ARCHIVE_PATH.exists():
+            return pd.DataFrame(columns=columns)
+        frame = pd.read_csv(CREDIT_ARCHIVE_PATH, usecols=columns)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return pd.DataFrame(columns=columns)
+    frame["Series_ID"] = frame["Series_ID"].astype(str).str.upper()
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce").dt.tz_localize(None).dt.normalize()
+    frame["Value"] = pd.to_numeric(frame["Value"], errors="coerce")
+    frame = frame.dropna(subset=["Series_ID", "Date", "Value"])
+    frame = frame.loc[frame["Date"].between(CREDIT_ARCHIVE_START, CREDIT_ARCHIVE_END)]
+    if series_id is not None:
+        frame = frame.loc[frame["Series_ID"].eq(str(series_id).upper())]
+    return frame.sort_values(["Series_ID", "Date"]).reset_index(drop=True)
+
+
+def restrict_credit_live_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep only observations after the frozen archive cutoff."""
+    if frame is None or frame.empty or "Date" not in frame:
+        return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(columns=HY_OAS_COLUMNS)
+    result = frame.copy()
+    result["Date"] = pd.to_datetime(result["Date"], errors="coerce").dt.tz_localize(None).dt.normalize()
+    return result.loc[result["Date"].gt(CREDIT_ARCHIVE_END)].reset_index(drop=True)
 
 
 def weekly_archive_available_frame(raw: pd.DataFrame) -> pd.DataFrame:

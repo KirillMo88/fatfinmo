@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from hy_oas import combine_hy_oas_sources, weekly_archive_available_frame
+from hy_oas import combine_hy_oas_sources, frozen_credit_archive_frame, weekly_archive_available_frame
 
 
 def test_weekly_archive_is_available_only_after_period_completion() -> None:
@@ -15,7 +15,7 @@ def test_weekly_archive_is_available_only_after_period_completion() -> None:
     assert result.loc[0, "HYOASSourceFrequency"] == "WEEKLY_ARCHIVE"
 
 
-def test_tradingview_daily_has_priority_over_fred_and_weekly() -> None:
+def test_fred_daily_has_priority_over_tradingview_and_weekly() -> None:
     weekly = pd.DataFrame(
         {
             "Date": pd.to_datetime(["2021-12-20", "2021-12-27"]),
@@ -40,8 +40,16 @@ def test_tradingview_daily_has_priority_over_fred_and_weekly() -> None:
 
     result = combine_hy_oas_sources(weekly, tradingview, fred)
 
-    assert result["HY_OAS"].tolist() == [3.41, 3.22]
-    assert result["HYOASSourceFrequency"].tolist() == ["DAILY_TRADINGVIEW", "DAILY_TRADINGVIEW"]
+    assert result["HY_OAS"].tolist() == [3.40, 3.21]
+    assert result["HYOASSourceFrequency"].tolist() == ["DAILY_FRED", "DAILY_FRED"]
+
+
+def test_frozen_credit_archive_contains_both_series_and_cutoff() -> None:
+    result = frozen_credit_archive_frame()
+
+    assert set(result["Series_ID"]) == {"BAMLH0A0HYM2", "BAMLC0A0CM"}
+    assert result["Date"].min() >= pd.Timestamp("2015-01-01")
+    assert result["Date"].max() <= pd.Timestamp("2025-12-31")
 
 
 def test_weekly_archive_is_used_only_when_daily_observation_is_missing() -> None:
