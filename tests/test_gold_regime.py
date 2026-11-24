@@ -11,7 +11,13 @@ from gold_regime.etf_flows import aggregate_gold_etf_flows, load_gold_etf_flows
 from gold_regime.macro import calculate_gold_macro_history
 from gold_regime.macro2 import calculate_gold_structural_macro2_history, inclusive_trailing_percentile
 from gold_regime.regime import calculate_gold_tactical_flow, determine_flow_flags, determine_gold_regime
-from gold_regime.service import calculate_freshness, carry_forward_cot_history, load_gold_mcp_weekly
+from gold_regime.service import (
+    calculate_freshness,
+    carry_forward_cot_history,
+    load_gold_mcp_weekly,
+    load_gold_price_archive_weekly,
+    load_gold_price_weekly,
+)
 from gold_regime.utils import rolling_percentile_rank
 from gold_regime_tab import (
     build_gold_liquidity_cycle_comparison_fig,
@@ -211,6 +217,42 @@ def test_gold_mcp_history_uses_stale_cache_when_refresh_fails(tmp_path, monkeypa
 
     assert history.iloc[-1] == 3861.011
     assert history.index.min() == pd.Timestamp("1960-01-04")
+
+
+def test_fixed_gold_archive_has_required_1960_2025_coverage():
+    history = load_gold_price_archive_weekly()
+
+    assert len(history) == 3016
+    assert history.index.min() == pd.Timestamp("1960-01-03 23:00:00")
+    assert history.index.max() == pd.Timestamp("2025-12-28 23:00:00")
+    assert history.iloc[0] == 35.09
+    assert history.iloc[-1] == 4331.575
+
+
+def test_gold_price_history_uses_archive_through_2025_and_yahoo_from_2026(tmp_path, monkeypatch):
+    import gold_regime.service as service
+
+    archive_path = tmp_path / "gold.csv"
+    pd.DataFrame(
+        {
+            "date": ["1960-01-03 23:00:00", "2025-12-28 23:00:00"],
+            "close": [35.09, 4331.575],
+        }
+    ).to_csv(archive_path, index=False)
+    monkeypatch.setattr(service, "GOLD_PRICE_ARCHIVE_PATH", archive_path)
+    yahoo = {
+        "GC=F": pd.DataFrame(
+            {"Close": [9999.0, 4329.6, 4500.9]},
+            index=pd.to_datetime(["2025-12-26", "2026-01-02", "2026-01-09"]),
+        )
+    }
+
+    history = load_gold_price_weekly(yahoo)
+
+    assert history.loc[pd.Timestamp("2025-12-28 23:00:00")] == 4331.575
+    assert pd.Timestamp("2025-12-26") not in history.index
+    assert history.loc[pd.Timestamp("2026-01-02")] == 4329.6
+    assert history.loc[pd.Timestamp("2026-01-09")] == 4500.9
 
 
 def test_macro2_percentile_is_point_in_time_and_inclusive():

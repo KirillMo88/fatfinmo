@@ -1,0 +1,15 @@
+{
+  "dataset": "gold_price_weekly_1960_2025.csv",
+  "source": "TradingView MCP",
+  "symbol": "TVC:GOLD",
+  "interval": "1W",
+  "currency": "USD",
+  "unit": "USD per troy ounce",
+  "requested_range_start": "1960-01-01",
+  "requested_range_end": "2025-12-31",
+  "first_observation": "1960-01-03 23:00:00",
+  "last_observation": "2025-12-28 23:00:00",
+  "rows": 3016,
+  "sha256": "A3CDFD4454D995E0FDCF03E49DE8B322077FD58283F10F646849B4B7C46A045D",
+  "policy": "Immutable historical register. Observations from 2026-01-01 onward are loaded from Yahoo Finance GC=F."
+}
