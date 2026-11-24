@@ -23,6 +23,8 @@ BTC_LIQUIDITY_CYCLE_MONTHS = 52.7
 BTC_SECONDARY_PERCENTILE_WINDOW = 156
 BTC_SECONDARY_PERCENTILE_MINIMUM = 104
 BTC_RANGE_OPTIONS = STANDARD_TIME_RANGE_OPTIONS + ("Next Cycle",)
+BTC_ARCHIVE_START = pd.Timestamp("2009-10-11")
+BTC_ARCHIVE_END = pd.Timestamp("2025-12-31 23:59:59")
 BTC_MODULAR_CYCLE_START = pd.Timestamp("2026-09-27")
 BTC_MODULAR_HISTORICAL_MODULES = (
     (pd.Timestamp("2018-11-02"), pd.Timestamp("2022-11-25")),
@@ -249,8 +251,15 @@ def merge_btc_mcp_weekly_history(
     yahoo_daily: pd.DataFrame | None,
     tradingview_weekly: pd.DataFrame | None,
     today: pd.Timestamp | str | None = None,
+    archive_weekly: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Prepend completed TradingView INDEX:BTCUSD weeks before Yahoo's daily price history."""
+    """Combine frozen pre-2026 BTC history with live Yahoo BTC-USD bars.
+
+    When ``archive_weekly`` is supplied, it is authoritative through
+    2025-12-31 and TradingView input is ignored.  Yahoo daily data is then
+    aggregated only for 2026 onward.  The legacy TradingView/Yahoo merge is
+    retained for callers that do not provide an archive.
+    """
     columns = ["date", "Open", "High", "Low", "Close", "Volume"]
     as_of = pd.Timestamp(today if today is not None else pd.Timestamp.now(tz="UTC").tz_localize(None))
     if as_of.tzinfo is not None:
@@ -262,6 +271,8 @@ def merge_btc_mcp_weekly_history(
         yahoo = yahoo_daily.copy()
         yahoo.index = pd.to_datetime(yahoo.index, errors="coerce", utc=True).tz_localize(None)
         yahoo = yahoo.loc[~yahoo.index.isna()].sort_index()
+        if archive_weekly is not None:
+            yahoo = yahoo.loc[yahoo.index > BTC_ARCHIVE_END]
         for column in columns[1:]:
             if column not in yahoo.columns:
                 yahoo[column] = np.nan
@@ -280,7 +291,7 @@ def merge_btc_mcp_weekly_history(
         yahoo_weekly = yahoo_weekly.loc[yahoo_weekly["date"] <= as_of]
 
     tradingview = pd.DataFrame(columns=columns)
-    if tradingview_weekly is not None and not tradingview_weekly.empty:
+    if archive_weekly is None and tradingview_weekly is not None and not tradingview_weekly.empty:
         date_column = next((name for name in ("date", "Date") if name in tradingview_weekly.columns), None)
         if date_column and "close" in tradingview_weekly.columns:
             source = tradingview_weekly.copy()
@@ -300,7 +311,27 @@ def merge_btc_mcp_weekly_history(
             if pd.notna(first_yahoo_date):
                 tradingview = tradingview.loc[tradingview["date"] < first_yahoo_date]
 
-    combined = pd.concat([tradingview, yahoo_weekly], ignore_index=True)
+    archive = pd.DataFrame(columns=columns)
+    if archive_weekly is not None and not archive_weekly.empty:
+        source = archive_weekly.copy()
+        date_column = next((name for name in ("date", "Date") if name in source.columns), None)
+        if date_column is not None:
+            dates = pd.to_datetime(source[date_column], errors="coerce", utc=True).dt.tz_localize(None)
+            archive = pd.DataFrame({"date": dates})
+            for source_name, target_name in (
+                ("open", "Open"),
+                ("high", "High"),
+                ("low", "Low"),
+                ("close", "Close"),
+                ("volume", "Volume"),
+            ):
+                archive[target_name] = pd.to_numeric(source.get(source_name, source.get(target_name)), errors="coerce")
+            archive = archive.loc[
+                (archive["date"] >= BTC_ARCHIVE_START)
+                & (archive["date"] <= BTC_ARCHIVE_END)
+            ].dropna(subset=["date", "Close"])
+
+    combined = pd.concat([archive, tradingview, yahoo_weekly], ignore_index=True)
     if combined.empty:
         return pd.DataFrame(columns=columns)
     combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
