@@ -1,0 +1,17 @@
+{
+  "name": "btc_weekly_historical_registry",
+  "archive_start": "2009-10-11",
+  "archive_end": "2025-12-31",
+  "source": "TradingView INDEX:BTCUSD cache captured from the active release",
+  "live_source": "Yahoo Finance BTC-USD",
+  "live_start": "2026-01-01",
+  "frequency": "weekly",
+  "files": {
+    "weekly_archive": {
+      "path": "btc_weekly_tradingview_2009_2025.csv",
+      "rows": 840,
+      "sha256": "D7CC35030D9DD1D48B1C953E65B190860296AD038AF8654EA307E6AB0B3A308F"
+    }
+  },
+  "notes": "Archive dates are canonical week-ending Sundays derived from TradingView weekly bars. Yahoo daily BTC-USD is aggregated to W-FRI for observations after 2025-12-31."
+}

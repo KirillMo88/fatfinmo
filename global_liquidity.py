@@ -48,6 +48,16 @@ WEEKLY_STORAGE_PATH = GLOBAL_LIQUIDITY_STORAGE_DIR / "weekly_global_liquidity.cs
 PBOC_TOTAL_ASSETS_STORAGE_PATH = GLOBAL_LIQUIDITY_STORAGE_DIR / "pboc_total_assets.csv"
 PBOC_TOTAL_ASSETS_BUNDLED_PATH = Path(__file__).with_name("data") / "pboc_total_assets.csv"
 
+# Immutable historical snapshot used as the source of truth through 2025-12-31.
+# The snapshot keeps the raw observations in their native units/currencies and
+# the derived monthly/weekly USD layers.  Live storage is only allowed to
+# replace observations dated 2026-01-01 or later.
+GLOBAL_LIQUIDITY_ARCHIVE_DIR = Path(__file__).with_name("data") / "global_liquidity"
+GLOBAL_LIQUIDITY_ARCHIVE_END = pd.Timestamp("2025-12-31 23:59:59")
+GLOBAL_LIQUIDITY_ARCHIVE_RAW_PATH = GLOBAL_LIQUIDITY_ARCHIVE_DIR / "raw_global_liquidity_1990_2025.csv"
+GLOBAL_LIQUIDITY_ARCHIVE_MONTHLY_PATH = GLOBAL_LIQUIDITY_ARCHIVE_DIR / "monthly_global_liquidity_1990_2025.csv"
+GLOBAL_LIQUIDITY_ARCHIVE_WEEKLY_PATH = GLOBAL_LIQUIDITY_ARCHIVE_DIR / "weekly_global_liquidity_1990_2025.csv"
+
 GLOBAL_LIQUIDITY_CONFIG = {
     "start_date": "1990-01-01",
     "timeout": 20.0,
@@ -73,6 +83,7 @@ GLOBAL_LIQUIDITY_CONFIG = {
     "chinadata_cnm2_url": "https://chinadata.live/api/v2/data/china-m2-money-supply",
     "investing_china_m2_url": "https://www.investing.com/economic-calendar/chinese-m2-money-stock-463",
     "tradingeconomics_cncbbs_url": "https://tradingeconomics.com/china/banks-balance-sheet",
+    "fxmacrodata_cncbbs_url": "https://fxmacrodata.com/china/cb-assets",
 }
 
 FRED_GLOBAL_SERIES = (
@@ -1394,6 +1405,91 @@ def tradingeconomics_pboc_total_assets_latest_raw() -> pd.DataFrame:
     )
 
 
+def fxmacrodata_pboc_total_assets_latest_raw() -> pd.DataFrame:
+    """Read 2026+ PBoC assets from the public FXMacroData page.
+
+    FXMacroData's CNY API requires a paid key, so this deliberately parses the
+    public country page instead.  The page exposes the recent official PBoC
+    release table in HTML.  Values are published in CNY trillions and are
+    converted to the application's canonical CNY 100-million unit.
+    """
+    page_url = str(GLOBAL_LIQUIDITY_CONFIG["fxmacrodata_cncbbs_url"])
+    response = get_with_retries(page_url, headers=investing_headers())
+    if BeautifulSoup is None:
+        raise RuntimeError("beautifulsoup4 is not installed")
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    min_date = pd.Timestamp("2026-01-01")
+    downloaded = fmt_datetime(now_utc())
+    rows: list[dict[str, Any]] = []
+
+    def numeric_cell(value: str) -> float:
+        text = clean_text(value).replace(",", "")
+        if not re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text):
+            return math.nan
+        return float(text)
+
+    for table_row in soup.find_all("tr"):
+        cells = [clean_text(cell.get_text(" ", strip=True)) for cell in table_row.find_all(["th", "td"])]
+        if not cells:
+            continue
+        date_matches: list[tuple[int, pd.Timestamp]] = []
+        for index, cell in enumerate(cells):
+            for match in re.finditer(r"\b(20\d{2}-\d{2}-\d{2})\b", cell):
+                parsed = pd.to_datetime(match.group(1), errors="coerce")
+                if pd.notna(parsed):
+                    date_matches.append((index, pd.Timestamp(parsed)))
+        if not date_matches:
+            continue
+
+        # Rows may contain release date(s) followed by the reference period;
+        # the last ISO date in the row is the reference period in the published
+        # table.  This also handles rows without a known release timestamp.
+        date_index, observation_date = date_matches[-1]
+        observation_date = observation_date.normalize()
+        if observation_date < min_date:
+            continue
+
+        value = math.nan
+        for cell in cells[date_index + 1 :]:
+            candidate = numeric_cell(cell)
+            if np.isfinite(candidate):
+                value = candidate
+                break
+        if not np.isfinite(value):
+            continue
+
+        rows.append(
+            {
+                "observation_date": observation_date,
+                "release_date": pd.NaT,
+                "source": "FXMACRODATA",
+                "source_name": "FXMacroData / People's Bank of China",
+                "source_mode": "FALLBACK_SOURCE",
+                "source_url": page_url,
+                "series_id": PBOC_TOTAL_ASSETS_SERIES_ID,
+                "region": "China",
+                "metric": "PBoC Total Assets",
+                "frequency": "monthly",
+                "currency": "CNY",
+                "unit": "CNY 100 million",
+                "raw_value": float(value) * 10_000.0,
+                "download_timestamp": downloaded,
+                "data_status": "CURRENT",
+                "notes": f"FXMacroData public page value {float(value):.3f} CNY tn converted to CNY 100 million; API not used.",
+            }
+        )
+
+    if not rows:
+        raise RuntimeError("FXMacroData PBoC assets page contains no 2026+ release rows")
+    return (
+        pd.DataFrame(rows, columns=RAW_COLUMNS)
+        .sort_values("observation_date")
+        .drop_duplicates(subset=["observation_date", "series_id"], keep="last")
+        .reset_index(drop=True)
+    )
+
+
 def parse_tradingview_observation_month(html: str) -> pd.Timestamp | None:
     text = clean_text(BeautifulSoup(html, "html.parser").get_text(" ") if BeautifulSoup is not None else html)
     match = re.search(r"Observation period\s+([A-Za-z]{3,9})\s+(\d{4})", text)
@@ -1693,14 +1789,31 @@ def pboc_total_assets_raw() -> pd.DataFrame:
         local_frames.append(tradingview_pboc_total_assets_latest_raw())
     except Exception:
         local_frames.append(pd.DataFrame(columns=RAW_COLUMNS))
-
     local_and_tradingview = pd.concat(local_frames, ignore_index=True)
+    # Avoid a slow public-page request when the existing sources are already
+    # current.  FXMacroData is queried only when the primary/fallback rows are
+    # empty or older than the normal two-month freshness window.
+    primary_dates = pd.to_datetime(local_and_tradingview.get("observation_date"), errors="coerce")
+    latest_primary = primary_dates.max() if not primary_dates.empty else pd.NaT
+    fallback_cutoff = now_utc().normalize() - pd.Timedelta(days=62)
+    if local_and_tradingview.empty or pd.isna(latest_primary) or latest_primary < fallback_cutoff:
+        try:
+            # Public-page fallback for 2026+; the paid FXMacroData API is not used.
+            local_frames.append(fxmacrodata_pboc_total_assets_latest_raw())
+            local_and_tradingview = pd.concat(local_frames, ignore_index=True)
+        except Exception:
+            pass
     if not local_and_tradingview.empty:
         local_and_tradingview["observation_date"] = pd.to_datetime(local_and_tradingview["observation_date"], errors="coerce")
         local_and_tradingview["raw_value"] = pd.to_numeric(local_and_tradingview["raw_value"], errors="coerce")
         local_and_tradingview = local_and_tradingview.dropna(subset=["observation_date", "raw_value"])
         if not local_and_tradingview.empty:
-            source_priority = {"PBOC_LOCAL_TABLE": 0, "TRADINGVIEW": 1, "TRADINGECONOMICS": 2}
+            source_priority = {
+                "FXMACRODATA": -1,
+                "PBOC_LOCAL_TABLE": 0,
+                "TRADINGVIEW": 1,
+                "TRADINGECONOMICS": 2,
+            }
             local_and_tradingview["_source_priority"] = local_and_tradingview["source"].map(source_priority).fillna(0)
             frame = (
                 local_and_tradingview.sort_values(["observation_date", "_source_priority", "download_timestamp"])
@@ -2427,8 +2540,13 @@ def update_global_liquidity(api_key: str | None = None, force: bool = False) -> 
                     archived[column] = np.nan
             saved = archived[RAW_COLUMNS]
     raw = preserve_saved_raw_observations(raw, saved)
+    raw = merge_global_liquidity_archive_raw(raw)
     monthly = build_monthly_layer(raw)
     weekly = build_weekly_layer(raw)
+    archive_monthly = read_frame(GLOBAL_LIQUIDITY_ARCHIVE_MONTHLY_PATH, MONTHLY_COLUMNS)
+    archive_weekly = read_frame(GLOBAL_LIQUIDITY_ARCHIVE_WEEKLY_PATH, WEEKLY_COLUMNS)
+    monthly = merge_global_liquidity_archive_layer(monthly, archive_monthly, MONTHLY_COLUMNS)
+    weekly = merge_global_liquidity_archive_layer(weekly, archive_weekly, WEEKLY_COLUMNS)
     write_frame(raw, RAW_STORAGE_PATH)
     write_frame(monthly, MONTHLY_STORAGE_PATH)
     write_frame(weekly, WEEKLY_STORAGE_PATH)
@@ -2450,6 +2568,57 @@ def preserve_saved_raw_observations(fresh: pd.DataFrame, saved: pd.DataFrame) ->
     return combined[RAW_COLUMNS]
 
 
+def merge_global_liquidity_archive_raw(live: pd.DataFrame) -> pd.DataFrame:
+    """Overlay the immutable native-unit archive and keep only post-2025 live rows.
+
+    The production CSV can contain older observations from a failed/partial
+    refresh.  They must never supersede the frozen archive, so the archive is
+    selected for every observation dated on or before 2025-12-31 and the live
+    frame contributes only 2026+ observations.
+    """
+    archive = read_frame(GLOBAL_LIQUIDITY_ARCHIVE_RAW_PATH, RAW_COLUMNS)
+    if archive.empty:
+        return live if not live.empty else pd.DataFrame(columns=RAW_COLUMNS)
+
+    archive = archive.copy()
+    archive["observation_date"] = pd.to_datetime(archive["observation_date"], errors="coerce")
+    archive = archive.loc[archive["observation_date"].notna() & (archive["observation_date"] <= GLOBAL_LIQUIDITY_ARCHIVE_END)]
+
+    if live.empty:
+        return archive[RAW_COLUMNS].sort_values(["observation_date", "series_id"], kind="stable").reset_index(drop=True)
+    live = live.copy()
+    live["observation_date"] = pd.to_datetime(live["observation_date"], errors="coerce")
+    live = live.loc[live["observation_date"].notna() & (live["observation_date"] > GLOBAL_LIQUIDITY_ARCHIVE_END)]
+    combined = pd.concat([archive[RAW_COLUMNS], live[RAW_COLUMNS]], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["source", "series_id", "observation_date"], keep="last")
+    return combined.sort_values(["observation_date", "series_id"], kind="stable").reset_index(drop=True)
+
+
+def merge_global_liquidity_archive_layer(
+    live: pd.DataFrame,
+    archive: pd.DataFrame,
+    columns: list[str],
+) -> pd.DataFrame:
+    """Overlay a frozen derived layer through 2025 and retain live 2026+ rows."""
+    if archive.empty:
+        return live
+    if live.empty:
+        result = archive.copy()
+    else:
+        date_column = "date"
+        archive = archive.copy()
+        live = live.copy()
+        archive[date_column] = pd.to_datetime(archive[date_column], errors="coerce")
+        live[date_column] = pd.to_datetime(live[date_column], errors="coerce")
+        archive = archive.loc[archive[date_column].notna() & (archive[date_column] <= GLOBAL_LIQUIDITY_ARCHIVE_END)]
+        live = live.loc[live[date_column].notna() & (live[date_column] > GLOBAL_LIQUIDITY_ARCHIVE_END)]
+        result = pd.concat([archive, live], ignore_index=True)
+    for column in columns:
+        if column not in result.columns:
+            result[column] = np.nan
+    return result[columns].sort_values("date", kind="stable").reset_index(drop=True)
+
+
 def read_global_liquidity() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     raw = read_frame(RAW_STORAGE_PATH, RAW_COLUMNS)
     if raw.empty or pd.to_numeric(raw.get("raw_value"), errors="coerce").notna().sum() == 0:
@@ -2459,12 +2628,17 @@ def read_global_liquidity() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
                 if column not in archived:
                     archived[column] = np.nan
             raw = archived[RAW_COLUMNS]
+    raw = merge_global_liquidity_archive_raw(raw)
     monthly = read_frame(MONTHLY_STORAGE_PATH, MONTHLY_COLUMNS)
     weekly = read_frame(WEEKLY_STORAGE_PATH, WEEKLY_COLUMNS)
     if not raw.empty and monthly.empty:
         monthly = build_monthly_layer(raw)
     if not raw.empty and weekly.empty:
         weekly = build_weekly_layer(raw)
+    archive_monthly = read_frame(GLOBAL_LIQUIDITY_ARCHIVE_MONTHLY_PATH, MONTHLY_COLUMNS)
+    archive_weekly = read_frame(GLOBAL_LIQUIDITY_ARCHIVE_WEEKLY_PATH, WEEKLY_COLUMNS)
+    monthly = merge_global_liquidity_archive_layer(monthly, archive_monthly, MONTHLY_COLUMNS)
+    weekly = merge_global_liquidity_archive_layer(weekly, archive_weekly, WEEKLY_COLUMNS)
     return raw, monthly, weekly
 
 
@@ -2489,10 +2663,11 @@ def stored_fred_refresh_failed() -> bool:
 
 def storage_has_requested_history() -> bool:
     """Require all M2 and FX inputs to cover the configured historical start."""
-    if not RAW_STORAGE_PATH.exists():
+    if not RAW_STORAGE_PATH.exists() and not GLOBAL_LIQUIDITY_ARCHIVE_RAW_PATH.exists():
         return False
     try:
         raw = read_frame(RAW_STORAGE_PATH, RAW_COLUMNS)
+        raw = merge_global_liquidity_archive_raw(raw)
         requested = pd.Timestamp(GLOBAL_LIQUIDITY_CONFIG["start_date"]).to_period("M").to_timestamp()
 
         def reaches_requested_month(series: pd.Series) -> bool:

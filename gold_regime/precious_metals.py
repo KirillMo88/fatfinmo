@@ -7,11 +7,13 @@ import pandas as pd
 from time_ranges import TIME_RANGE_YEARS
 
 
-YFINANCE_TICKERS = ("GLD", "GDX", "SIL", "SLV")
+YAHOO_METAL_TICKERS = {
+    "SILVER": "SI=F",
+    "PALLADIUM": "PA=F",
+    "PLATINUM": "PL=F",
+}
+YFINANCE_TICKERS = ("GLD", "GDX", "SIL", "SLV", *YAHOO_METAL_TICKERS.values())
 TRADINGVIEW_SYMBOLS = {
-    "SILVER": "TVC:SILVER",
-    "PALLADIUM": "TVC:PALLADIUM",
-    "PLATINUM": "TVC:PLATINUM",
     "XAUUSD": "OANDA:XAUUSD",
 }
 PRECIOUS_METALS_ROWS = (
@@ -39,6 +41,8 @@ CHANGE_HORIZONS = (
 def load_precious_metals_ratios() -> tuple[pd.DataFrame, dict[str, str]]:
     """Fetch weekly metal prices and build the relative-price series used by Gold Regime."""
     yahoo_prices, status = _download_yahoo_weekly()
+    for name, ticker in YAHOO_METAL_TICKERS.items():
+        yahoo_prices[name] = yahoo_prices.get(ticker, pd.Series(dtype="float64")).rename(name)
     tradingview_prices: dict[str, pd.Series] = {}
     try:
         from tradingview_mcp import get_ohlcv_data

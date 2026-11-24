@@ -232,7 +232,7 @@ def render_precious_metals_universe(selected_range: str, range_end: Any = None) 
     st.caption(
         "Weekly closes through "
         f"{latest_text}. Yahoo Finance adjusted closes: GLD, GDX, SIL, SLV. "
-        "TradingView: TVC:SILVER, TVC:PALLADIUM, TVC:PLATINUM, OANDA:XAUUSD."
+        "Yahoo Finance futures: SI=F, PA=F, PL=F. TradingView: OANDA:XAUUSD."
     )
     unavailable = [
         source

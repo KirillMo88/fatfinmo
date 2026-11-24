@@ -13,8 +13,10 @@ from .trading_system import normalize_ohlcv, prepare_usd_ohlcv
 
 TV_SYMBOLS = {
     "GOLD": "TVC:GOLD",
-    "SILVER": "TVC:SILVER",
-    "PLATINUM": "TVC:PLATINUM",
+}
+YAHOO_METAL_SYMBOLS = {
+    "SILVER": "SI=F",
+    "PLATINUM": "PL=F",
 }
 YAHOO_SYMBOLS = ("3GOL.L", "3SIL.L")
 
@@ -42,6 +44,21 @@ def load_trading_system_data() -> dict[str, Any]:
         output["daily"][asset] = _tradingview_bars(symbol, "1D", output["status"])
         # TradingView MCP interprets 1M as one minute; 1mo is a monthly bar.
         output["monthly"][asset] = _tradingview_bars(symbol, "1mo", output["status"])
+    for asset, symbol in YAHOO_METAL_SYMBOLS.items():
+        try:
+            frame, refresh_note = _incremental_yahoo_ohlc(symbol, cache_dir)
+            daily = _completed_daily_bars(frame)
+            if daily.empty:
+                raise ValueError("Yahoo Finance returned no completed daily bars.")
+            output["daily"][asset] = daily
+            output["monthly"][asset] = _monthly_ohlc(daily)
+            output["status"][f"{symbol} 1D"] = f"Yahoo Finance · {daily.index[-1]:%Y-%m-%d}{refresh_note}"
+            output["status"][f"{symbol} 1mo"] = f"Yahoo Finance resampled monthly · {output['monthly'][asset].index[-1]:%Y-%m-%d}"
+        except Exception as exc:
+            output["daily"][asset] = pd.DataFrame()
+            output["monthly"][asset] = pd.DataFrame()
+            output["status"][f"{symbol} 1D"] = f"Unavailable: {exc}"
+            output["status"][f"{symbol} 1mo"] = f"Unavailable: {exc}"
     gold_weekly = _tradingview_bars("TVC:GOLD", "1W", output["status"])
     output["gold_weekly"] = gold_weekly["close"].dropna().rename("gold_price") if "close" in gold_weekly else pd.Series(dtype=float, name="gold_price")
 
@@ -94,7 +111,8 @@ def load_trading_system_data() -> dict[str, Any]:
             output["status"][ticker] += " · converted to USD"
 
     output["source_note"] = (
-        "Ratio and spot metals: synchronized TradingView daily/monthly observations. "
+        "Gold benchmark: TradingView daily/monthly observations. "
+        "Silver and platinum futures: Yahoo Finance SI=F and PL=F. "
         "Leveraged instruments: yfinance auto-adjusted daily OHLC; currency checked and converted to USD."
     )
     return output
@@ -138,6 +156,26 @@ def _extract_yahoo_ohlc(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
             raise KeyError(f"Adjusted {field.title()} is missing for {symbol}.")
         output[field] = pd.to_numeric(values[renamed[field]], errors="coerce")
     return output.dropna(subset=["open", "close"])
+
+
+def _completed_daily_bars(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    values = frame.copy().sort_index()
+    values.index = pd.DatetimeIndex(pd.to_datetime(values.index, errors="coerce")).tz_localize(None)
+    values = values.loc[~values.index.isna()]
+    today_utc = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    return values.loc[values.index < today_utc]
+
+
+def _monthly_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    return (
+        frame.resample("ME")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+        .dropna(subset=["open", "close"])
+    )
 
 
 def _yahoo_currency(ticker: str) -> str:

@@ -1,0 +1,40 @@
+{
+  "name": "global_liquidity_historical_registry",
+  "archive_start": "1990-01-01",
+  "archive_end": "2025-12-31",
+  "policy": {
+    "historical_period": "immutable archive is authoritative through 2025-12-31",
+    "live_period": "observations dated 2026-01-01 and later are read from current providers",
+    "native_values": "raw_global_liquidity_1990_2025.csv preserves provider units and currencies",
+    "usd_values": "monthly_global_liquidity_1990_2025.csv and weekly_global_liquidity_1990_2025.csv preserve derived USD layers"
+  },
+  "files": {
+    "raw": {
+      "path": "raw_global_liquidity_1990_2025.csv",
+      "rows": 68107,
+      "sha256": "6F4AFE9D01A7422F28EDB973CDB502856F1F615A22DD6C5B73046C87FC598C34"
+    },
+    "monthly": {
+      "path": "monthly_global_liquidity_1990_2025.csv",
+      "rows": 432,
+      "sha256": "1D7181E360BA2966890741A211B436E847FEA50762472DE1729CEEE7B567DE49"
+    },
+    "weekly": {
+      "path": "weekly_global_liquidity_1990_2025.csv",
+      "rows": 1878,
+      "sha256": "136D5D37B949F270F9ED7BA55627926109FC2CD19B2780A720D76B11485C92F9"
+    }
+  },
+  "native_series": {
+    "M2SL": "USD billions",
+    "M.U2.Y.V.M20.X.1.U2.2300.Z01.E": "EUR millions",
+    "Money & Quasi-money (M2)": "CNY 100 million",
+    "MD02'MAM1NAM2M2MO": "JPY 100 million",
+    "MD02'MAMS1ANM2C": "JPY 100 million (linked historical reference)",
+    "MD02'MAMS3ANM2C": "JPY 100 million (linked historical reference)",
+    "WALCL": "USD millions",
+    "ILM.W.U2.C.T000000.Z5.Z01": "EUR millions",
+    "BS01'MABJMTA": "JPY 100 million",
+    "PBOC_TOTAL_ASSETS": "CNY 100 million"
+  }
+}

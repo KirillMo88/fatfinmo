@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from btc_cycle import merge_btc_mcp_weekly_history
+from btc_cycle import BTC_ARCHIVE_END, BTC_ARCHIVE_START, merge_btc_mcp_weekly_history
 from finance_core import download_completed_ohlcv
 from fund_flows import FundFlowCache, default_fund_flow_cache_path
 
@@ -13,18 +15,44 @@ BTC_SPOT_ETF_FLOW_TICKERS = (
     "IBIT", "FBTC", "GBTC", "ARKB", "BITB", "BTCO", "EZBC", "HODL", "BRRR", "BTCW",
 )
 
+BTC_WEEKLY_ARCHIVE_PATH = Path(__file__).with_name("data") / "btc" / "btc_weekly_tradingview_2009_2025.csv"
+def read_btc_weekly_archive() -> pd.DataFrame:
+    """Read the immutable TradingView BTC weekly history through 2025."""
+    if not BTC_WEEKLY_ARCHIVE_PATH.exists():
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume", "source"])
+    try:
+        frame = pd.read_csv(BTC_WEEKLY_ARCHIVE_PATH)
+    except Exception:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume", "source"])
+    if frame.empty:
+        return frame
+    frame["date"] = pd.to_datetime(frame.get("date"), errors="coerce")
+    for column in ("open", "high", "low", "close", "volume"):
+        frame[column] = pd.to_numeric(frame.get(column), errors="coerce")
+    frame = frame.dropna(subset=["date", "close"])
+    frame = frame.loc[(frame["date"] >= BTC_ARCHIVE_START) & (frame["date"] <= BTC_ARCHIVE_END)]
+    return frame.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
+
 
 @st.cache_data(show_spinner=False, ttl=21600)
 def load_btc_weekly_price() -> pd.DataFrame:
     """Return the canonical BTC weekly history used by BTC Cycle."""
-    daily = download_completed_ohlcv("BTC-USD", period="max")
-    try:
-        from tradingview_mcp import get_ohlcv_data
+    daily = download_completed_ohlcv("BTC-USD", period="max", allow_archive_fallback=False)
+    archive = read_btc_weekly_archive()
+    if archive.empty:
+        # Emergency compatibility path for an installation missing the
+        # bundled archive; normal releases always use the immutable archive.
+        try:
+            from tradingview_mcp import get_ohlcv_data
 
-        tradingview_weekly = get_ohlcv_data("INDEX:BTCUSD", interval="1W", count=5000)
-    except Exception:
-        tradingview_weekly = pd.DataFrame()
-    return merge_btc_mcp_weekly_history(daily, tradingview_weekly)
+            tradingview_weekly = get_ohlcv_data("INDEX:BTCUSD", interval="1W", count=5000)
+        except Exception:
+            tradingview_weekly = pd.DataFrame()
+        return merge_btc_mcp_weekly_history(daily, tradingview_weekly)
+    # The frozen archive is authoritative through 2025-12-31.  Yahoo BTC-USD
+    # is the only live source after that date; do not mix in a newer TradingView
+    # response that could revise the archived history or duplicate live bars.
+    return merge_btc_mcp_weekly_history(daily, pd.DataFrame(), archive_weekly=archive)
 
 
 def load_btc_etf_flow_history() -> pd.DataFrame:

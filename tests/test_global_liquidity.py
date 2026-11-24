@@ -362,6 +362,7 @@ def test_pboc_total_assets_raw_prefers_local_table(monkeypatch, tmp_path):
     monkeypatch.setattr(gl, "tradingview_mcp_pboc_total_assets_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
     monkeypatch.setattr(gl, "tradingview_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
     monkeypatch.setattr(gl, "tradingeconomics_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
+    monkeypatch.setattr(gl, "fxmacrodata_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("network parser should not be called when local table exists")
@@ -389,6 +390,7 @@ def test_pboc_total_assets_raw_uses_tradingview_latest_over_seed(monkeypatch, tm
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_BUNDLED_PATH", tmp_path / "bundled_pboc_total_assets.csv")
     monkeypatch.setattr(gl, "tradingview_mcp_pboc_total_assets_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
     monkeypatch.setattr(gl, "tradingeconomics_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
+    monkeypatch.setattr(gl, "fxmacrodata_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
     monkeypatch.setattr(
         gl,
         "tradingview_pboc_total_assets_latest_raw",
@@ -422,6 +424,7 @@ def test_pboc_total_assets_raw_prefers_valid_mcp(monkeypatch, tmp_path):
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_STORAGE_PATH", tmp_path / "storage_pboc_total_assets.csv")
     monkeypatch.setattr(gl, "PBOC_TOTAL_ASSETS_BUNDLED_PATH", tmp_path / "bundled_pboc_total_assets.csv")
     monkeypatch.setattr(gl, "tradingeconomics_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
+    monkeypatch.setattr(gl, "fxmacrodata_pboc_total_assets_latest_raw", lambda: pd.DataFrame(columns=gl.RAW_COLUMNS))
     monkeypatch.setattr(
         gl,
         "tradingview_mcp_pboc_total_assets_raw",
@@ -473,6 +476,31 @@ def test_tradingeconomics_cncbbs_normalizes_source_scale(monkeypatch):
 
     assert np.isclose(row["raw_value"], 493_694.806)
     assert row["unit"] == "CNY 100 million"
+
+
+def test_fxmacrodata_pboc_total_assets_page_converts_cny_trillion(monkeypatch):
+    response = type(
+        "Response",
+        (),
+        {
+            "text": """
+            <table>
+              <tr><th>Release time</th><th>Reference period</th><th>Actual</th><th>Previous</th></tr>
+              <tr><td>Estimated 2026-10-15 02:00 UTC</td><td>2026-09-30</td><td>50.5</td><td>49.857</td></tr>
+              <tr><td>Estimated 2026-09-15 02:00 UTC</td><td>2026-08-31</td><td>49.857</td><td>50.207</td></tr>
+              <tr><td>Estimated 2025-12-15 02:00 UTC</td><td>2025-11-30</td><td>47.5</td><td>47.0</td></tr>
+            </table>
+            """,
+        },
+    )()
+    monkeypatch.setattr(gl, "get_with_retries", lambda *args, **kwargs: response)
+
+    frame = gl.fxmacrodata_pboc_total_assets_latest_raw()
+
+    assert frame["observation_date"].tolist() == [pd.Timestamp("2026-08-31"), pd.Timestamp("2026-09-30")]
+    assert frame["raw_value"].tolist() == [498570.0, 505000.0]
+    assert set(frame["source"]) == {"FXMACRODATA"}
+    assert set(frame["source_mode"]) == {"FALLBACK_SOURCE"}
 
 
 def test_weekly_fast_cb_layer_uses_fed_and_ecb_only(monkeypatch):
