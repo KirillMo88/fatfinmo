@@ -689,7 +689,7 @@ def render_market_cycle_tab(api_key: str | None = None) -> None:
         )
         st.caption(
             "SPX, the ~41M primary market cycle, the ~80-95M long extension cycle, and actual structural extension are separate layers. "
-            "The lower panel shows the natural log of FRED PPIACO. Trough and peak markers are historical context, not deterministic buy/sell dates."
+            "The lower panel shows the 52-week percentage change in FRED PPIACO. Trough and peak markers are historical context, not deterministic buy/sell dates."
         )
     with cycle_summary_col:
         render_multi_layer_cycle_summary(current)
@@ -1422,11 +1422,11 @@ def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Ti
             "Primary Market Cycle (~41M)",
             "Long Extension Cycle (~80-95M)",
             "Structural Extension",
-            "Log PPI",
+            "52W Change PPIACO",
         ),
     )
     if full.empty:
-        return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension | Log PPI</sup>", 900)
+        return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension | 52W Change PPIACO</sup>", 900)
     full["Date"] = pd.to_datetime(full["Date"], errors="coerce")
     visible = full.loc[full["Date"].between(start, end)].copy()
     if visible.empty:
@@ -1580,17 +1580,20 @@ def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Ti
         visible.get("PPIACO", pd.Series(np.nan, index=visible.index)),
         errors="coerce",
     )
-    log_ppiaco = np.log(ppiaco.where(ppiaco.gt(0)))
+    ppiaco_52w_change = pd.to_numeric(
+        visible.get("PPIACO_52W_Change", pd.Series(np.nan, index=visible.index)),
+        errors="coerce",
+    )
     fig.add_trace(
         go.Scatter(
             x=visible["Date"],
-            y=log_ppiaco,
+            y=ppiaco_52w_change,
             mode="lines",
-            name="Log PPI",
+            name="52W Change PPIACO",
             line={"color": "#22d3ee", "width": 1.9},
             showlegend=False,
             hovertemplate=(
-                "Date: %{x|%Y-%m-%d}<br>Log PPI: %{y:.3f}<br>"
+                "Date: %{x|%Y-%m-%d}<br>52W Change PPIACO: %{y:.2f}%<br>"
                 "PPIACO: %{customdata:.1f}<extra></extra>"
             ),
             customdata=ppiaco,
@@ -1608,9 +1611,9 @@ def build_multi_layer_market_cycles_fig(full_history: pd.DataFrame, start: pd.Ti
     fig.update_yaxes(title_text="Normalized", row=3, col=1)
     fig.update_yaxes(title_text="Extension %", row=4, col=1, secondary_y=False)
     fig.update_yaxes(title_text="Reference 0-100", row=4, col=1, secondary_y=True, range=[0, 105], showgrid=False)
-    fig.update_yaxes(title_text="Log PPI", row=5, col=1)
+    fig.update_yaxes(title_text="52W Change %", row=5, col=1)
     fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikecolor="#94a3b8", spikethickness=1)
-    return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension | Log PPI</sup>", 900)
+    return style_fig(fig, "SPX Multi-Layer Market Cycles<br><sup>SPX | ~41M Primary Cycle | ~80-95M Long Extension Cycle | Structural Extension | 52W Change PPIACO</sup>", 900)
 
 
 def render_multi_layer_cycle_summary(current: dict[str, Any]) -> None:
@@ -3652,6 +3655,11 @@ def monthly_context_frame(history: pd.DataFrame) -> pd.DataFrame:
     frame = history.copy()
     frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
     frame = frame.dropna(subset=["Date"]).sort_values("Date").set_index("Date").resample("ME").last().reset_index()
+    if "PPIACO" in frame:
+        ppiaco = pd.to_numeric(frame["PPIACO"], errors="coerce")
+        # PPIACO is a monthly FRED series; its 52-week change is the
+        # year-over-year change over 12 completed monthly observations.
+        frame["PPIACO_52W_Change"] = ppiaco.pct_change(12, fill_method=None) * 100.0
     needed = [
         "PrimaryCycleComposite",
         "PrimaryMarketCycle",

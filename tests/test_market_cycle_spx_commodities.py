@@ -39,7 +39,7 @@ def test_weekly_market_cycle_aligns_fred_ppiaco_and_calculates_log_ratio(monkeyp
     assert np.isclose(valid["PPIACO_SPX_Log"], np.log(valid["PPIACO"] / valid["SPX_Close"]))
 
 
-def test_multi_layer_figure_places_log_ppiaco_after_structural_extension() -> None:
+def test_multi_layer_figure_places_ppiaco_52w_change_after_structural_extension() -> None:
     figure = build_multi_layer_market_cycles_fig(
         pd.DataFrame(),
         pd.Timestamp("2000-01-01"),
@@ -47,11 +47,11 @@ def test_multi_layer_figure_places_log_ppiaco_after_structural_extension() -> No
     )
     subplot_titles = [annotation.text for annotation in figure.layout.annotations]
 
-    assert subplot_titles[-2:] == ["Structural Extension", "Log PPI"]
+    assert subplot_titles[-2:] == ["Structural Extension", "52W Change PPIACO"]
     assert figure.layout.height == 900
 
 
-def test_multi_layer_figure_plots_only_log_ppiaco_in_fifth_panel() -> None:
+def test_multi_layer_figure_plots_only_ppiaco_52w_change_in_fifth_panel() -> None:
     dates = pd.date_range("2024-01-31", periods=24, freq="ME")
     spx = pd.Series(np.linspace(4_000.0, 6_000.0, len(dates)))
     ppiaco = pd.Series(np.linspace(245.0, 265.0, len(dates)))
@@ -70,8 +70,9 @@ def test_multi_layer_figure_plots_only_log_ppiaco_in_fifth_panel() -> None:
     )
 
     figure = build_multi_layer_market_cycles_fig(history, dates.min(), dates.max())
-    trace = next(item for item in figure.data if item.name == "Log PPI")
+    trace = next(item for item in figure.data if item.name == "52W Change PPIACO")
 
-    np.testing.assert_allclose(np.asarray(trace.y, dtype="float64"), np.log(ppiaco))
+    expected = ppiaco.pct_change(12, fill_method=None) * 100.0
+    np.testing.assert_allclose(np.asarray(trace.y, dtype="float64"), expected, equal_nan=True)
     np.testing.assert_allclose(np.asarray(trace.customdata, dtype="float64"), ppiaco)
     assert trace.yaxis == "y6"
