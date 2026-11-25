@@ -1,0 +1,14 @@
+{
+  "archive": "s5fi_ohlcv_2014_2025.csv",
+  "symbol": "S5FI",
+  "date_start": "2014-10-06",
+  "date_end": "2025-12-31",
+  "rows": 2828,
+  "frequency": "daily",
+  "columns": ["time", "open", "high", "low", "close"],
+  "historical_source": "User-supplied daily OHLC archive",
+  "live_source_start": "2026-01-01",
+  "live_source_primary": "TradingView MCP",
+  "live_source_fallback": "Investing.com",
+  "sha256": "A8515546CA00B2C17F86407ED6B1AF3DEB7C98CAE15B2CBA84E487688B8F8F5C"
+}
