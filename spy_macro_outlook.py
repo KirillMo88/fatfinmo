@@ -16,7 +16,12 @@ from global_macro_tab import (
     _tradingview_economic_series_or_fallback,
     _tradingview_rate_series_or_fallback,
 )
-from hy_oas import combine_hy_oas_sources, weekly_archive_available_frame
+from hy_oas import (
+    combine_hy_oas_sources,
+    frozen_credit_archive_frame,
+    restrict_credit_live_frame,
+    weekly_archive_available_frame,
+)
 
 
 SPY_MACRO_HORIZONS = ("3M", "6M", "9M", "12M")
@@ -105,8 +110,24 @@ def _hy_series(api_key: str | None, end_date: pd.Timestamp) -> pd.Series:
         try:
             raw = pd.read_csv(archive_path, usecols=["time", "close"])
             archive = weekly_archive_available_frame(raw)
+            archive = archive.loc[archive["Date"].lt(pd.Timestamp("2015-01-01"))]
         except Exception:
             archive = pd.DataFrame()
+    frozen = frozen_credit_archive_frame("BAMLH0A0HYM2")
+    if not frozen.empty:
+        archive = pd.concat(
+            [
+                archive,
+                pd.DataFrame(
+                    {
+                        "Date": frozen["Date"],
+                        "HY_OAS": frozen["Value"],
+                        "HYOASSourceFrequency": "WEEKLY_ARCHIVE",
+                    }
+                ),
+            ],
+            ignore_index=True,
+        ).drop_duplicates("Date", keep="last").sort_values("Date")
     fred = _download_fred_macro_series(api_key).get("BAMLH0A0HYM2", pd.Series(dtype="float64"))
     fred_frame = pd.DataFrame(
         {
@@ -115,7 +136,7 @@ def _hy_series(api_key: str | None, end_date: pd.Timestamp) -> pd.Series:
             "HYOASourceFrequency": "DAILY_FRED",
         }
     )
-    combined = combine_hy_oas_sources(archive, pd.DataFrame(), fred_frame, end_date=end_date)
+    combined = combine_hy_oas_sources(archive, pd.DataFrame(), restrict_credit_live_frame(fred_frame), end_date=end_date)
     if combined.empty:
         return pd.Series(dtype="float64")
     return pd.Series(combined["HY_OAS"].to_numpy(), index=pd.to_datetime(combined["Date"]))

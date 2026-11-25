@@ -20,7 +20,12 @@ from finance_core import download_completed_ohlcv
 from fred_client import download_fred_series_batch
 from fund_flows import calculate_fund_flow_history_metrics, load_fund_flow_history
 from global_liquidity import read_global_liquidity
-from hy_oas import combine_hy_oas_sources, weekly_archive_available_frame
+from hy_oas import (
+    combine_hy_oas_sources,
+    frozen_credit_archive_frame,
+    restrict_credit_live_frame,
+    weekly_archive_available_frame,
+)
 from liquidity_forecast import BREADTH_VERSION, FORECAST_VERSION, read_forecast_snapshot
 from rates_financial_conditions import EXPORT_FIELDS as RATES_FC_EXPORT_FIELDS, MODEL_VERSION as RATES_FC_MODEL_VERSION, read_snapshot as read_rates_fc_snapshot, refresh_snapshot as refresh_rates_fc_snapshot
 from funding_conditions import EXPORT_FIELDS as FUNDING_EXPORT_FIELDS, MODEL_VERSION as FUNDING_MODEL_VERSION, read_snapshot as read_funding_snapshot, refresh_snapshot as refresh_funding_snapshot
@@ -415,7 +420,11 @@ def add_export_fred_series(dataset: pd.DataFrame, metadata: list[SeriesMeta], ap
                         "HYOASSourceFrequency": "DAILY_FRED",
                     }
                 )
-                combined = combine_hy_oas_sources(archive, pd.DataFrame(), fred_frame_for_merge)
+                combined = combine_hy_oas_sources(
+                    archive,
+                    pd.DataFrame(),
+                    restrict_credit_live_frame(fred_frame_for_merge),
+                )
                 series = pd.Series(combined["HY_OAS"].to_numpy(), index=combined["Date"])
                 source_label = "Weekly archive + FRED overlay / BAMLH0A0HYM2"
                 original_frequency = "weekly archive + daily FRED"
@@ -445,6 +454,24 @@ def add_export_fred_series(dataset: pd.DataFrame, metadata: list[SeriesMeta], ap
 
 def load_hy_oas_archive_frame() -> pd.DataFrame:
     """Load the long weekly HY OAS archive used when FRED has only recent history."""
+    frozen = frozen_credit_archive_frame("BAMLH0A0HYM2")
+    if not frozen.empty:
+        legacy = pd.DataFrame(columns=["Date", "HY_OAS", "HYOASSourceFrequency"])
+        legacy_path = Path(__file__).resolve().parent / "data" / "BAMLH0A0HYM2_weekly.csv"
+        try:
+            if legacy_path.exists():
+                legacy = weekly_archive_available_frame(pd.read_csv(legacy_path, usecols=["time", "close"]))
+                legacy = legacy.loc[legacy["Date"].lt(pd.Timestamp("2015-01-01"))]
+        except (OSError, ValueError, pd.errors.ParserError):
+            legacy = pd.DataFrame(columns=["Date", "HY_OAS", "HYOASSourceFrequency"])
+        frozen_frame = pd.DataFrame(
+            {
+                "Date": frozen["Date"],
+                "HY_OAS": frozen["Value"],
+                "HYOASSourceFrequency": "WEEKLY_ARCHIVE",
+            }
+        )
+        return pd.concat([legacy, frozen_frame], ignore_index=True).drop_duplicates("Date", keep="last").sort_values("Date")
     candidates = [
         Path(__file__).resolve().parent / "data" / "BAMLH0A0HYM2_weekly.csv",
         Path("data") / "BAMLH0A0HYM2_weekly.csv",

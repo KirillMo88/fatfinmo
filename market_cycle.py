@@ -21,7 +21,12 @@ from broker_margin_leverage import (
 from current_risk import CURRENT_RISK_MODEL_VERSION, calculate_current_risk_v1
 from finance_core import download_completed_ohlcv
 from fred_client import FredApiError, download_fred_series
-from hy_oas import combine_hy_oas_sources, weekly_archive_available_frame
+from hy_oas import (
+    combine_hy_oas_sources,
+    frozen_credit_archive_frame,
+    restrict_credit_live_frame,
+    weekly_archive_available_frame,
+)
 from market_model import calculate_positioning_risk_history, market_model_config
 from positioning import read_processed
 
@@ -34,6 +39,9 @@ MARKET_CYCLE_FRED_SERIES = ("PPIACO", BROKER_MARGIN_LOANS_SERIES, US_EQUITY_MARK
 MARKET_CYCLE_SPX_REFERENCE_PATH = Path(__file__).with_name("data") / "SPCFD_SPX_1W_reference.csv"
 CURRENT_RISK_RAW_TICKERS = {"SPY": "SPY_RAW", "QQQ": "QQQ_RAW"}
 MARKET_CYCLE_TRADINGVIEW_BREADTH = {"S5FI": "SPXAboveSMA50D", "S5TH": "SPXAboveSMA200D"}
+S5FI_ARCHIVE_PATH = Path(__file__).with_name("data") / "breadth" / "s5fi_ohlcv_2014_2025.csv"
+S5FI_ARCHIVE_START = pd.Timestamp("2014-10-06")
+S5FI_ARCHIVE_END = pd.Timestamp("2025-12-31")
 INVESTING_BREADTH_SPECS = {
     "S5FI": {
         "instrument_id": "1225324",
@@ -208,15 +216,17 @@ def load_fred_market_series(series_id: str, end: pd.Timestamp) -> pd.DataFrame:
 
 
 def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
+    archive = load_frozen_breadth_archive(symbol, end)
     frame = load_tradingview_ohlcv_frame(f"INDEX:{symbol}", end)
+    non_archive_frame = _outside_frozen_breadth_window(frame, symbol)
     if (
         not frame.empty
         and len(frame) >= 52
         and pd.to_datetime(frame.index, errors="coerce").max() >= pd.Timestamp(end).normalize() - pd.Timedelta(days=30)
     ):
-        return frame
+        return _merge_breadth_frames(_outside_frozen_breadth_window(frame, symbol), archive)
 
-    history_candidates = [frame] if not frame.empty else []
+    history_candidates = [non_archive_frame] if not non_archive_frame.empty else []
     try:
         from tradingview_mcp import get_economic_data, validate_economic_result
 
@@ -236,15 +246,59 @@ def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFr
                 economic = economic.loc[
                     economic.index <= end, ["Open", "High", "Low", "Close", "Volume"]
                 ].copy()
-                history_candidates.append(economic)
+                history_candidates.append(_outside_frozen_breadth_window(economic, symbol))
                 if valid:
-                    return _merge_breadth_frames(*history_candidates)
+                    return _merge_breadth_frames(*history_candidates, archive)
     except Exception:
         pass
     investing = load_investing_breadth_series(symbol, end)
     if not investing.empty:
-        history_candidates.append(investing)
-    return _merge_breadth_frames(*history_candidates)
+        history_candidates.append(_outside_frozen_breadth_window(investing, symbol))
+    return _merge_breadth_frames(*history_candidates, archive)
+
+
+def load_frozen_breadth_archive(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
+    """Load the immutable daily S5FI OHLC archive through 31 December 2025."""
+    empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    if str(symbol).upper() != "S5FI" or not S5FI_ARCHIVE_PATH.exists():
+        return empty
+    try:
+        raw = pd.read_csv(S5FI_ARCHIVE_PATH)
+        required = {"time", "open", "high", "low", "close"}
+        if not required.issubset(raw.columns):
+            return empty
+        dates = pd.to_datetime(raw["time"], dayfirst=True, errors="coerce").dt.tz_localize(None).dt.normalize()
+        frame = pd.DataFrame(
+            {
+                "Open": pd.to_numeric(raw["open"], errors="coerce").to_numpy(),
+                "High": pd.to_numeric(raw["high"], errors="coerce").to_numpy(),
+                "Low": pd.to_numeric(raw["low"], errors="coerce").to_numpy(),
+                "Close": pd.to_numeric(raw["close"], errors="coerce").to_numpy(),
+                "Volume": np.nan,
+            },
+            index=dates,
+        )
+        frame.index.name = "Date"
+        end_date = min(pd.Timestamp(end).tz_localize(None).normalize(), S5FI_ARCHIVE_END)
+        frame = frame.loc[(frame.index >= S5FI_ARCHIVE_START) & (frame.index <= end_date)]
+        frame = frame.dropna(subset=["Close"]).sort_index()
+        return frame.loc[~frame.index.duplicated(keep="last")]
+    except (OSError, ValueError, pd.errors.ParserError):
+        return empty
+
+
+def _outside_frozen_breadth_window(frame: pd.DataFrame, symbol: str | None = None) -> pd.DataFrame:
+    """Keep legacy pre-archive and live post-archive observations only."""
+    if frame is None or frame.empty:
+        return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    if str(symbol or "").upper() != "S5FI":
+        return frame.copy()
+    result = frame.copy()
+    result.index = pd.to_datetime(result.index, errors="coerce").tz_localize(None).normalize()
+    return result.loc[
+        result.index.notna()
+        & (result.index.lt(S5FI_ARCHIVE_START) | result.index.gt(S5FI_ARCHIVE_END))
+    ]
 
 
 def _merge_breadth_frames(*frames: pd.DataFrame) -> pd.DataFrame:
@@ -875,8 +929,24 @@ def load_hy_oas_daily(end_date: Any) -> pd.DataFrame:
         try:
             raw = pd.read_csv(baseline_path, usecols=["time", "close"])
             baseline = weekly_archive_available_frame(raw)
+            baseline = baseline.loc[baseline["Date"].lt(pd.Timestamp("2015-01-01"))]
         except Exception:
             baseline = pd.DataFrame(columns=["Date", "HY_OAS", "HYOASSourceFrequency"])
+    frozen = frozen_credit_archive_frame("BAMLH0A0HYM2")
+    if not frozen.empty:
+        baseline = pd.concat(
+            [
+                baseline,
+                pd.DataFrame(
+                    {
+                        "Date": frozen["Date"],
+                        "HY_OAS": frozen["Value"],
+                        "HYOASSourceFrequency": "WEEKLY_ARCHIVE",
+                    }
+                ),
+            ],
+            ignore_index=True,
+        ).drop_duplicates("Date", keep="last").sort_values("Date")
 
     tv_frame = load_tradingview_ohlcv_frame(
         "FRED:BAMLH0A0HYM2",
@@ -906,6 +976,8 @@ def load_hy_oas_daily(end_date: Any) -> pd.DataFrame:
         result["HY_OAS"] = pd.to_numeric(result["Value"], errors="coerce")
         result["HYOASSourceFrequency"] = "DAILY_FRED"
         result = result.dropna(subset=["Date", "HY_OAS"])[["Date", "HY_OAS", "HYOASSourceFrequency"]]
+    tradingview = restrict_credit_live_frame(tradingview)
+    result = restrict_credit_live_frame(result)
     return combine_hy_oas_sources(baseline, tradingview, result, end_date=end_date)
 
 

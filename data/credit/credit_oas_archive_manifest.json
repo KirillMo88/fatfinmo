@@ -1,0 +1,15 @@
+{
+  "archive": "credit_oas_weekly_2015_2025.csv",
+  "series": ["BAMLH0A0HYM2", "BAMLC0A0CM"],
+  "date_start": "2015-01-01",
+  "date_end": "2025-12-31",
+  "last_observation": "2025-12-29",
+  "frequency": "weekly",
+  "rows_per_series": 574,
+  "total_rows": 1148,
+  "historical_source": "TradingView MCP weekly snapshot from the VPS runtime archive",
+  "live_source_primary": "FRED",
+  "live_source_start": "2026-01-01",
+  "live_source_fallback": "TradingView MCP, only when FRED has no post-2025 observations",
+  "sha256": "DA0A2A61091360C9C1B0BAD8C315D1C9D410A466C3F6B2A7E39A07DB2F9C80AF"
+}

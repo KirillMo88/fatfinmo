@@ -10,7 +10,12 @@ import pandas as pd
 from finance_core import download_completed_ohlcv
 from fred_client import download_fred_series
 from historical_archive import read_raw_table
-from hy_oas import combine_hy_oas_sources, weekly_archive_available_frame
+from hy_oas import (
+    combine_hy_oas_sources,
+    frozen_credit_archive_frame,
+    restrict_credit_live_frame,
+    weekly_archive_available_frame,
+)
 from qqq_current_risk import build_qqq_weekly_context, calculate_qqq_current_risk_variants
 
 
@@ -114,9 +119,26 @@ def load_hy_oas_history(end: pd.Timestamp | None = None) -> tuple[pd.DataFrame, 
     baseline_path = Path(__file__).with_name("data") / "BAMLH0A0HYM2_weekly.csv"
     if baseline_path.exists():
         try:
-            baseline = weekly_archive_available_frame(pd.read_csv(baseline_path, usecols=["time", "close"]))
+            legacy = weekly_archive_available_frame(pd.read_csv(baseline_path, usecols=["time", "close"]))
+            legacy = legacy.loc[legacy["Date"].lt(pd.Timestamp("2015-01-01"))]
+            baseline = legacy
         except Exception:
             baseline = pd.DataFrame(columns=["Date", "HY_OAS", "HYOASSourceFrequency"])
+    frozen = frozen_credit_archive_frame(HY_OAS_SERIES)
+    if not frozen.empty:
+        baseline = pd.concat(
+            [
+                baseline,
+                pd.DataFrame(
+                    {
+                        "Date": frozen["Date"],
+                        "HY_OAS": frozen["Value"],
+                        "HYOASSourceFrequency": "WEEKLY_ARCHIVE",
+                    }
+                ),
+            ],
+            ignore_index=True,
+        ).drop_duplicates("Date", keep="last").sort_values("Date")
 
     tradingview = pd.DataFrame(columns=["Date", "HY_OAS", "HYOASSourceFrequency"])
     try:
@@ -149,6 +171,8 @@ def load_hy_oas_history(end: pd.Timestamp | None = None) -> tuple[pd.DataFrame, 
             ).dropna(subset=["Date", "HY_OAS"])
     except Exception:
         pass
+    tradingview = restrict_credit_live_frame(tradingview)
+    fred = restrict_credit_live_frame(fred)
     combined = combine_hy_oas_sources(baseline, tradingview, fred, end_date=end)
     if combined.empty:
         return combined, "UNAVAILABLE"

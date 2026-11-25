@@ -146,11 +146,28 @@ def test_credit_weekly_archive_is_available_only_after_week_end(tmp_path, monkey
     monday = pd.date_range("1997-01-06", periods=510, freq="W-MON")
     bars = [{"t": int(date.timestamp()), "c": 3.0} for date in monday]
     monkeypatch.setattr(tradingview_mcp, "call_tool", lambda _tool, _args: {"bars": bars})
+    monkeypatch.setattr(rates_fc, "frozen_credit_archive_frame", lambda: pd.DataFrame(columns=["Series_ID", "Date", "Value"]))
     monkeypatch.setattr(rates_fc, "CREDIT_ARCHIVE", tmp_path / "credit.parquet")
     archive, status = rates_fc._load_credit_archive(refresh=True)
     assert status == "TRADINGVIEW_WEEKLY"
     assert set(archive["Series_ID"]) == {"BAMLH0A0HYM2", "BAMLC0A0CM"}
     assert archive["Date"].min() == monday[0] + pd.Timedelta(days=7)
+
+
+def test_frozen_credit_archive_is_used_for_rates_history(monkeypatch) -> None:
+    frozen = pd.DataFrame(
+        {
+            "Series_ID": ["BAMLH0A0HYM2", "BAMLC0A0CM"],
+            "Date": pd.to_datetime(["2025-12-29", "2025-12-29"]),
+            "Value": [2.86, 0.89],
+        }
+    )
+    monkeypatch.setattr(rates_fc, "frozen_credit_archive_frame", lambda: frozen)
+
+    archive, status = rates_fc._load_credit_archive(refresh=True)
+
+    pd.testing.assert_frame_equal(archive, frozen)
+    assert status == "FROZEN_ARCHIVE_2015_2025"
 
 
 def test_all_rates_charts_render_from_model_history() -> None:

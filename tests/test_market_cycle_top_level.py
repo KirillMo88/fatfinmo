@@ -12,6 +12,7 @@ from market_cycle import (
     forward_max_drawdown,
     forward_max_drawdown_from_low,
     latest_current_risk_signal,
+    load_frozen_breadth_archive,
     overlay_latest_daily_current_risk,
     _merge_breadth_frames,
     _parse_investing_breadth_payload,
@@ -94,6 +95,16 @@ def test_breadth_merge_keeps_archive_and_live_overrides_overlap() -> None:
     assert merged.index.min() == pd.Timestamp("2006-12-01")
     assert merged.index.max() == pd.Timestamp("2026-11-19")
     assert merged.loc[pd.Timestamp("2026-11-18"), "Close"] == 56.26
+
+
+def test_s5fi_daily_archive_is_fixed_through_2025() -> None:
+    frame = load_frozen_breadth_archive("S5FI", pd.Timestamp("2026-11-25"))
+
+    assert len(frame) == 2828
+    assert frame.index.min() == pd.Timestamp("2014-10-06")
+    assert frame.index.max() == pd.Timestamp("2025-12-31")
+    assert frame.loc[pd.Timestamp("2025-12-31"), "Close"] == 55.66
+    assert load_frozen_breadth_archive("S5TH", pd.Timestamp("2026-11-25")).empty
 
 
 def test_forward_drawdown_windows_match_reference_with_missing_bars() -> None:
