@@ -100,6 +100,31 @@ def test_s5fi_daily_loader_ignores_monthly_tradingview_and_keeps_archive(monkeyp
     assert persisted_row["close"] == 59.24
 
 
+def test_s5th_daily_loader_uses_archive_and_persists_investing_tail(monkeypatch, tmp_path) -> None:
+    archive = tmp_path / "s5th.csv"
+    archive.write_text(
+        "time,open,high,low,close\n"
+        "31/12/2025,54,55,53,54\n"
+        "24/11/2026,53,54,52,53\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(market_cycle, "S5TH_ARCHIVE_PATH", archive)
+    monkeypatch.setattr(market_cycle, "S5TH_RUNTIME_ARCHIVE_PATH", tmp_path / "runtime.csv")
+    monkeypatch.setattr(market_cycle, "load_tradingview_ohlcv_frame", lambda *_args: pd.DataFrame())
+    monkeypatch.setattr(
+        market_cycle,
+        "load_investing_breadth_series",
+        lambda *_args: _close_frame(pd.DatetimeIndex(["2026-11-25"]), [55.06]),
+    )
+
+    loaded = load_tradingview_breadth_series("S5TH", pd.Timestamp("2026-11-25"))
+
+    assert loaded.loc[pd.Timestamp("2025-12-31"), "Close"] == 54.0
+    assert loaded.loc[pd.Timestamp("2026-11-25"), "Close"] == 55.06
+    persisted = pd.read_csv(tmp_path / "runtime.csv")
+    assert persisted.iloc[-1]["close"] == 55.06
+
+
 def test_multi_layer_figure_places_ppiaco_52w_change_after_structural_extension() -> None:
     figure = build_multi_layer_market_cycles_fig(
         pd.DataFrame(),
