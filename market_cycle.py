@@ -40,14 +40,21 @@ MARKET_CYCLE_FRED_SERIES = ("PPIACO", BROKER_MARGIN_LOANS_SERIES, US_EQUITY_MARK
 MARKET_CYCLE_SPX_REFERENCE_PATH = Path(__file__).with_name("data") / "SPCFD_SPX_1W_reference.csv"
 CURRENT_RISK_RAW_TICKERS = {"SPY": "SPY_RAW", "QQQ": "QQQ_RAW"}
 MARKET_CYCLE_TRADINGVIEW_BREADTH = {"S5FI": "SPXAboveSMA50D", "S5TH": "SPXAboveSMA200D"}
+BREADTH_ARCHIVED_SYMBOLS = {"S5FI", "S5TH"}
 S5FI_ARCHIVE_PATH = Path(__file__).with_name("data") / "breadth" / "s5fi_ohlcv_archive.csv"
 S5FI_LEGACY_ARCHIVE_PATH = Path(__file__).with_name("data") / "breadth" / "s5fi_ohlcv_2014_2025.csv"
 S5FI_RUNTIME_ARCHIVE_PATH = Path(
     os.environ.get("HISTORICAL_ARCHIVE_DIR", "persistent/historical_archive")
 ) / "s5fi_ohlcv_archive.csv"
+S5TH_ARCHIVE_PATH = Path(__file__).with_name("data") / "breadth" / "s5th_ohlcv_archive.csv"
+S5TH_RUNTIME_ARCHIVE_PATH = Path(
+    os.environ.get("HISTORICAL_ARCHIVE_DIR", "persistent/historical_archive")
+) / "s5th_ohlcv_archive.csv"
 S5FI_ARCHIVE_START = pd.Timestamp("2014-10-06")
+S5TH_ARCHIVE_START = pd.Timestamp("2008-10-28")
 # Retained for the legacy filtering helper; S5FI now uses load_s5fi_daily_series.
 S5FI_ARCHIVE_END = pd.Timestamp("2025-12-31")
+S5TH_ARCHIVE_END = pd.Timestamp("2025-12-31")
 S5FI_LIVE_LOOKBACK_DAYS = 30
 INVESTING_BREADTH_SPECS = {
     "S5FI": {
@@ -223,8 +230,8 @@ def load_fred_market_series(series_id: str, end: pd.Timestamp) -> pd.DataFrame:
 
 
 def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
-    if str(symbol).upper() == "S5FI":
-        return load_s5fi_daily_series(end)
+    if str(symbol).upper() in BREADTH_ARCHIVED_SYMBOLS:
+        return load_archived_daily_breadth_series(symbol, end)
     archive = load_frozen_breadth_archive(symbol, end)
     frame = load_tradingview_ohlcv_frame(f"INDEX:{symbol}", end)
     non_archive_frame = _outside_frozen_breadth_window(frame, symbol)
@@ -266,35 +273,49 @@ def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFr
     return _merge_breadth_frames(*history_candidates, archive)
 
 
-def load_s5fi_daily_series(end: pd.Timestamp) -> pd.DataFrame:
-    """Use the daily archive as baseline and refresh only its recent tail."""
-    archive = load_frozen_breadth_archive("S5FI", end)
+def load_archived_daily_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
+    """Use a daily archive as baseline and refresh only its recent tail."""
+    normalized_symbol = str(symbol).upper()
+    archive = load_frozen_breadth_archive(normalized_symbol, end)
     cutoff = pd.Timestamp(end).tz_localize(None).normalize() - pd.Timedelta(days=S5FI_LIVE_LOOKBACK_DAYS)
     live_candidates: list[pd.DataFrame] = []
 
-    # TradingView's economic endpoint for S5FI is monthly, so it is excluded.
+    # TradingView's economic endpoint for these breadth series is not a
+    # reliable daily source, so it is excluded.
     # A direct daily OHLC response is accepted when available; otherwise the
     # Investing HTML fallback supplies the recent tail.
-    frame = load_tradingview_ohlcv_frame("INDEX:S5FI", end)
+    frame = load_tradingview_ohlcv_frame(f"INDEX:{normalized_symbol}", end)
     if not frame.empty:
         live_candidates.append(frame.loc[frame.index >= cutoff])
-    investing = load_investing_breadth_series("S5FI", end)
+    investing = load_investing_breadth_series(normalized_symbol, end)
     if not investing.empty:
         live_candidates.append(investing.loc[investing.index >= cutoff])
 
     live = _merge_breadth_frames(*live_candidates)
     if not live.empty:
-        _persist_s5fi_archive_rows(live)
+        _persist_breadth_archive_rows(normalized_symbol, live)
     return _merge_breadth_frames(archive, live)
 
 
+def load_s5fi_daily_series(end: pd.Timestamp) -> pd.DataFrame:
+    """Backward-compatible wrapper for the archived S5FI loader."""
+    return load_archived_daily_breadth_series("S5FI", end)
+
+
 def load_frozen_breadth_archive(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
-    """Load the static and persistent daily S5FI OHLC archives."""
+    """Load a static and persistent daily breadth archive."""
     empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-    if str(symbol).upper() != "S5FI":
+    normalized_symbol = str(symbol).upper()
+    if normalized_symbol not in BREADTH_ARCHIVED_SYMBOLS:
         return empty
+    if normalized_symbol == "S5FI":
+        paths = (S5FI_ARCHIVE_PATH, S5FI_LEGACY_ARCHIVE_PATH, S5FI_RUNTIME_ARCHIVE_PATH)
+        archive_start = S5FI_ARCHIVE_START
+    else:
+        paths = (S5TH_ARCHIVE_PATH, S5TH_RUNTIME_ARCHIVE_PATH)
+        archive_start = S5TH_ARCHIVE_START
     frames: list[pd.DataFrame] = []
-    for path in (S5FI_ARCHIVE_PATH, S5FI_LEGACY_ARCHIVE_PATH, S5FI_RUNTIME_ARCHIVE_PATH):
+    for path in paths:
         if not path.exists():
             continue
         try:
@@ -321,15 +342,22 @@ def load_frozen_breadth_archive(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
         return empty
     end_date = pd.Timestamp(end).tz_localize(None).normalize()
     merged = _merge_breadth_frames(*frames)
-    return merged.loc[(merged.index >= S5FI_ARCHIVE_START) & (merged.index <= end_date)]
+    return merged.loc[(merged.index >= archive_start) & (merged.index <= end_date)]
 
 
-def _persist_s5fi_archive_rows(frame: pd.DataFrame) -> None:
-    """Persist newly observed daily S5FI rows in the writable archive volume."""
+def _persist_breadth_archive_rows(symbol: str, frame: pd.DataFrame) -> None:
+    """Persist newly observed daily breadth rows in the writable archive volume."""
     if frame is None or frame.empty:
         return
+    normalized_symbol = str(symbol).upper()
+    if normalized_symbol == "S5FI":
+        runtime_path = S5FI_RUNTIME_ARCHIVE_PATH
+    elif normalized_symbol == "S5TH":
+        runtime_path = S5TH_RUNTIME_ARCHIVE_PATH
+    else:
+        return
     try:
-        existing = load_frozen_breadth_archive("S5FI", pd.Timestamp.max)
+        existing = load_frozen_breadth_archive(normalized_symbol, pd.Timestamp.max)
         merged = _merge_breadth_frames(existing, frame)
         if merged.empty:
             return
@@ -338,25 +366,33 @@ def _persist_s5fi_archive_rows(frame: pd.DataFrame) -> None:
         output["time"] = pd.to_datetime(output["time"], errors="coerce").dt.strftime("%d/%m/%Y")
         output = output[["time", "Open", "High", "Low", "Close"]]
         output.columns = ["time", "open", "high", "low", "close"]
-        S5FI_RUNTIME_ARCHIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temporary = S5FI_RUNTIME_ARCHIVE_PATH.with_suffix(".tmp")
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = runtime_path.with_suffix(".tmp")
         output.to_csv(temporary, index=False)
-        os.replace(temporary, S5FI_RUNTIME_ARCHIVE_PATH)
+        os.replace(temporary, runtime_path)
     except (OSError, ValueError, pd.errors.ParserError):
         return
+
+
+def _persist_s5fi_archive_rows(frame: pd.DataFrame) -> None:
+    """Backward-compatible wrapper for the S5FI archive writer."""
+    _persist_breadth_archive_rows("S5FI", frame)
 
 
 def _outside_frozen_breadth_window(frame: pd.DataFrame, symbol: str | None = None) -> pd.DataFrame:
     """Keep legacy pre-archive and live post-archive observations only."""
     if frame is None or frame.empty:
         return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
-    if str(symbol or "").upper() != "S5FI":
+    normalized_symbol = str(symbol or "").upper()
+    if normalized_symbol not in BREADTH_ARCHIVED_SYMBOLS:
         return frame.copy()
     result = frame.copy()
     result.index = pd.to_datetime(result.index, errors="coerce").tz_localize(None).normalize()
+    archive_start = S5FI_ARCHIVE_START if normalized_symbol == "S5FI" else S5TH_ARCHIVE_START
+    archive_end = S5FI_ARCHIVE_END if normalized_symbol == "S5FI" else S5TH_ARCHIVE_END
     return result.loc[
         result.index.notna()
-        & ((result.index < S5FI_ARCHIVE_START) | (result.index > S5FI_ARCHIVE_END))
+        & ((result.index < archive_start) | (result.index > archive_end))
     ]
 
 
@@ -475,10 +511,10 @@ def load_investing_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFram
             page_frame = _parse_investing_breadth_page(page.text)
             api_url = f"https://api.investing.com/api/financialdata/historical/{spec['instrument_id']}"
             api_frame = empty
-            # S5FI is deliberately HTML-only: its fixed archive supplies all
-            # older rows and the page table supplies only the recent 30-day
-            # tail. Keep the API path for S5TH compatibility.
-            if str(symbol).upper() != "S5FI":
+            # Archived breadth symbols are deliberately HTML-only: their
+            # fixed archives supply older rows and the page table supplies
+            # only the recent 30-day tail.
+            if str(symbol).upper() not in BREADTH_ARCHIVED_SYMBOLS:
                 try:
                     response = client.get(
                         api_url,
