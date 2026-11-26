@@ -94,6 +94,10 @@ def test_s5fi_daily_loader_ignores_monthly_tradingview_and_keeps_archive(monkeyp
 
     assert loaded.loc[pd.Timestamp("2026-09-30"), "Close"] == 28.0
     assert loaded.loc[pd.Timestamp("2026-11-25"), "Close"] == 59.24
+    persisted = pd.read_csv(tmp_path / "runtime.csv")
+    persisted["time"] = pd.to_datetime(persisted["time"], dayfirst=True)
+    persisted_row = persisted.loc[persisted["time"] == pd.Timestamp("2026-11-25")].iloc[-1]
+    assert persisted_row["close"] == 59.24
 
 
 def test_multi_layer_figure_places_ppiaco_52w_change_after_structural_extension() -> None:
