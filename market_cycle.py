@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -39,9 +40,15 @@ MARKET_CYCLE_FRED_SERIES = ("PPIACO", BROKER_MARGIN_LOANS_SERIES, US_EQUITY_MARK
 MARKET_CYCLE_SPX_REFERENCE_PATH = Path(__file__).with_name("data") / "SPCFD_SPX_1W_reference.csv"
 CURRENT_RISK_RAW_TICKERS = {"SPY": "SPY_RAW", "QQQ": "QQQ_RAW"}
 MARKET_CYCLE_TRADINGVIEW_BREADTH = {"S5FI": "SPXAboveSMA50D", "S5TH": "SPXAboveSMA200D"}
-S5FI_ARCHIVE_PATH = Path(__file__).with_name("data") / "breadth" / "s5fi_ohlcv_2014_2025.csv"
+S5FI_ARCHIVE_PATH = Path(__file__).with_name("data") / "breadth" / "s5fi_ohlcv_archive.csv"
+S5FI_LEGACY_ARCHIVE_PATH = Path(__file__).with_name("data") / "breadth" / "s5fi_ohlcv_2014_2025.csv"
+S5FI_RUNTIME_ARCHIVE_PATH = Path(
+    os.environ.get("HISTORICAL_ARCHIVE_DIR", "persistent/historical_archive")
+) / "s5fi_ohlcv_archive.csv"
 S5FI_ARCHIVE_START = pd.Timestamp("2014-10-06")
+# Retained for the legacy filtering helper; S5FI now uses load_s5fi_daily_series.
 S5FI_ARCHIVE_END = pd.Timestamp("2025-12-31")
+S5FI_LIVE_LOOKBACK_DAYS = 30
 INVESTING_BREADTH_SPECS = {
     "S5FI": {
         "instrument_id": "1225324",
@@ -52,9 +59,9 @@ INVESTING_BREADTH_SPECS = {
         "page_url": "https://www.investing.com/indices/sp-500-stocks-above-200-day-average-historical-data",
     },
 }
-# Five years is comfortably below Investing's 4,999-row cap for daily bars
-# and still exceeds the breadth-risk model's historical lookback needs.
-INVESTING_BREADTH_HISTORY_YEARS = 5
+# Investing's HTML fallback is used only for the recent tail. Older rows come
+# from the fixed and persistent daily archives.
+INVESTING_BREADTH_HISTORY_DAYS = 30
 FORWARD_HORIZONS = {"3M": 13, "6M": 26, "12M": 52}
 ANALOG_FEATURE_WEIGHTS = {
     "StructuralSimilarity": 0.15,
@@ -216,6 +223,8 @@ def load_fred_market_series(series_id: str, end: pd.Timestamp) -> pd.DataFrame:
 
 
 def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
+    if str(symbol).upper() == "S5FI":
+        return load_s5fi_daily_series(end)
     archive = load_frozen_breadth_archive(symbol, end)
     frame = load_tradingview_ohlcv_frame(f"INDEX:{symbol}", end)
     non_archive_frame = _outside_frozen_breadth_window(frame, symbol)
@@ -257,34 +266,84 @@ def load_tradingview_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFr
     return _merge_breadth_frames(*history_candidates, archive)
 
 
+def load_s5fi_daily_series(end: pd.Timestamp) -> pd.DataFrame:
+    """Use the daily archive as baseline and refresh only its recent tail."""
+    archive = load_frozen_breadth_archive("S5FI", end)
+    cutoff = pd.Timestamp(end).tz_localize(None).normalize() - pd.Timedelta(days=S5FI_LIVE_LOOKBACK_DAYS)
+    live_candidates: list[pd.DataFrame] = []
+
+    # TradingView's economic endpoint for S5FI is monthly, so it is excluded.
+    # A direct daily OHLC response is accepted when available; otherwise the
+    # Investing HTML fallback supplies the recent tail.
+    frame = load_tradingview_ohlcv_frame("INDEX:S5FI", end)
+    if not frame.empty:
+        live_candidates.append(frame.loc[frame.index >= cutoff])
+    investing = load_investing_breadth_series("S5FI", end)
+    if not investing.empty:
+        live_candidates.append(investing.loc[investing.index >= cutoff])
+
+    live = _merge_breadth_frames(*live_candidates)
+    if not live.empty:
+        _persist_s5fi_archive_rows(live)
+    return _merge_breadth_frames(archive, live)
+
+
 def load_frozen_breadth_archive(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
-    """Load the immutable daily S5FI OHLC archive through 31 December 2025."""
+    """Load the static and persistent daily S5FI OHLC archives."""
     empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-    if str(symbol).upper() != "S5FI" or not S5FI_ARCHIVE_PATH.exists():
+    if str(symbol).upper() != "S5FI":
         return empty
+    frames: list[pd.DataFrame] = []
+    for path in (S5FI_ARCHIVE_PATH, S5FI_LEGACY_ARCHIVE_PATH, S5FI_RUNTIME_ARCHIVE_PATH):
+        if not path.exists():
+            continue
+        try:
+            raw = pd.read_csv(path)
+            required = {"time", "open", "high", "low", "close"}
+            if not required.issubset(raw.columns):
+                continue
+            dates = pd.to_datetime(raw["time"], dayfirst=True, errors="coerce").dt.tz_localize(None).dt.normalize()
+            frame = pd.DataFrame(
+                {
+                    "Open": pd.to_numeric(raw["open"], errors="coerce").to_numpy(),
+                    "High": pd.to_numeric(raw["high"], errors="coerce").to_numpy(),
+                    "Low": pd.to_numeric(raw["low"], errors="coerce").to_numpy(),
+                    "Close": pd.to_numeric(raw["close"], errors="coerce").to_numpy(),
+                    "Volume": np.nan,
+                },
+                index=dates,
+            )
+            frame.index.name = "Date"
+            frames.append(frame)
+        except (OSError, ValueError, pd.errors.ParserError):
+            continue
+    if not frames:
+        return empty
+    end_date = pd.Timestamp(end).tz_localize(None).normalize()
+    merged = _merge_breadth_frames(*frames)
+    return merged.loc[(merged.index >= S5FI_ARCHIVE_START) & (merged.index <= end_date)]
+
+
+def _persist_s5fi_archive_rows(frame: pd.DataFrame) -> None:
+    """Persist newly observed daily S5FI rows in the writable archive volume."""
+    if frame is None or frame.empty:
+        return
     try:
-        raw = pd.read_csv(S5FI_ARCHIVE_PATH)
-        required = {"time", "open", "high", "low", "close"}
-        if not required.issubset(raw.columns):
-            return empty
-        dates = pd.to_datetime(raw["time"], dayfirst=True, errors="coerce").dt.tz_localize(None).dt.normalize()
-        frame = pd.DataFrame(
-            {
-                "Open": pd.to_numeric(raw["open"], errors="coerce").to_numpy(),
-                "High": pd.to_numeric(raw["high"], errors="coerce").to_numpy(),
-                "Low": pd.to_numeric(raw["low"], errors="coerce").to_numpy(),
-                "Close": pd.to_numeric(raw["close"], errors="coerce").to_numpy(),
-                "Volume": np.nan,
-            },
-            index=dates,
-        )
-        frame.index.name = "Date"
-        end_date = min(pd.Timestamp(end).tz_localize(None).normalize(), S5FI_ARCHIVE_END)
-        frame = frame.loc[(frame.index >= S5FI_ARCHIVE_START) & (frame.index <= end_date)]
-        frame = frame.dropna(subset=["Close"]).sort_index()
-        return frame.loc[~frame.index.duplicated(keep="last")]
+        existing = load_frozen_breadth_archive("S5FI", pd.Timestamp.max)
+        merged = _merge_breadth_frames(existing, frame)
+        if merged.empty:
+            return
+        merged.index.name = "Date"
+        output = merged.reset_index().rename(columns={"Date": "time"})
+        output["time"] = pd.to_datetime(output["time"], errors="coerce").dt.strftime("%d/%m/%Y")
+        output = output[["time", "Open", "High", "Low", "Close"]]
+        output.columns = ["time", "open", "high", "low", "close"]
+        S5FI_RUNTIME_ARCHIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = S5FI_RUNTIME_ARCHIVE_PATH.with_suffix(".tmp")
+        output.to_csv(temporary, index=False)
+        os.replace(temporary, S5FI_RUNTIME_ARCHIVE_PATH)
     except (OSError, ValueError, pd.errors.ParserError):
-        return empty
+        return
 
 
 def _outside_frozen_breadth_window(frame: pd.DataFrame, symbol: str | None = None) -> pd.DataFrame:
@@ -416,33 +475,33 @@ def load_investing_breadth_series(symbol: str, end: pd.Timestamp) -> pd.DataFram
             page_frame = _parse_investing_breadth_page(page.text)
             api_url = f"https://api.investing.com/api/financialdata/historical/{spec['instrument_id']}"
             api_frame = empty
-            try:
-                response = client.get(
-                    api_url,
-                    params={
-                        # Investing caps this endpoint at 4,999 rows. A fixed
-                        # 1990 start therefore returned the oldest rows and
-                        # silently omitted the current observations. Keep a
-                        # rolling window so the latest daily bar is retained.
-                        "start-date": (
-                            pd.Timestamp(end).normalize() - pd.DateOffset(years=INVESTING_BREADTH_HISTORY_YEARS)
-                        ).date().isoformat(),
-                        "end-date": pd.Timestamp(end).date().isoformat(),
-                        "interval": "P1D",
-                        "time-frame": "Daily",
-                    },
-                    headers={
-                        **headers,
-                        "Accept": "application/json, text/plain, */*",
-                        "Origin": "https://www.investing.com",
-                        "Referer": page_url,
-                        "domain-id": "www",
-                    },
-                )
-                response.raise_for_status()
-                api_frame = _parse_investing_breadth_payload(response.json())
-            except Exception:
-                pass
+            # S5FI is deliberately HTML-only: its fixed archive supplies all
+            # older rows and the page table supplies only the recent 30-day
+            # tail. Keep the API path for S5TH compatibility.
+            if str(symbol).upper() != "S5FI":
+                try:
+                    response = client.get(
+                        api_url,
+                        params={
+                            "start-date": (
+                                pd.Timestamp(end).normalize() - pd.Timedelta(days=INVESTING_BREADTH_HISTORY_DAYS)
+                            ).date().isoformat(),
+                            "end-date": pd.Timestamp(end).date().isoformat(),
+                            "interval": "P1D",
+                            "time-frame": "Daily",
+                        },
+                        headers={
+                            **headers,
+                            "Accept": "application/json, text/plain, */*",
+                            "Origin": "https://www.investing.com",
+                            "Referer": page_url,
+                            "domain-id": "www",
+                        },
+                    )
+                    response.raise_for_status()
+                    api_frame = _parse_investing_breadth_payload(response.json())
+                except Exception:
+                    pass
             frame = _merge_breadth_frames(page_frame, api_frame)
         if frame.empty or len(frame) < 5:
             return empty
@@ -569,7 +628,10 @@ def build_daily_frame(raw: dict[str, pd.DataFrame], end: pd.Timestamp) -> pd.Dat
         series = pd.to_numeric(raw.get(symbol, pd.DataFrame()).get("Close", pd.Series(dtype="float64")), errors="coerce")
         aligned = series.reindex(d.index)
         d[f"{col}_Observed"] = aligned.notna()
-        d[col] = aligned.ffill().clip(lower=0.0, upper=100.0)
+        # S5FI is maintained as a daily archive/live tail.  Do not carry an
+        # old breadth observation across missing dates: that would recreate
+        # the false monthly step pattern this archive is meant to remove.
+        d[col] = (aligned if symbol == "S5FI" else aligned.ffill()).clip(lower=0.0, upper=100.0)
     d = d.loc[d.index <= end].copy()
     returns = d["SPX_Close"].pct_change(fill_method=None)
     d["SPX_RealizedVol20D"] = returns.rolling(20, min_periods=15).std() * np.sqrt(252.0)

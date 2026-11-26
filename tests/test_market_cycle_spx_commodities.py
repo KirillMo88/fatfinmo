@@ -8,6 +8,8 @@ from market_cycle import (
     _outside_frozen_breadth_window,
     build_weekly_frame,
     calculate_log_ppiaco_spx,
+    load_frozen_breadth_archive,
+    load_tradingview_breadth_series,
 )
 from market_cycle_tab import build_multi_layer_market_cycles_fig
 
@@ -50,6 +52,52 @@ def test_frozen_breadth_window_filters_datetime_index_with_comparisons() -> None
     result = _outside_frozen_breadth_window(frame, "S5FI")
 
     assert result.index.tolist() == [pd.Timestamp("2026-01-02")]
+
+
+def test_s5fi_archive_includes_supplied_2026_daily_rows(monkeypatch, tmp_path) -> None:
+    archive = tmp_path / "s5fi.csv"
+    archive.write_text(
+        "time,open,high,low,close\n"
+        "31/12/2025,60,61,59,60\n"
+        "02/01/2026,61,62,60,61\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(market_cycle, "S5FI_ARCHIVE_PATH", archive)
+    monkeypatch.setattr(market_cycle, "S5FI_LEGACY_ARCHIVE_PATH", tmp_path / "missing.csv")
+    monkeypatch.setattr(market_cycle, "S5FI_RUNTIME_ARCHIVE_PATH", tmp_path / "runtime.csv")
+
+    loaded = load_frozen_breadth_archive("S5FI", pd.Timestamp("2026-01-02"))
+
+    assert loaded.index.tolist() == [pd.Timestamp("2025-12-31"), pd.Timestamp("2026-01-02")]
+    assert loaded.loc[pd.Timestamp("2026-01-02"), "Close"] == 61.0
+
+
+def test_s5fi_daily_loader_ignores_monthly_tradingview_and_keeps_archive(monkeypatch, tmp_path) -> None:
+    archive = tmp_path / "s5fi.csv"
+    archive.write_text(
+        "time,open,high,low,close\n"
+        "30/09/2026,28,29,27,28\n"
+        "26/10/2026,59,60,58,59\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(market_cycle, "S5FI_ARCHIVE_PATH", archive)
+    monkeypatch.setattr(market_cycle, "S5FI_LEGACY_ARCHIVE_PATH", tmp_path / "missing.csv")
+    monkeypatch.setattr(market_cycle, "S5FI_RUNTIME_ARCHIVE_PATH", tmp_path / "runtime.csv")
+    monkeypatch.setattr(market_cycle, "load_tradingview_ohlcv_frame", lambda *_args: pd.DataFrame())
+    monkeypatch.setattr(
+        market_cycle,
+        "load_investing_breadth_series",
+        lambda *_args: _close_frame(pd.DatetimeIndex(["2026-11-25"]), [59.24]),
+    )
+
+    loaded = load_tradingview_breadth_series("S5FI", pd.Timestamp("2026-11-25"))
+
+    assert loaded.loc[pd.Timestamp("2026-09-30"), "Close"] == 28.0
+    assert loaded.loc[pd.Timestamp("2026-11-25"), "Close"] == 59.24
+    persisted = pd.read_csv(tmp_path / "runtime.csv")
+    persisted["time"] = pd.to_datetime(persisted["time"], dayfirst=True)
+    persisted_row = persisted.loc[persisted["time"] == pd.Timestamp("2026-11-25")].iloc[-1]
+    assert persisted_row["close"] == 59.24
 
 
 def test_multi_layer_figure_places_ppiaco_52w_change_after_structural_extension() -> None:
