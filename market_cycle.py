@@ -297,7 +297,7 @@ def _outside_frozen_breadth_window(frame: pd.DataFrame, symbol: str | None = Non
     result.index = pd.to_datetime(result.index, errors="coerce").tz_localize(None).normalize()
     return result.loc[
         result.index.notna()
-        & (result.index.lt(S5FI_ARCHIVE_START) | result.index.gt(S5FI_ARCHIVE_END))
+        & ((result.index < S5FI_ARCHIVE_START) | (result.index > S5FI_ARCHIVE_END))
     ]
 
 

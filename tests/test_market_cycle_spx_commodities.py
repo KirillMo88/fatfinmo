@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 
 import market_cycle
-from market_cycle import build_weekly_frame, calculate_log_ppiaco_spx
+from market_cycle import (
+    _outside_frozen_breadth_window,
+    build_weekly_frame,
+    calculate_log_ppiaco_spx,
+)
 from market_cycle_tab import build_multi_layer_market_cycles_fig
 
 
@@ -37,6 +41,15 @@ def test_weekly_market_cycle_aligns_fred_ppiaco_and_calculates_log_ratio(monkeyp
     assert weekly["PPIACO"].notna().any()
     valid = weekly.dropna(subset=["PPIACO_SPX_Log"]).iloc[-1]
     assert np.isclose(valid["PPIACO_SPX_Log"], np.log(valid["PPIACO"] / valid["SPX_Close"]))
+
+
+def test_frozen_breadth_window_filters_datetime_index_with_comparisons() -> None:
+    dates = pd.DatetimeIndex(["2014-10-06", "2025-12-31", "2026-01-02"])
+    frame = _close_frame(dates, [50.0, 60.0, 61.0])
+
+    result = _outside_frozen_breadth_window(frame, "S5FI")
+
+    assert result.index.tolist() == [pd.Timestamp("2026-01-02")]
 
 
 def test_multi_layer_figure_places_ppiaco_52w_change_after_structural_extension() -> None:
